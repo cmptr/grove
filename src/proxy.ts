@@ -3,7 +3,8 @@
  * Grove Phase 0 — Auth proxy for QMD MCP server.
  *
  * Sits in front of QMD's MCP HTTP server (localhost:8181) and validates
- * bearer tokens before forwarding requests.
+ * bearer tokens before forwarding requests. Implements a minimal OAuth 2.0
+ * flow so Claude.ai can connect as a custom connector.
  *
  * Usage:
  *   GROVE_PORT=8420 npx tsx src/proxy.ts
@@ -15,8 +16,8 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
-import { createHash } from "node:crypto";
-import { appendFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { appendFileSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { loadKeys, type StoredKey } from "./keys.js";
@@ -24,6 +25,7 @@ import { loadKeys, type StoredKey } from "./keys.js";
 const QMD_PORT = Number(process.env.QMD_PORT ?? 8181);
 const PROXY_PORT = Number(process.env.GROVE_PORT ?? 8420);
 const LOG_PATH = join(homedir(), ".grove", "proxy.log");
+const GROVE_URL = process.env.GROVE_URL ?? "https://grove.mili.dev";
 
 let keys: StoredKey[] = [];
 
@@ -49,6 +51,231 @@ function log(keyName: string | null, method: string, url: string, status: number
   } catch {}
 }
 
+// ── OAuth 2.0 minimal implementation ──
+// Claude.ai requires OAuth for custom connectors. This implements
+// the bare minimum: authorization code flow with auto-approve.
+// The "authorization" just shows a page where you paste your API key.
+
+interface OAuthClient {
+  client_id: string;
+  client_secret: string;
+  redirect_uris: string[];
+  registered_at: string;
+}
+
+interface AuthCode {
+  code: string;
+  client_id: string;
+  redirect_uri: string;
+  api_key: string; // the grove API key the user entered
+  expires_at: number;
+}
+
+const CLIENTS_PATH = join(homedir(), ".grove", "oauth-clients.json");
+const CODES_PATH = join(homedir(), ".grove", "oauth-codes.json");
+
+function loadJson<T>(path: string): T[] {
+  if (!existsSync(path)) return [];
+  try { return JSON.parse(readFileSync(path, "utf-8")); } catch { return []; }
+}
+
+function saveJson(path: string, data: unknown) {
+  writeFileSync(path, JSON.stringify(data, null, 2), { mode: 0o600 });
+}
+
+function handleOAuth(req: IncomingMessage, res: ServerResponse, url: URL): boolean {
+  const path = url.pathname;
+
+  // OAuth server metadata (RFC 8414)
+  if (path === "/.well-known/oauth-authorization-server") {
+    sendJson(res, 200, {
+      issuer: GROVE_URL,
+      authorization_endpoint: `${GROVE_URL}/oauth/authorize`,
+      token_endpoint: `${GROVE_URL}/oauth/token`,
+      registration_endpoint: `${GROVE_URL}/oauth/register`,
+      response_types_supported: ["code"],
+      grant_types_supported: ["authorization_code"],
+      code_challenge_methods_supported: ["S256"],
+      token_endpoint_auth_methods_supported: ["client_secret_post"],
+    });
+    return true;
+  }
+
+  // Dynamic Client Registration (RFC 7591)
+  if (path === "/oauth/register" && req.method === "POST") {
+    readBody(req).then((body) => {
+      const data = JSON.parse(body);
+      const client: OAuthClient = {
+        client_id: "grove_client_" + randomBytes(16).toString("hex"),
+        client_secret: "grove_secret_" + randomBytes(32).toString("hex"),
+        redirect_uris: data.redirect_uris || [],
+        registered_at: new Date().toISOString(),
+      };
+      const clients = loadJson<OAuthClient>(CLIENTS_PATH);
+      clients.push(client);
+      saveJson(CLIENTS_PATH, clients);
+      console.log(`OAuth client registered: ${client.client_id}`);
+      sendJson(res, 201, {
+        client_id: client.client_id,
+        client_secret: client.client_secret,
+        redirect_uris: client.redirect_uris,
+        grant_types: ["authorization_code"],
+        response_types: ["code"],
+        token_endpoint_auth_method: "client_secret_post",
+      });
+    }).catch(() => sendJson(res, 400, { error: "invalid_request" }));
+    return true;
+  }
+
+  // Authorization endpoint — shows a simple page to paste your API key
+  if (path === "/oauth/authorize" && req.method === "GET") {
+    const clientId = url.searchParams.get("client_id") ?? "";
+    const redirectUri = url.searchParams.get("redirect_uri") ?? "";
+    const state = url.searchParams.get("state") ?? "";
+    const codeChallenge = url.searchParams.get("code_challenge") ?? "";
+    const codeChallengeMethod = url.searchParams.get("code_challenge_method") ?? "";
+
+    const html = `<!DOCTYPE html>
+<html><head><title>Grove — Authorize</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; max-width: 420px; margin: 60px auto; padding: 0 20px; background: #0a0a0a; color: #e0e0e0; }
+  h1 { font-size: 24px; margin-bottom: 8px; }
+  p { color: #888; font-size: 14px; line-height: 1.5; }
+  input[type=password] { width: 100%; padding: 12px; font-size: 14px; font-family: monospace; border: 1px solid #333; border-radius: 8px; background: #1a1a1a; color: #e0e0e0; box-sizing: border-box; margin: 8px 0; }
+  button { width: 100%; padding: 12px; font-size: 16px; background: #2d5a27; color: white; border: none; border-radius: 8px; cursor: pointer; margin-top: 8px; }
+  button:hover { background: #3a7233; }
+  .grove { color: #4a9; }
+</style></head>
+<body>
+  <h1><span class="grove">Grove</span> — Authorize</h1>
+  <p>Paste your Grove API key to connect Claude to your vault.</p>
+  <form method="POST" action="/oauth/authorize">
+    <input type="hidden" name="client_id" value="${clientId}">
+    <input type="hidden" name="redirect_uri" value="${redirectUri}">
+    <input type="hidden" name="state" value="${state}">
+    <input type="hidden" name="code_challenge" value="${codeChallenge}">
+    <input type="hidden" name="code_challenge_method" value="${codeChallengeMethod}">
+    <input type="password" name="api_key" placeholder="grove_live_..." required autofocus>
+    <button type="submit">Connect</button>
+  </form>
+</body></html>`;
+    res.writeHead(200, { "Content-Type": "text/html" });
+    res.end(html);
+    return true;
+  }
+
+  // Authorization endpoint — POST (form submit)
+  if (path === "/oauth/authorize" && req.method === "POST") {
+    readBody(req).then((body) => {
+      const params = new URLSearchParams(body);
+      const apiKey = params.get("api_key") ?? "";
+      const clientId = params.get("client_id") ?? "";
+      const redirectUri = params.get("redirect_uri") ?? "";
+      const state = params.get("state") ?? "";
+      const codeChallenge = params.get("code_challenge") ?? "";
+      const codeChallengeMethod = params.get("code_challenge_method") ?? "";
+
+      // Validate the API key
+      const key = validateToken(apiKey);
+      if (!key) {
+        res.writeHead(200, { "Content-Type": "text/html" });
+        res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;max-width:420px;margin:60px auto;padding:0 20px;background:#0a0a0a;color:#e0e0e0;">
+          <h1 style="color:#c44;">Invalid API key</h1><p>That key wasn't recognized. <a href="javascript:history.back()" style="color:#4a9;">Try again</a></p></body></html>`);
+        return;
+      }
+
+      // Generate auth code
+      const code: AuthCode = {
+        code: randomBytes(32).toString("hex"),
+        client_id: clientId,
+        redirect_uri: redirectUri,
+        api_key: apiKey,
+        expires_at: Date.now() + 5 * 60 * 1000, // 5 min
+      };
+
+      // Store code_challenge for PKCE
+      (code as any).code_challenge = codeChallenge;
+      (code as any).code_challenge_method = codeChallengeMethod;
+
+      const codes = loadJson<AuthCode>(CODES_PATH);
+      codes.push(code);
+      saveJson(CODES_PATH, codes);
+
+      console.log(`OAuth code issued for key: ${key.name}`);
+
+      // Redirect back to Claude
+      const redirect = new URL(redirectUri);
+      redirect.searchParams.set("code", code.code);
+      if (state) redirect.searchParams.set("state", state);
+      res.writeHead(302, { Location: redirect.toString() });
+      res.end();
+    }).catch(() => sendJson(res, 400, { error: "invalid_request" }));
+    return true;
+  }
+
+  // Token endpoint — exchange code for access token
+  if (path === "/oauth/token" && req.method === "POST") {
+    readBody(req).then((body) => {
+      const params = new URLSearchParams(body);
+      const grantType = params.get("grant_type");
+      const code = params.get("code") ?? "";
+      const codeVerifier = params.get("code_verifier") ?? "";
+
+      if (grantType !== "authorization_code") {
+        sendJson(res, 400, { error: "unsupported_grant_type" });
+        return;
+      }
+
+      const codes = loadJson<AuthCode>(CODES_PATH);
+      const idx = codes.findIndex((c) => c.code === code);
+      if (idx === -1) {
+        sendJson(res, 400, { error: "invalid_grant", error_description: "Code not found" });
+        return;
+      }
+
+      const authCode = codes[idx] as AuthCode & { code_challenge?: string; code_challenge_method?: string };
+
+      // Check expiry
+      if (Date.now() > authCode.expires_at) {
+        codes.splice(idx, 1);
+        saveJson(CODES_PATH, codes);
+        sendJson(res, 400, { error: "invalid_grant", error_description: "Code expired" });
+        return;
+      }
+
+      // Verify PKCE if code_challenge was provided
+      if (authCode.code_challenge && authCode.code_challenge_method === "S256") {
+        const expected = createHash("sha256")
+          .update(codeVerifier)
+          .digest("base64url");
+        if (expected !== authCode.code_challenge) {
+          sendJson(res, 400, { error: "invalid_grant", error_description: "PKCE verification failed" });
+          return;
+        }
+      }
+
+      // Remove used code
+      codes.splice(idx, 1);
+      saveJson(CODES_PATH, codes);
+
+      console.log(`OAuth token issued for code`);
+
+      // Return the original API key as the access token
+      sendJson(res, 200, {
+        access_token: authCode.api_key,
+        token_type: "Bearer",
+        expires_in: 86400 * 365, // 1 year — effectively no expiry
+      });
+    }).catch(() => sendJson(res, 400, { error: "invalid_request" }));
+    return true;
+  }
+
+  return false;
+}
+
+// ── Proxy helpers ──
+
 function proxyToQmd(req: IncomingMessage, res: ServerResponse) {
   const headers: Record<string, string> = {};
   for (const [key, val] of Object.entries(req.headers)) {
@@ -65,7 +292,6 @@ function proxyToQmd(req: IncomingMessage, res: ServerResponse) {
       headers,
     },
     (proxyRes) => {
-      // Copy response headers, add CORS
       const resHeaders: Record<string, string | string[]> = {};
       for (const [key, val] of Object.entries(proxyRes.headers)) {
         if (val) resHeaders[key] = val;
@@ -97,7 +323,20 @@ function sendJson(res: ServerResponse, status: number, body: unknown) {
   res.end(JSON.stringify(body));
 }
 
+function readBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => resolve(Buffer.concat(chunks).toString()));
+    req.on("error", reject);
+  });
+}
+
+// ── Main server ──
+
 const server = createServer((req, res) => {
+  const url = new URL(req.url ?? "/", `http://localhost:${PROXY_PORT}`);
+
   if (req.method === "OPTIONS") {
     res.writeHead(204, {
       "Access-Control-Allow-Origin": "*",
@@ -109,15 +348,17 @@ const server = createServer((req, res) => {
     return;
   }
 
+  // OAuth endpoints (unauthenticated)
+  if (handleOAuth(req, res, url)) return;
+
   // Health check — unauthenticated
-  if (req.url === "/health") {
+  if (url.pathname === "/health") {
     sendJson(res, 200, { ok: true, proxy: true });
     return;
   }
 
   // Search endpoint — proxies to the BM25 search server on 8177
-  // (QMD MCP's query tool tries to load embedding models which OOM on this VPS)
-  if (req.url?.startsWith("/search")) {
+  if (url.pathname.startsWith("/search")) {
     const authHeader2 = req.headers.authorization;
     const token2 = authHeader2?.startsWith("Bearer ") ? authHeader2.slice(7) : null;
     if (!token2 || !validateToken(token2)) {
@@ -146,7 +387,7 @@ const server = createServer((req, res) => {
     return;
   }
 
-  // Auth check
+  // Auth check for MCP and other endpoints
   const authHeader = req.headers.authorization;
   const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
 
@@ -172,6 +413,7 @@ setInterval(reloadKeys, 30_000);
 
 server.listen(PROXY_PORT, "0.0.0.0", () => {
   console.log(`Grove proxy listening on http://0.0.0.0:${PROXY_PORT}`);
-  console.log(`Proxying authenticated requests to QMD at http://127.0.0.1:${QMD_PORT}`);
+  console.log(`Proxying authenticated requests to QMD at http://[::1]:${QMD_PORT}`);
+  console.log(`OAuth authorize: ${GROVE_URL}/oauth/authorize`);
   console.log(`Loaded ${keys.length} API key(s)`);
 });
