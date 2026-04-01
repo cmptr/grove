@@ -334,7 +334,7 @@ function readBody(req: IncomingMessage): Promise<string> {
 
 // ── Main server ──
 
-const server = createServer((req, res) => {
+const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", `http://localhost:${PROXY_PORT}`);
 
   if (req.method === "OPTIONS") {
@@ -405,6 +405,97 @@ const server = createServer((req, res) => {
   }
 
   log(key.name, req.method ?? "", req.url ?? "", 200);
+
+  // Intercept MCP query tool calls → reroute to BM25 search (port 8177)
+  // The MCP query tool tries to load embedding models which OOM on this VPS.
+  if (url.pathname === "/mcp" && req.method === "POST") {
+    const body = await readBody(req);
+    let parsed: any;
+    try { parsed = JSON.parse(body); } catch { parsed = null; }
+
+    if (parsed?.method === "tools/call" && parsed?.params?.name === "query") {
+      const searches = parsed.params.arguments?.searches ?? [];
+      // Extract query text from the first search
+      const queryText = searches.map((s: any) => s.query).join(" ");
+      const limit = parsed.params.arguments?.limit ?? 10;
+
+      // Hit BM25 search server
+      const searchUrl = `/search?q=${encodeURIComponent(queryText)}&n=${limit}`;
+      const searchReq = httpRequest(
+        { hostname: "127.0.0.1", port: 8177, path: searchUrl, method: "GET" },
+        (searchRes) => {
+          let data = "";
+          searchRes.on("data", (c) => (data += c));
+          searchRes.on("end", () => {
+            try {
+              const results = JSON.parse(data);
+              const formatted = results
+                .map((r: any) => `**${r.title}** (${r.file}, score: ${r.score})\n${r.snippet ?? ""}`)
+                .join("\n\n---\n\n");
+              const mcpResponse = {
+                jsonrpc: "2.0",
+                id: parsed.id,
+                result: {
+                  content: [{ type: "text", text: formatted || "No results found." }],
+                },
+              };
+              // Preserve session header from the original request
+              const sessionId = req.headers["mcp-session-id"];
+              const headers: Record<string, string> = {
+                "Content-Type": "application/json",
+                "access-control-allow-origin": "*",
+                "access-control-expose-headers": "mcp-session-id",
+              };
+              if (sessionId) headers["mcp-session-id"] = Array.isArray(sessionId) ? sessionId[0] : sessionId;
+              res.writeHead(200, headers);
+              res.end(JSON.stringify(mcpResponse));
+            } catch {
+              sendJson(res, 502, { error: "Search parsing failed" });
+            }
+          });
+        }
+      );
+      searchReq.on("error", () => sendJson(res, 502, { error: "Search server unreachable" }));
+      searchReq.end();
+      return;
+    }
+
+    // Not a query tool call — proxy to QMD normally, replaying the body
+    const proxyReq2 = httpRequest(
+      {
+        hostname: "::1",
+        port: QMD_PORT,
+        path: req.url,
+        method: req.method,
+        headers: (() => {
+          const h: Record<string, string> = {};
+          for (const [k, v] of Object.entries(req.headers)) {
+            if (k === "authorization" || k === "host") continue;
+            if (v) h[k] = Array.isArray(v) ? v.join(", ") : v;
+          }
+          return h;
+        })(),
+      },
+      (proxyRes) => {
+        const resHeaders: Record<string, string | string[]> = {};
+        for (const [k, v] of Object.entries(proxyRes.headers)) { if (v) resHeaders[k] = v; }
+        resHeaders["access-control-allow-origin"] = "*";
+        resHeaders["access-control-allow-methods"] = "GET, POST, PUT, DELETE, OPTIONS";
+        resHeaders["access-control-allow-headers"] = "Content-Type, Authorization, mcp-session-id";
+        resHeaders["access-control-expose-headers"] = "mcp-session-id";
+        res.writeHead(proxyRes.statusCode ?? 200, resHeaders);
+        proxyRes.pipe(res);
+      }
+    );
+    proxyReq2.on("error", (err) => {
+      console.error("Proxy error:", err.message);
+      if (!res.headersSent) sendJson(res, 502, { error: "QMD server unreachable" });
+    });
+    proxyReq2.write(body);
+    proxyReq2.end();
+    return;
+  }
+
   proxyToQmd(req, res);
 });
 
