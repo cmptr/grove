@@ -1,0 +1,18 @@
+{
+  "name": "grove",
+  "version": "0.0.1",
+  "description": "A hosted knowledge API that makes Obsidian vaults searchable and writable from any Claude surface.",
+  "type": "module",
+  "scripts": {
+    "proxy": "tsx src/proxy.ts",
+    "keys": "tsx src/keys.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
