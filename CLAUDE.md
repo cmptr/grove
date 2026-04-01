@@ -1,0 +1,100 @@
+# Grove
+
+Grove is a hosted knowledge API that makes Obsidian vaults searchable and writable from any Claude surface.
+
+## Architecture rules
+
+1. **The vault is the source of truth.** QMD indexes are derived. If they diverge, the index is wrong — rebuild it.
+2. **The server is the sole writer to git.** Local machines pull. One direction. No split brain.
+3. **All writes are serialized.** Single-threaded write queue. No concurrent git operations. Ever.
+4. **Every write creates a git commit** with the API key identity in the message.
+5. **Search index updates synchronously on write.** Agents have no memory between calls — eventual consistency means duplicates.
+6. **Keep tool count at 6.** AI tool selection degrades past ~10. Fold new operations into existing tools as parameters.
+
+Read `PLAN.md` for the full spec. This file governs how you work — PLAN.md governs what you build.
+
+## Running locally
+
+```bash
+npm run proxy          # Auth proxy on :8420, proxies to QMD MCP (:8181) and BM25 (:8177)
+npm run keys           # Key management CLI
+npx tsx src/keys.ts create --name "test-key"
+```
+
+Requires QMD running separately. The proxy does not start QMD — it expects it on ports 8181 (MCP) and 8177 (BM25 search).
+
+## Running on VPS
+
+Grove runs on Vultr at `grove.mili.dev` (45.76.66.214). PM2 manages three processes: `grove-proxy` (8420), `qmd-mcp` (8181), `qmd-server` (8177). Nginx terminates TLS.
+
+```bash
+ssh root@grove.mili.dev
+pm2 list                    # see process status
+pm2 restart grove-proxy     # restart the proxy
+pm2 logs grove-proxy        # tail logs
+```
+
+Vault syncs every 5 min via cron. Keys live at `~/.grove/keys.json`.
+
+## Code conventions
+
+- **TypeScript, strict mode.** No `any` unless interfacing with untyped externals.
+- **Raw `node:http`.** No Express, no Fastify, no framework. The server is small enough.
+- **Node >= 22.** Use built-in fetch, crypto, etc. Don't polyfill.
+- **ESM only** (`"type": "module"` in package.json).
+- **Run with `tsx`** in dev. Compile for production.
+- **Dependencies are intentionally minimal.** Don't add packages for things Node can do natively.
+
+## What not to do
+
+- Don't add web frameworks. Raw `node:http` is the choice and it's final.
+- Don't break the MCP protocol. Claude.ai connects as a custom connector — if the proxy changes response shape, it breaks every connected surface.
+- Don't add MCP tools beyond 6 without explicit approval. More tools = worse agent tool selection.
+- Don't write to the vault outside the write queue. Ever.
+- Don't store raw API tokens anywhere. Hash with SHA-256 first.
+- Don't over-engineer. This is a proxy today, growing into a server. Build what's needed now.
+
+## Testing
+
+Tests use `vitest`. Test fixtures live in `test/fixtures/vault/` — a small vault with sample notes, proper frontmatter, and an initialized git repo.
+
+```bash
+npm test                    # run all tests
+npm run test -- --watch     # watch mode
+```
+
+Write tests for: frontmatter parsing, auth/token validation, write queue serialization, search result formatting. Integration tests should cover full request cycles through the proxy.
+
+## Relationship to QMD
+
+Grove wraps QMD. It does not replace it. QMD handles indexing, BM25 search, and MCP tool execution. Grove adds auth, write operations, git integration, and the HTTP surface that Claude.ai connects to.
+
+If search quality regresses, the problem is almost certainly in QMD or its index — not in Grove's proxy layer.
+
+## Relationship to the vault
+
+Grove serves the vault at `~/life/`. It does not own it. The vault is an Obsidian-based, git-tracked knowledge system that predates Grove and will outlive it. Grove is infrastructure that makes the vault accessible remotely — it should never restructure, reorganize, or make policy decisions about vault content.
+
+Vault conventions (frontmatter, linking, folder structure) are defined in `~/life/CLAUDE.md`. Read that before building anything that touches note structure.
+
+## Deploy process
+
+```bash
+# On your local machine:
+git push origin main
+
+# On the VPS:
+ssh root@grove.mili.dev
+cd /root/grove && git pull
+npm install && npm run build
+pm2 restart grove-proxy
+```
+
+No CI/CD yet. Deploy is manual, intentional, and fast.
+
+## Values
+
+- Momentum over perfection — ship what works, iterate on what doesn't
+- Simple until it needs to be complex — no abstractions ahead of need
+- Fewer tools, better tools — agents work better with less choice
+- The vault is sacred — Grove is plumbing, the vault is the cathedral
