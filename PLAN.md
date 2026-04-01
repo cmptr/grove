@@ -12,7 +12,8 @@ Grove is a TypeScript API server that wraps a git-tracked Obsidian vault and exp
 **Repo:** `~/src/grove`
 **Vault:** `~/life/` (Phase 1), `~/canva/` (Phase 2)
 **Depends on:** `@tobilu/qmd` (search engine), `@modelcontextprotocol/sdk` (MCP transport)
-**Deploys to:** Vultr VPS (Phase 1), also runs locally via tunnel (Phase 0)
+**Deploys to:** Vultr VPS at `grove.mili.dev` (45.76.66.214)
+**Live:** Phase 0 deployed — MCP + BM25 search at `https://grove.mili.dev`
 
 ---
 
@@ -67,57 +68,47 @@ Grove is a TypeScript API server that wraps a git-tracked Obsidian vault and exp
 
 ## Phases
 
-### Phase 0: Tunnel and Validate
+### Phase 0: Deploy and Validate ✅ DEPLOYED 2026-04-01
 
-**Goal:** Validate the concept by exposing QMD's existing MCP server from your laptop to Claude.ai. Zero new code in grove — this is purely infrastructure + a thin auth wrapper on QMD.
+**Goal:** Get the vault accessible from Claude.ai with auth. Validate by using it for 2 weeks.
 
-**Duration:** Weekend to set up, 2 weeks to validate
+**What was built:**
+- Auth proxy (`src/proxy.ts`) on port 8420 — validates bearer tokens, proxies to QMD MCP (8181) and BM25 search (8177)
+- Key management (`src/keys.ts`) — create/list/revoke, SHA-256 hashed storage in `~/.grove/keys.json`
+- Deployed on Vultr VPS at `grove.mili.dev` with nginx + Let's Encrypt TLS
+- QMD MCP server + BM25 search server managed via PM2
+- Vault syncs every 5 min via cron (`vault-life/sync.sh`)
+
+**What works:**
+- MCP `get` tool — read any note from the vault ✅
+- MCP `multi_get` tool — batch read ✅
+- MCP `status` tool — index health ✅
+- `/search?q=...&n=N` — BM25 keyword search (fast, ~3ms) ✅
+- Auth — bearer tokens, 401 for invalid/missing ✅
+- TLS — automatic HTTPS via Let's Encrypt ✅
+
+**What doesn't work yet:**
+- MCP `query` tool hangs — tries to load embedding models (embeddinggemma, Qwen3 reranker) which OOM on 2GB VPS
+- Vector/semantic search — needs either API embeddings or VPS upgrade to 4GB+ RAM
+- No write operations exposed yet (MCP `get` is read-only)
+
+**Workaround:** `/search` endpoint proxies to the BM25 search server on port 8177, which works fast without models. Semantic search deferred to Phase 1 (API embeddings).
+
+**Infrastructure:**
+- VPS: Vultr, 2 vCPU, 2GB RAM, Ubuntu 24.04, Node 22
+- Domain: `grove.mili.dev` (DNS-only in Cloudflare, nginx handles TLS)
+- PM2 processes: `grove-proxy` (8420), `qmd-mcp` (8181), `qmd-server` (8177)
+- API key: `key_a3802af4` (claude-ai, read+write, life vault)
 
 **Tasks:**
 
-- [ ] **P0-1: Auth middleware for QMD MCP server**
-  Create a thin proxy or middleware that sits in front of QMD's MCP HTTP server and validates bearer tokens. QMD binds to localhost:8181, the proxy binds to localhost:8182 and forwards authenticated requests.
-  - Read bearer token from `Authorization` header
-  - Validate against a hashed token stored in `~/.qmd/grove-keys.json`
-  - Forward authenticated requests to QMD's `/mcp` endpoint
-  - Return 401 for invalid/missing tokens
-  - Log all requests with timestamp and auth status
-  - **File:** `~/src/grove/proxy.ts` (standalone script, <100 lines)
-  - **Test:** `curl -H "Authorization: Bearer <token>" http://localhost:8182/mcp` returns QMD's response
+- [x] **P0-1: Auth proxy** — `src/proxy.ts`, validates bearer tokens, proxies to QMD
+- [x] **P0-2: Key management** — `src/keys.ts`, create/list/revoke CLI
+- [x] **P0-3: Deploy to VPS** — nginx + Let's Encrypt on `grove.mili.dev` (replaced Cloudflare tunnel plan — tunnel failed, VPS already had vault syncing)
+- [ ] **P0-4: Register as Claude.ai custom connector** — go to claude.ai → Settings → Connectors → Add `https://grove.mili.dev/mcp` with bearer token auth
+- [ ] **P0-5: Usage journal** — use for 2 weeks, note what's missing
 
-- [ ] **P0-2: Key generation script**
-  Simple CLI to create and manage API keys.
-  - `npx tsx grove-keys.ts create --name "claude-desktop"` → prints token once, stores SHA-256 hash
-  - `npx tsx grove-keys.ts list` → shows key names, IDs, created dates (not tokens)
-  - `npx tsx grove-keys.ts revoke <id>` → removes key
-  - Keys stored in `~/.qmd/grove-keys.json`
-  - Token format: `grove_live_<32 bytes random hex>`
-  - **File:** `~/src/grove/grove-keys.ts` (<100 lines)
-
-- [ ] **P0-3: Cloudflare Tunnel setup**
-  Expose the auth proxy to the internet via `cloudflared`.
-  - Install `cloudflared` if not present
-  - Create a named tunnel: `cloudflared tunnel create grove`
-  - Configure tunnel to point to `localhost:8182`
-  - Set up as a launchd service for persistence
-  - Document the tunnel URL
-  - **Output:** A stable `https://<tunnel-id>.cfargotunnel.com` URL
-
-- [ ] **P0-4: Register as Claude.ai custom connector**
-  Add the tunnel URL as a remote MCP server in Claude.ai settings.
-  - Go to claude.ai → Settings → Connectors → Add custom connector
-  - Enter the tunnel URL
-  - Test from Claude.ai web: ask it to search the vault
-  - Test from Claude.ai mobile: same test
-  - **Validation criteria:** Can search vault and read notes from phone
-
-- [ ] **P0-5: Usage journal**
-  Use the tunnel for 2 weeks. Keep notes (in the vault, naturally) on:
-  - What operations you actually use from phone/web
-  - What's missing — operations you want but can't do
-  - What's slow or broken
-  - Whether the existing QMD MCP tools (query, get, multi_get, status) are sufficient
-  - **Output:** `~/life/Journal/2026/` entries tagged with grove validation findings
+**Key learned:** QMD's `query` tool requires local embedding models. Phase 1 must either: (a) make QMD's embedding backend pluggable for API embeddings, or (b) upgrade VPS to 4GB RAM. API embeddings is the better path — $0.01 for the whole vault vs $24/month for a bigger VPS.
 
 ### Phase 1: Grove Server
 
