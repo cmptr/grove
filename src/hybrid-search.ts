@@ -241,7 +241,7 @@ export async function hybridSearch(
   query: string,
   limit: number = 10
 ): Promise<HybridResult[]> {
-  const oversample = limit * 2;
+  const oversample = Math.min(limit * 5, 50);
 
   const [bm25, vec] = await Promise.all([
     bm25Search(query, oversample),
@@ -263,7 +263,7 @@ export async function hybridSearch(
   }
 
   const lists: { results: SearchResult[]; weight: number; label: string }[] = [
-    { results: bm25, weight: 1.0, label: "bm25" },
+    { results: bm25, weight: 1.2, label: "bm25" },
     { results: vec, weight: 1.0, label: "vector" },
   ];
 

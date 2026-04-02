@@ -18,7 +18,7 @@ import {
 } from "node:http";
 import { createHash, randomBytes } from "node:crypto";
 import { appendFileSync, readFileSync, writeFileSync, existsSync } from "node:fs";
-import { hybridSearch, formatResults } from "./hybrid-search.js";
+import { hybridSearch, formatResults, bm25Search } from "./hybrid-search.js";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { loadKeys, type StoredKey } from "./keys.js";
@@ -367,6 +367,36 @@ function readBody(req: IncomingMessage): Promise<string> {
   });
 }
 
+/** Proxy a request to QMD and return the full response body as a string */
+function proxyAndCapture(hostname: string, port: number, origReq: IncomingMessage, body: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const proxyReq = httpRequest(
+      {
+        hostname,
+        port,
+        path: origReq.url,
+        method: origReq.method,
+        headers: (() => {
+          const h: Record<string, string> = {};
+          for (const [k, v] of Object.entries(origReq.headers)) {
+            if (k === "authorization" || k === "host") continue;
+            if (v) h[k] = Array.isArray(v) ? v.join(", ") : v;
+          }
+          return h;
+        })(),
+      },
+      (proxyRes) => {
+        let data = "";
+        proxyRes.on("data", (c) => (data += c));
+        proxyRes.on("end", () => resolve(data));
+      }
+    );
+    proxyReq.on("error", reject);
+    proxyReq.write(body);
+    proxyReq.end();
+  });
+}
+
 // ── Main server ──
 
 const server = createServer(async (req, res) => {
@@ -491,7 +521,58 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // Not a query tool call — proxy to QMD, capture response for logging
+    // Intercept `get` tool: if QMD returns "not found", try resolving the path via search
+    if (parsed?.method === "tools/call" && parsed?.params?.name === "get") {
+      const filePath = parsed.params.arguments?.file ?? "";
+      const qmdBody = await proxyAndCapture("::1", QMD_PORT, req, body);
+      const latency = Date.now() - reqStart;
+
+      let qmdJson: any;
+      try { qmdJson = JSON.parse(qmdBody); } catch { qmdJson = null; }
+
+      // Check if it's a "not found" response
+      const responseText = qmdJson?.result?.content?.[0]?.text ?? "";
+      if (responseText.includes("not found") && filePath) {
+        // Try to resolve by searching for the filename/title
+        const searchTerm = filePath.replace(/^(life|qmd:\/\/life)\/?/, "").replace(/\.md$/, "").split("/").pop() ?? filePath;
+        try {
+          const searchResults = await bm25Search(searchTerm, 3);
+          if (searchResults.length > 0) {
+            // Retry get with the resolved path
+            const resolvedPath = searchResults[0].file.replace(/^qmd:\/\//, "");
+            const retryArgs = { ...parsed.params.arguments, file: resolvedPath };
+            const retryBody = JSON.stringify({ ...parsed, params: { ...parsed.params, arguments: retryArgs } });
+            const retryResult = await proxyAndCapture("::1", QMD_PORT, req, retryBody);
+
+            logMcp(key.name, sessionStr, "get", { original: filePath, resolved: resolvedPath, search: searchTerm }, JSON.parse(retryResult), latency + (Date.now() - reqStart), 200);
+
+            const headers: Record<string, string> = {
+              "Content-Type": "application/json",
+              "access-control-allow-origin": "*",
+              "access-control-expose-headers": "mcp-session-id",
+            };
+            if (sessionStr) headers["mcp-session-id"] = sessionStr;
+            res.writeHead(200, headers);
+            res.end(retryResult);
+            return;
+          }
+        } catch {}
+      }
+
+      // Original response (found, or not found with no resolution)
+      logMcp(key.name, sessionStr, "get", parsed.params.arguments, qmdJson, latency, 200);
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "access-control-allow-origin": "*",
+        "access-control-expose-headers": "mcp-session-id",
+      };
+      if (sessionStr) headers["mcp-session-id"] = sessionStr;
+      res.writeHead(200, headers);
+      res.end(qmdBody);
+      return;
+    }
+
+    // Other tool calls — proxy to QMD, capture response for logging
     const proxyReq2 = httpRequest(
       {
         hostname: "::1",
@@ -564,4 +645,15 @@ server.listen(PROXY_PORT, "0.0.0.0", () => {
   console.log(`Proxying authenticated requests to QMD at http://[::1]:${QMD_PORT}`);
   console.log(`OAuth authorize: ${GROVE_URL}/oauth/authorize`);
   console.log(`Loaded ${keys.length} API key(s)`);
+
+  // Warm up TEI so first real query isn't slow
+  const warmup = JSON.stringify({ model: "tei", input: "warmup" });
+  const wreq = httpRequest(
+    { hostname: "127.0.0.1", port: 8090, path: "/v1/embeddings", method: "POST",
+      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(warmup) } },
+    (wres) => { wres.resume(); wres.on("end", () => console.log("TEI warmed up")); }
+  );
+  wreq.on("error", () => console.log("TEI warmup failed (may not be running yet)"));
+  wreq.write(warmup);
+  wreq.end();
 });
