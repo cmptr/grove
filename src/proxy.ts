@@ -25,7 +25,9 @@ import { loadKeys, type StoredKey } from "./keys.js";
 
 const QMD_PORT = Number(process.env.QMD_PORT ?? 8181);
 const PROXY_PORT = Number(process.env.GROVE_PORT ?? 8420);
-const LOG_PATH = join(homedir(), ".grove", "proxy.log");
+const LOG_DIR = join(homedir(), ".grove");
+const LOG_PATH = join(LOG_DIR, "proxy.log");
+const MCP_LOG_PATH = join(LOG_DIR, "mcp.jsonl");
 const GROVE_URL = process.env.GROVE_URL ?? "https://grove.mili.dev";
 
 let keys: StoredKey[] = [];
@@ -39,17 +41,49 @@ function validateToken(token: string): StoredKey | null {
   return keys.find((k) => k.hashed_token === hash) ?? null;
 }
 
-function log(keyName: string | null, method: string, url: string, status: number) {
-  const line = JSON.stringify({
+function log(keyName: string | null, method: string, url: string, status: number, extra?: Record<string, unknown>) {
+  const entry: Record<string, unknown> = {
     ts: new Date().toISOString(),
     key: keyName ?? "unauthenticated",
     method,
     url,
     status,
-  });
-  try {
-    appendFileSync(LOG_PATH, line + "\n");
-  } catch {}
+  };
+  if (extra) Object.assign(entry, extra);
+  try { appendFileSync(LOG_PATH, JSON.stringify(entry) + "\n"); } catch {}
+}
+
+/** Log a full MCP conversation turn: request tool + args, response summary, latency */
+function logMcp(keyName: string, sessionId: string | undefined, tool: string, args: unknown, response: unknown, latencyMs: number, status: number) {
+  const entry = {
+    ts: new Date().toISOString(),
+    key: keyName,
+    session: sessionId ?? null,
+    tool,
+    args,
+    response: summarizeMcpResponse(response),
+    latency_ms: latencyMs,
+    status,
+  };
+  try { appendFileSync(MCP_LOG_PATH, JSON.stringify(entry) + "\n"); } catch {}
+}
+
+/** Extract a readable summary from an MCP response for logging */
+function summarizeMcpResponse(response: unknown): unknown {
+  if (!response || typeof response !== "object") return response;
+  const r = response as any;
+  // tools/call response: { result: { content: [{ type, text }] } }
+  if (r.result?.content?.[0]?.text) {
+    const text = r.result.content[0].text as string;
+    return { text_length: text.length, preview: text.slice(0, 300) };
+  }
+  // tools/list response
+  if (r.result?.tools) {
+    return { tools: (r.result.tools as any[]).map((t: any) => t.name) };
+  }
+  // Error response
+  if (r.error) return { error: r.error };
+  return { keys: Object.keys(r) };
 }
 
 // ── OAuth 2.0 minimal implementation ──
@@ -405,14 +439,23 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  log(key.name, req.method ?? "", req.url ?? "", 200);
+  const reqStart = Date.now();
+  const sessionId = req.headers["mcp-session-id"];
+  const sessionStr = Array.isArray(sessionId) ? sessionId[0] : sessionId;
 
-  // Intercept MCP query tool calls → hybrid search (BM25 + vector via TEI + RRF)
+  // Intercept MCP POST requests for logging + query routing
   if (url.pathname === "/mcp" && req.method === "POST") {
     const body = await readBody(req);
     let parsed: any;
     try { parsed = JSON.parse(body); } catch { parsed = null; }
 
+    const mcpMethod = parsed?.method ?? "unknown";
+    const toolName = parsed?.params?.name ?? null;
+
+    // Log all MCP requests
+    log(key.name, "POST", "/mcp", 0, { mcp_method: mcpMethod, tool: toolName });
+
+    // Intercept query tool → hybrid search
     if (parsed?.method === "tools/call" && parsed?.params?.name === "query") {
       const searches = parsed.params.arguments?.searches ?? [];
       const queryText = searches.map((s: any) => s.query).join(" ");
@@ -428,23 +471,27 @@ const server = createServer(async (req, res) => {
             content: [{ type: "text", text: formatted || "No results found." }],
           },
         };
-        const sessionId = req.headers["mcp-session-id"];
+        const latency = Date.now() - reqStart;
+        logMcp(key.name, sessionStr, "query", { query: queryText, limit, searches: parsed.params.arguments?.searches }, mcpResponse, latency, 200);
+
         const headers: Record<string, string> = {
           "Content-Type": "application/json",
           "access-control-allow-origin": "*",
           "access-control-expose-headers": "mcp-session-id",
         };
-        if (sessionId) headers["mcp-session-id"] = Array.isArray(sessionId) ? sessionId[0] : sessionId;
+        if (sessionStr) headers["mcp-session-id"] = sessionStr;
         res.writeHead(200, headers);
         res.end(JSON.stringify(mcpResponse));
       } catch (err: any) {
+        const latency = Date.now() - reqStart;
+        logMcp(key.name, sessionStr, "query", { query: queryText, limit }, { error: err.message }, latency, 502);
         console.error(`[proxy] hybrid search failed: ${err.message}`);
         sendJson(res, 502, { error: "Search failed" });
       }
       return;
     }
 
-    // Not a query tool call — proxy to QMD normally, replaying the body
+    // Not a query tool call — proxy to QMD, capture response for logging
     const proxyReq2 = httpRequest(
       {
         hostname: "::1",
@@ -468,10 +515,35 @@ const server = createServer(async (req, res) => {
         resHeaders["access-control-allow-headers"] = "Content-Type, Authorization, mcp-session-id";
         resHeaders["access-control-expose-headers"] = "mcp-session-id";
         res.writeHead(proxyRes.statusCode ?? 200, resHeaders);
-        proxyRes.pipe(res);
+
+        // Capture response body for MCP logging (tools/call only)
+        if (mcpMethod === "tools/call" && toolName) {
+          let resBody = "";
+          proxyRes.on("data", (c) => { resBody += c; res.write(c); });
+          proxyRes.on("end", () => {
+            res.end();
+            const latency = Date.now() - reqStart;
+            try {
+              const resJson = JSON.parse(resBody);
+              logMcp(key.name, sessionStr, toolName, parsed.params.arguments, resJson, latency, proxyRes.statusCode ?? 200);
+            } catch {
+              logMcp(key.name, sessionStr, toolName, parsed.params.arguments, { raw_length: resBody.length }, latency, proxyRes.statusCode ?? 200);
+            }
+          });
+        } else {
+          proxyRes.pipe(res);
+          // Log non-tool MCP calls (tools/list, initialize, etc.) with just method
+          if (mcpMethod !== "unknown") {
+            proxyRes.on("end", () => {
+              log(key.name, "POST", "/mcp", proxyRes.statusCode ?? 200, { mcp_method: mcpMethod, latency_ms: Date.now() - reqStart });
+            });
+          }
+        }
       }
     );
     proxyReq2.on("error", (err) => {
+      const latency = Date.now() - reqStart;
+      logMcp(key.name, sessionStr, toolName ?? mcpMethod, parsed?.params?.arguments, { error: err.message }, latency, 502);
       console.error("Proxy error:", err.message);
       if (!res.headersSent) sendJson(res, 502, { error: "QMD server unreachable" });
     });
@@ -480,6 +552,7 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  log(key.name, req.method ?? "", req.url ?? "", 200);
   proxyToQmd(req, res);
 });
 
