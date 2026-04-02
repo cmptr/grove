@@ -169,26 +169,13 @@ Claude.ai → proxy.ts (auth/OAuth/CORS/logging) → Grove MCP server (all 6 too
 
 #### Phase 1a Tasks (Close the Loop)
 
-- [ ] **P1-1: Write queue** (`src/write-queue.ts`, ~60 lines)
-  Promise-chain mutex, push timer (30s), error isolation (failed write doesn't halt queue)
-
-- [ ] **P1-2: Vault operations** (`src/vault-ops.ts`, ~150 lines)
-  Git commit/push/log, QMD reindex, file listing. Push with fetch+rebase; on conflict: abort, log, retry next cycle. Startup recovery: commit dirty files, push unpushed commits.
-
-- [ ] **P1-3: Note validation** (`src/notes-validate.ts`, ~100 lines)
-  Frontmatter type whitelist, required fields per type, path ↔ type enforcement, file naming, path traversal protection, safe YAML parsing, 100KB size limit.
-
-- [ ] **P1-4: Grove MCP server** (`src/server.ts`, ~250 lines)
-  Uses `@modelcontextprotocol/sdk` with Streamable HTTP transport. Registers 6 tools with Zod schemas and garden-aware descriptions. Server instructions embed vault structure, frontmatter types, linking conventions.
-
-- [ ] **P1-5: Wire proxy → Grove server**
-  Change proxy MCP forward target from QMD (8181) to Grove server (8190). Auth/OAuth/CORS/logging unchanged.
-
-- [ ] **P1-6: VPS git push access**
-  SSH key with push access to vault-life repo. Startup recovery. Cron sync updated for bidirectional flow.
-
-- [ ] **P1-7: End-to-end test**
-  Plant test (create note → verify file + commit + search), harvest test (journal → entities), tend test (diagnostics), loop test (new conversation finds planted note).
+- [x] **P1-1: Write queue** (`src/write-queue.ts`) — promise-chain mutex, 30s push timer, error isolation
+- [x] **P1-2: Vault operations** (`src/vault-ops.ts`) — git commit/push/log, QMD reindex, file listing, startup recovery
+- [x] **P1-3: Note validation** (`src/notes-validate.ts`) — type whitelist, required fields, path security, safe YAML
+- [x] **P1-4: Grove MCP server** (`src/server.ts`) — 6 tools registered via SDK with Streamable HTTP transport
+- [x] **P1-5: Wire proxy → Grove server** — proxy forwards /mcp to Grove (8190), keeps auth/OAuth/CORS/logging
+- [x] **P1-6: VPS git setup** — vault as git repo, startup recovery, push/pull working
+- [x] **P1-7: End-to-end test** — write_note creates file + git commit + QMD reindex, get reads it back, diagnostics work
 
 #### Phase 1b Tasks (Polish)
 
