@@ -6,6 +6,10 @@ into QMD's SQLite database.
 Usage:
     OPENAI_API_KEY=sk-... python3 src/embed.py [--db path] [--force]
 
+Two-phase approach to avoid vec0 extension memory issues:
+  Phase 1 (this script): Call embedding API, store in content_vectors + _embed_staging
+  Phase 2 (auto): Use Node.js with QMD's better-sqlite3 to copy staging → vec0
+
 Cost: ~$0.01 for 1000 documents.
 """
 
@@ -22,17 +26,23 @@ MODEL = "text-embedding-3-small"
 DIMENSIONS = 768  # Match QMD's existing vec0 table
 CHUNK_SIZE = 3600  # ~900 tokens
 CHUNK_OVERLAP = 540  # 15% overlap
-BATCH_SIZE = 100
+BATCH_SIZE = 100  # OpenAI supports large batches
 API_KEY = os.environ.get("OPENAI_API_KEY", "")
+TEI_URL = os.environ.get("TEI_URL", "")  # e.g. http://localhost:8090
 
 # Parse args
 args = sys.argv[1:]
 if "--db" in args:
     DB_PATH = Path(args[args.index("--db") + 1])
+if "--tei" in args:
+    TEI_URL = args[args.index("--tei") + 1]
+if TEI_URL:
+    BATCH_SIZE = 8  # TEI CPU max batch size
 FORCE = "--force" in args
+PHASE1_ONLY = "--phase1" in args
 
-if not API_KEY:
-    print("OPENAI_API_KEY is required")
+if not API_KEY and not TEI_URL:
+    print("OPENAI_API_KEY or --tei <url> is required")
     sys.exit(1)
 
 
@@ -61,6 +71,31 @@ def chunk_text(text: str, title: str) -> list[dict]:
 
 
 def embed_batch(texts: list[str]) -> tuple[list[list[float]], int]:
+    if TEI_URL:
+        return embed_batch_tei(texts)
+    return embed_batch_openai(texts)
+
+
+def embed_batch_tei(texts: list[str]) -> tuple[list[list[float]], int]:
+    data = json.dumps({
+        "model": "tei",
+        "input": texts,
+    }).encode()
+    req = urllib.request.Request(
+        f"{TEI_URL}/v1/embeddings",
+        data=data,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        result = json.loads(resp.read())
+    embeddings = [None] * len(texts)
+    for item in result["data"]:
+        embeddings[item["index"]] = item["embedding"]
+    tokens = result.get("usage", {}).get("total_tokens", 0)
+    return embeddings, tokens
+
+
+def embed_batch_openai(texts: list[str]) -> tuple[list[list[float]], int]:
     data = json.dumps({
         "model": MODEL,
         "input": texts,
@@ -101,25 +136,76 @@ def find_vec0_ext() -> str | None:
     return None
 
 
+def load_staging_to_vec0(db_path: str):
+    """Phase 2: Copy from _embed_staging to vectors_vec using vec0 extension.
+
+    If vec0 extension is available and doesn't OOM, do it in Python.
+    Otherwise, generate a Node.js script for the user to run.
+    """
+    import subprocess
+
+    # Try Node.js approach first (uses QMD's better-sqlite3 which handles vec0 efficiently)
+    node_script = f"""
+const Database = require('better-sqlite3');
+const path = require('path');
+
+// Find and load sqlite-vec
+const vecPath = require.resolve('sqlite-vec-linux-x64/vec0.so').replace(/\\.so$/, '');
+const db = new Database('{db_path}');
+db.loadExtension(vecPath);
+
+// Clear existing vec0 data
+const ddl = db.prepare("SELECT sql FROM sqlite_master WHERE name='vectors_vec'").get();
+db.exec("DROP TABLE IF EXISTS vectors_vec");
+db.exec(ddl.sql);
+
+// Copy from staging
+const rows = db.prepare("SELECT hash_seq, embedding FROM _embed_staging").all();
+const insert = db.prepare("INSERT OR REPLACE INTO vectors_vec (hash_seq, embedding) VALUES (?, ?)");
+const tx = db.transaction(() => {{
+    for (const row of rows) {{
+        insert.run(row.hash_seq, row.embedding);
+    }}
+}});
+tx();
+
+console.log('Loaded ' + rows.length + ' vectors into vec0');
+
+// Cleanup staging
+db.exec("DROP TABLE _embed_staging");
+db.close();
+"""
+
+    # Find QMD's node_modules for require resolution
+    qmd_dir = Path.home() / ".npm-global/lib/node_modules/@tobilu/qmd"
+    script_path = Path.home() / "_vec0_load.js"
+    script_path.write_text(node_script)
+
+    print("Phase 2: Loading vectors into vec0 via Node.js...")
+    result = subprocess.run(
+        ["node", str(script_path)],
+        capture_output=True, text=True,
+        env={**os.environ, "NODE_PATH": str(qmd_dir / "node_modules")},
+    )
+    script_path.unlink(missing_ok=True)
+
+    if result.returncode == 0:
+        print(result.stdout.strip())
+        return True
+    else:
+        print(f"Node.js vec0 load failed: {result.stderr}")
+        return False
+
+
 def main():
     print(f"Database: {DB_PATH}")
     db = sqlite3.connect(str(DB_PATH))
     db.row_factory = sqlite3.Row
 
-    # Load sqlite-vec extension
-    vec0_path = find_vec0_ext()
-    if vec0_path:
-        db.enable_load_extension(True)
-        db.load_extension(vec0_path.rsplit(".", 1)[0])  # strip .so/.dylib
-        print(f"Loaded vec0 extension: {vec0_path}")
-    else:
-        print("WARNING: vec0 extension not found — vector table writes will fail")
-        sys.exit(1)
-
-    # Check vec0 table
+    # Check vectors_vec table exists (without loading vec0)
     row = db.execute("SELECT sql FROM sqlite_master WHERE name='vectors_vec'").fetchone()
     if not row:
-        print("vectors_vec table not found")
+        print("vectors_vec table not found — need vec0 extension to create it")
         sys.exit(1)
     print(f"Vector table: {row['sql']}")
 
@@ -129,13 +215,15 @@ def main():
     ).fetchall()
     print(f"Total documents: {len(docs)}")
 
+    model_tag = f"openai/{MODEL}" if not TEI_URL else "tei/bge-base-en-v1.5"
+
     # Check already embedded
     to_embed = docs
     if not FORCE:
         embedded = set(
             r[0] for r in db.execute(
                 "SELECT DISTINCT hash FROM content_vectors WHERE model=?",
-                (f"openai/{MODEL}",),
+                (model_tag,),
             ).fetchall()
         )
         to_embed = [d for d in docs if d["hash"] not in embedded]
@@ -173,15 +261,18 @@ def main():
 
     print(f"Chunks to embed: {len(all_chunks)} (skipped {skipped} empty docs)")
 
-    # Clear old embeddings for docs we're re-embedding
-    hashes = list(set(d["hash"] for d in to_embed))
+    # Clear old content_vectors
     if FORCE:
         db.execute("DELETE FROM content_vectors")
-        db.execute("DELETE FROM vectors_vec")
     else:
+        hashes = list(set(d["hash"] for d in to_embed))
         for h in hashes:
             db.execute("DELETE FROM content_vectors WHERE hash=?", (h,))
-            db.execute("DELETE FROM vectors_vec WHERE hash_seq LIKE ?", (f"{h}_%",))
+    db.commit()
+
+    # Create staging table for embeddings (avoids loading vec0 in Python)
+    db.execute("DROP TABLE IF EXISTS _embed_staging")
+    db.execute("CREATE TABLE _embed_staging (hash_seq TEXT PRIMARY KEY, embedding BLOB NOT NULL)")
     db.commit()
 
     # Embed in batches
@@ -203,23 +294,35 @@ def main():
             hash_seq = f"{chunk['hash']}_{chunk['seq']}"
             db.execute(
                 "INSERT OR REPLACE INTO content_vectors (hash, seq, pos, model, embedded_at) VALUES (?,?,?,?,datetime('now'))",
-                (chunk["hash"], chunk["seq"], chunk["pos"], f"openai/{MODEL}"),
+                (chunk["hash"], chunk["seq"], chunk["pos"], model_tag),
             )
             db.execute(
-                "INSERT OR REPLACE INTO vectors_vec (hash_seq, embedding) VALUES (?,?)",
+                "INSERT OR REPLACE INTO _embed_staging (hash_seq, embedding) VALUES (?,?)",
                 (hash_seq, float32_bytes(embeddings[j])),
             )
             total_inserted += 1
         db.commit()
 
     count = db.execute(
-        "SELECT COUNT(*) FROM content_vectors WHERE model=?", (f"openai/{MODEL}",)
+        "SELECT COUNT(*) FROM content_vectors WHERE model=?", (model_tag,)
     ).fetchone()[0]
+    staging_count = db.execute("SELECT COUNT(*) FROM _embed_staging").fetchone()[0]
     cost = total_tokens / 1_000_000 * 0.02  # text-embedding-3-small pricing
-    print(f"\nDone! {count} embeddings stored.")
-    print(f"Model: openai/{MODEL} ({DIMENSIONS} dims)")
+    print(f"\nPhase 1 done! {count} embeddings in content_vectors, {staging_count} in staging.")
+    print(f"Model: {model_tag} ({DIMENSIONS} dims)")
     print(f"Tokens: {total_tokens:,} (cost: ${cost:.4f})")
     db.close()
+
+    if PHASE1_ONLY:
+        print("\n--phase1 flag set. Run phase 2 manually to load into vec0.")
+        return
+
+    # Phase 2: Load staging into vec0
+    if load_staging_to_vec0(str(DB_PATH)):
+        print("\nAll done! Embeddings stored in both content_vectors and vectors_vec.")
+    else:
+        print("\nPhase 1 complete but phase 2 (vec0 load) failed.")
+        print("Staging table _embed_staging preserved. Run phase 2 manually.")
 
 
 if __name__ == "__main__":

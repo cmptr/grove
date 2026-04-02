@@ -18,12 +18,13 @@ import {
 } from "node:http";
 import { createHash, randomBytes } from "node:crypto";
 import { appendFileSync, readFileSync, writeFileSync, existsSync } from "node:fs";
-import { hybridSearch, formatResults, bm25Search } from "./hybrid-search.js";
+// hybrid-search.ts is now used by server.ts directly
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { loadKeys, type StoredKey } from "./keys.js";
 
 const QMD_PORT = Number(process.env.QMD_PORT ?? 8181);
+const GROVE_SERVER_PORT = Number(process.env.GROVE_SERVER_PORT ?? 8190);
 const PROXY_PORT = Number(process.env.GROVE_PORT ?? 8420);
 const LOG_DIR = join(homedir(), ".grove");
 const LOG_PATH = join(LOG_DIR, "proxy.log");
@@ -377,7 +378,9 @@ function proxyAndCapture(hostname: string, port: number, origReq: IncomingMessag
         path: origReq.url,
         method: origReq.method,
         headers: (() => {
-          const h: Record<string, string> = {};
+          const h: Record<string, string> = {
+            "Accept": "application/json, text/event-stream",
+          };
           for (const [k, v] of Object.entries(origReq.headers)) {
             if (k === "authorization" || k === "host") continue;
             if (v) h[k] = Array.isArray(v) ? v.join(", ") : v;
@@ -473,114 +476,27 @@ const server = createServer(async (req, res) => {
   const sessionId = req.headers["mcp-session-id"];
   const sessionStr = Array.isArray(sessionId) ? sessionId[0] : sessionId;
 
-  // Intercept MCP POST requests for logging + query routing
-  if (url.pathname === "/mcp" && req.method === "POST") {
-    const body = await readBody(req);
-    let parsed: any;
-    try { parsed = JSON.parse(body); } catch { parsed = null; }
+  // Forward ALL MCP requests to the Grove server (which owns all 6 tools)
+  if (url.pathname === "/mcp") {
+    const body = req.method === "POST" ? await readBody(req) : "";
+    let parsed: any = null;
+    if (body) try { parsed = JSON.parse(body); } catch {}
 
-    const mcpMethod = parsed?.method ?? "unknown";
+    const mcpMethod = parsed?.method ?? req.method;
     const toolName = parsed?.params?.name ?? null;
+    log(key.name, req.method ?? "", "/mcp", 0, { mcp_method: mcpMethod, tool: toolName });
 
-    // Log all MCP requests
-    log(key.name, "POST", "/mcp", 0, { mcp_method: mcpMethod, tool: toolName });
-
-    // Intercept query tool → hybrid search
-    if (parsed?.method === "tools/call" && parsed?.params?.name === "query") {
-      const searches = parsed.params.arguments?.searches ?? [];
-      const queryText = searches.map((s: any) => s.query).join(" ");
-      const limit = parsed.params.arguments?.limit ?? 10;
-
-      try {
-        const results = await hybridSearch(queryText, limit);
-        const formatted = formatResults(results);
-        const mcpResponse = {
-          jsonrpc: "2.0",
-          id: parsed.id,
-          result: {
-            content: [{ type: "text", text: formatted || "No results found." }],
-          },
-        };
-        const latency = Date.now() - reqStart;
-        logMcp(key.name, sessionStr, "query", { query: queryText, limit, searches: parsed.params.arguments?.searches }, mcpResponse, latency, 200);
-
-        const headers: Record<string, string> = {
-          "Content-Type": "application/json",
-          "access-control-allow-origin": "*",
-          "access-control-expose-headers": "mcp-session-id",
-        };
-        if (sessionStr) headers["mcp-session-id"] = sessionStr;
-        res.writeHead(200, headers);
-        res.end(JSON.stringify(mcpResponse));
-      } catch (err: any) {
-        const latency = Date.now() - reqStart;
-        logMcp(key.name, sessionStr, "query", { query: queryText, limit }, { error: err.message }, latency, 502);
-        console.error(`[proxy] hybrid search failed: ${err.message}`);
-        sendJson(res, 502, { error: "Search failed" });
-      }
-      return;
-    }
-
-    // Intercept `get` tool: if QMD returns "not found", try resolving the path via search
-    if (parsed?.method === "tools/call" && parsed?.params?.name === "get") {
-      const filePath = parsed.params.arguments?.file ?? "";
-      const qmdBody = await proxyAndCapture("::1", QMD_PORT, req, body);
-      const latency = Date.now() - reqStart;
-
-      let qmdJson: any;
-      try { qmdJson = JSON.parse(qmdBody); } catch { qmdJson = null; }
-
-      // Check if it's a "not found" response
-      const responseText = qmdJson?.result?.content?.[0]?.text ?? "";
-      if (responseText.includes("not found") && filePath) {
-        // Try to resolve by searching for the filename/title
-        const searchTerm = filePath.replace(/^(life|qmd:\/\/life)\/?/, "").replace(/\.md$/, "").split("/").pop() ?? filePath;
-        try {
-          const searchResults = await bm25Search(searchTerm, 3);
-          if (searchResults.length > 0) {
-            // Retry get with the resolved path
-            const resolvedPath = searchResults[0].file.replace(/^qmd:\/\//, "");
-            const retryArgs = { ...parsed.params.arguments, file: resolvedPath };
-            const retryBody = JSON.stringify({ ...parsed, params: { ...parsed.params, arguments: retryArgs } });
-            const retryResult = await proxyAndCapture("::1", QMD_PORT, req, retryBody);
-
-            logMcp(key.name, sessionStr, "get", { original: filePath, resolved: resolvedPath, search: searchTerm }, JSON.parse(retryResult), latency + (Date.now() - reqStart), 200);
-
-            const headers: Record<string, string> = {
-              "Content-Type": "application/json",
-              "access-control-allow-origin": "*",
-              "access-control-expose-headers": "mcp-session-id",
-            };
-            if (sessionStr) headers["mcp-session-id"] = sessionStr;
-            res.writeHead(200, headers);
-            res.end(retryResult);
-            return;
-          }
-        } catch {}
-      }
-
-      // Original response (found, or not found with no resolution)
-      logMcp(key.name, sessionStr, "get", parsed.params.arguments, qmdJson, latency, 200);
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-        "access-control-allow-origin": "*",
-        "access-control-expose-headers": "mcp-session-id",
-      };
-      if (sessionStr) headers["mcp-session-id"] = sessionStr;
-      res.writeHead(200, headers);
-      res.end(qmdBody);
-      return;
-    }
-
-    // Other tool calls — proxy to QMD, capture response for logging
-    const proxyReq2 = httpRequest(
+    // Proxy to Grove server, piping response headers and body through
+    const groveReq = httpRequest(
       {
-        hostname: "::1",
-        port: QMD_PORT,
-        path: req.url,
+        hostname: "127.0.0.1",
+        port: GROVE_SERVER_PORT,
+        path: "/mcp",
         method: req.method,
         headers: (() => {
-          const h: Record<string, string> = {};
+          const h: Record<string, string> = {
+            "Accept": "application/json, text/event-stream",
+          };
           for (const [k, v] of Object.entries(req.headers)) {
             if (k === "authorization" || k === "host") continue;
             if (v) h[k] = Array.isArray(v) ? v.join(", ") : v;
@@ -588,48 +504,45 @@ const server = createServer(async (req, res) => {
           return h;
         })(),
       },
-      (proxyRes) => {
+      (groveRes) => {
+        // Copy response headers, add CORS
         const resHeaders: Record<string, string | string[]> = {};
-        for (const [k, v] of Object.entries(proxyRes.headers)) { if (v) resHeaders[k] = v; }
+        for (const [k, v] of Object.entries(groveRes.headers)) { if (v) resHeaders[k] = v; }
         resHeaders["access-control-allow-origin"] = "*";
-        resHeaders["access-control-allow-methods"] = "GET, POST, PUT, DELETE, OPTIONS";
+        resHeaders["access-control-allow-methods"] = "GET, POST, DELETE, OPTIONS";
         resHeaders["access-control-allow-headers"] = "Content-Type, Authorization, mcp-session-id";
         resHeaders["access-control-expose-headers"] = "mcp-session-id";
-        res.writeHead(proxyRes.statusCode ?? 200, resHeaders);
+        res.writeHead(groveRes.statusCode ?? 200, resHeaders);
 
-        // Capture response body for MCP logging (tools/call only)
-        if (mcpMethod === "tools/call" && toolName) {
+        // Capture body for logging while piping through
+        if (parsed?.method === "tools/call" && toolName) {
           let resBody = "";
-          proxyRes.on("data", (c) => { resBody += c; res.write(c); });
-          proxyRes.on("end", () => {
+          groveRes.on("data", (c) => { resBody += c; res.write(c); });
+          groveRes.on("end", () => {
             res.end();
             const latency = Date.now() - reqStart;
             try {
-              const resJson = JSON.parse(resBody);
-              logMcp(key.name, sessionStr, toolName, parsed.params.arguments, resJson, latency, proxyRes.statusCode ?? 200);
+              logMcp(key.name, sessionStr, toolName, parsed.params.arguments, JSON.parse(resBody), latency, groveRes.statusCode ?? 200);
             } catch {
-              logMcp(key.name, sessionStr, toolName, parsed.params.arguments, { raw_length: resBody.length }, latency, proxyRes.statusCode ?? 200);
+              logMcp(key.name, sessionStr, toolName, parsed.params.arguments, { raw_length: resBody.length }, latency, groveRes.statusCode ?? 200);
             }
           });
         } else {
-          proxyRes.pipe(res);
-          // Log non-tool MCP calls (tools/list, initialize, etc.) with just method
+          groveRes.pipe(res);
           if (mcpMethod !== "unknown") {
-            proxyRes.on("end", () => {
-              log(key.name, "POST", "/mcp", proxyRes.statusCode ?? 200, { mcp_method: mcpMethod, latency_ms: Date.now() - reqStart });
+            groveRes.on("end", () => {
+              log(key.name, req.method ?? "", "/mcp", groveRes.statusCode ?? 200, { mcp_method: mcpMethod, latency_ms: Date.now() - reqStart });
             });
           }
         }
       }
     );
-    proxyReq2.on("error", (err) => {
-      const latency = Date.now() - reqStart;
-      logMcp(key.name, sessionStr, toolName ?? mcpMethod, parsed?.params?.arguments, { error: err.message }, latency, 502);
-      console.error("Proxy error:", err.message);
-      if (!res.headersSent) sendJson(res, 502, { error: "QMD server unreachable" });
+    groveReq.on("error", (err) => {
+      console.error("[proxy] Grove server error:", err.message);
+      if (!res.headersSent) sendJson(res, 502, { error: "Grove server unreachable" });
     });
-    proxyReq2.write(body);
-    proxyReq2.end();
+    if (body) groveReq.write(body);
+    groveReq.end();
     return;
   }
 
