@@ -14,11 +14,12 @@ import { randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, relative, dirname } from "node:path";
 import { homedir } from "node:os";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 
 import { hybridSearch, formatResults, bm25Search } from "./hybrid-search.js";
+import { embedFile } from "./embed-single.js";
 import { WriteQueue } from "./write-queue.js";
 import { gitCommit, gitPush, gitLog, startupRecovery, qmdReindex, listNotes } from "./vault-ops.js";
 import { validatePath, validateNote, parseNote, serializeNote, contentHash } from "./notes-validate.js";
@@ -297,6 +298,11 @@ SAFE UPDATES — pass if_hash (from a prior get) to prevent overwriting concurre
         return { path: relPath, action, content_hash: contentHash(serialized), commit: sha };
       });
 
+      // Fire-and-forget: re-embed the changed file
+      embedFile(VAULT_PATH, result.path).catch((err) =>
+        console.error(`[grove] embed-single failed for ${result.path}:`, err.message),
+      );
+
       return {
         content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
       };
@@ -374,6 +380,19 @@ Modes:
 
       return { content: [{ type: "text" as const, text: "Unknown mode" }] };
     },
+  );
+
+  // ── Resource: vault notes accessible as MCP resources ──────────
+  server.resource(
+    "note",
+    new ResourceTemplate("vault://life/{path}", { list: undefined }),
+    async (uri, { path }) => ({
+      contents: [{
+        uri: uri.href,
+        mimeType: "text/markdown",
+        text: readFileSync(join(VAULT_PATH, path as string), "utf-8"),
+      }],
+    }),
   );
 
   return server;
