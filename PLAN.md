@@ -149,8 +149,8 @@ Grove is a TypeScript API server that wraps a git-tracked Obsidian vault and exp
 | **Plant** (wire mentions) | query → get × N → write_note × N | 20-35 | No (interactive) |
 | **Harvest** (basic) | get → list_notes(aliases) → write_note | 3-8 | `list_notes` returns aliases |
 | **Tend** (diagnostics) | vault_status(diagnostics) | 1 | Yes — whole-graph scan |
-| **Wander** (graph walk) | vault_status(graph) | 1 | Yes — graph algorithms (Phase 1b) |
-| **Garden** (daily digest) | vault_status(digest) + vault_status(history) | 1-2 | Yes — lifecycle classification (Phase 1b) |
+| **Wander** (graph walk) | vault_status(graph) | 1 | Yes — Brandes centrality + BFS clusters ✅ |
+| **Garden** (daily digest) | vault_status(digest) + vault_status(history) | 1-2 | Yes — git-based lifecycle classification ✅ |
 
 #### Architecture
 
@@ -179,14 +179,14 @@ Claude.ai → proxy.ts (auth/OAuth/CORS/logging) → Grove MCP server (all 6 too
 
 #### Phase 1b Tasks (Polish)
 
-- [ ] **P1-8: vault_status graph mode** — port graph_tools.py or shell out
-- [ ] **P1-9: vault_status digest mode** — port garden.py lifecycle classification
-- [ ] **P1-10: Auto-embed on write** — trigger embedding for new/changed docs
-- [ ] **P1-11: Rate limiting** — 20 writes/min per key, in-memory sliding window
-- [ ] **P1-12: Idempotency** — LRU cache of `{key → response}` with 1-hour TTL
-- [ ] **P1-13: Unit tests** — vitest suite for validation, write queue, vault ops
-- [ ] **P1-14: CLI client** — `grove search`, `grove read`, `grove write`, `grove history`
-- [ ] **P1-15: MCP Resources** — expose notes as cacheable resources alongside tools
+- [x] **P1-8: vault_status graph mode** — Brandes centrality, BFS clusters, degree analysis (`vault-graph.ts`)
+- [x] **P1-9: vault_status digest mode** — git-based lifecycle classification (`vault-graph.ts`)
+- [x] **P1-10: Auto-embed on write** — fire-and-forget `embedFile()` after write_note (`embed-single.ts`)
+- [x] **P1-11: Rate limiting** — 120 reads/60s, 20 writes/60s sliding window (`rate-limit.ts`)
+- [x] **P1-12: Idempotency** — LRU cache, 1000 entries, 1hr TTL (`rate-limit.ts`)
+- [x] **P1-13: Unit tests** — 37 tests across 3 files, all passing (`test/*.test.ts`)
+- [x] **P1-14: CLI client** — `grove search/read/list/write/history/status/diagnostics` (`cli.ts`)
+- [x] **P1-15: MCP Resources** — notes as `vault://life/{path}` resources (`server.ts`)
 
 ### Phase 2: Multi-Vault (work vault)
 
