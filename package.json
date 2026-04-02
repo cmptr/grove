@@ -6,6 +6,7 @@
   "scripts": {
     "proxy": "tsx src/proxy.ts",
     "keys": "tsx src/keys.ts",
+    "grove": "tsx src/cli.ts",
     "test": "vitest run"
   },
   "devDependencies": {
