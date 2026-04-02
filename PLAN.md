@@ -13,7 +13,7 @@ Grove is a TypeScript API server that wraps a git-tracked Obsidian vault and exp
 **Vault:** `~/life/` (Phase 1), `~/canva/` (Phase 2)
 **Depends on:** `@tobilu/qmd` (search engine), `@modelcontextprotocol/sdk` (MCP transport)
 **Deploys to:** Vultr VPS at `grove.mili.dev` (45.76.66.214)
-**Live:** Phase 0 deployed — MCP + BM25 search at `https://grove.mili.dev`
+**Live:** Phase 0 complete — MCP + hybrid search (BM25 + vector + RRF) at `https://grove.mili.dev`
 
 ---
 
@@ -68,47 +68,55 @@ Grove is a TypeScript API server that wraps a git-tracked Obsidian vault and exp
 
 ## Phases
 
-### Phase 0: Deploy and Validate ✅ DEPLOYED 2026-04-01
+### Phase 0: Deploy and Validate ✅ COMPLETE 2026-04-01
 
 **Goal:** Get the vault accessible from Claude.ai with auth. Validate by using it for 2 weeks.
 
 **What was built:**
-- Auth proxy (`src/proxy.ts`) on port 8420 — validates bearer tokens, proxies to QMD MCP (8181) and BM25 search (8177)
+- Auth proxy (`src/proxy.ts`) on port 8420 — OAuth 2.0 + bearer tokens, proxies to QMD MCP (8181)
+- Hybrid search (`src/hybrid-search.ts`) — BM25 + vector (TEI + sqlite-vec) + RRF fusion
 - Key management (`src/keys.ts`) — create/list/revoke, SHA-256 hashed storage in `~/.grove/keys.json`
+- Embedding pipeline (`src/embed-node.ts`) — Node.js script, embeds docs via TEI over SSH tunnel, stores in vec0
 - Deployed on Vultr VPS at `grove.mili.dev` with nginx + Let's Encrypt TLS
-- QMD MCP server + BM25 search server managed via PM2
-- Vault syncs every 5 min via cron (`vault-life/sync.sh`)
+- QMD MCP server + search server managed via PM2
+- TEI (Text Embeddings Inference) running via Docker for query-time embedding
+- Vault syncs every 5 min via cron
 
 **What works:**
-- MCP `get` tool — read any note from the vault ✅
+- MCP `get` tool — read any note ✅
 - MCP `multi_get` tool — batch read ✅
 - MCP `status` tool — index health ✅
-- `/search?q=...&n=N` — BM25 keyword search (fast, ~3ms) ✅
-- Auth — bearer tokens, 401 for invalid/missing ✅
-- TLS — automatic HTTPS via Let's Encrypt ✅
+- MCP `query` tool — hybrid search (BM25 + vector + RRF), falls back to BM25-only if TEI down ✅
+- `/search?q=...&n=N` — BM25 keyword search (~3ms) ✅
+- Auth — OAuth 2.0 (PKCE) for Claude.ai + bearer tokens ✅
+- TLS — HTTPS via nginx + Let's Encrypt ✅
+- 5636 chunk embeddings across 1028 docs (bge-base-en-v1.5, 768-dim) ✅
 
 **What doesn't work yet:**
-- MCP `query` tool hangs — tries to load embedding models (embeddinggemma, Qwen3 reranker) which OOM on 2GB VPS
-- Vector/semantic search — needs either API embeddings or VPS upgrade to 4GB+ RAM
-- No write operations exposed yet (MCP `get` is read-only)
-
-**Workaround:** `/search` endpoint proxies to the BM25 search server on port 8177, which works fast without models. Semantic search deferred to Phase 1 (API embeddings).
+- No write operations (MCP tools are read-only; writes need Phase 1 write queue + git integration)
+- No automatic re-embedding when vault changes (manual: run embed-node.ts, scp, restart)
 
 **Infrastructure:**
-- VPS: Vultr, 2 vCPU, 2GB RAM, Ubuntu 24.04, Node 22
+- VPS: Vultr, 4 vCPU, 8GB RAM, Ubuntu 24.04, Node 22
 - Domain: `grove.mili.dev` (DNS-only in Cloudflare, nginx handles TLS)
 - PM2 processes: `grove-proxy` (8420), `qmd-mcp` (8181), `qmd-server` (8177)
+- TEI Docker: `tei-embeddings` on port 8090 (BAAI/bge-base-en-v1.5, `--auto-truncate`)
 - API key: `key_a3802af4` (claude-ai, read+write, life vault)
 
 **Tasks:**
 
-- [x] **P0-1: Auth proxy** — `src/proxy.ts`, validates bearer tokens, proxies to QMD
+- [x] **P0-1: Auth proxy** — `src/proxy.ts`, bearer tokens + OAuth 2.0 (PKCE) for Claude.ai
 - [x] **P0-2: Key management** — `src/keys.ts`, create/list/revoke CLI
-- [x] **P0-3: Deploy to VPS** — nginx + Let's Encrypt on `grove.mili.dev` (replaced Cloudflare tunnel plan — tunnel failed, VPS already had vault syncing)
-- [ ] **P0-4: Register as Claude.ai custom connector** — go to claude.ai → Settings → Connectors → Add `https://grove.mili.dev/mcp` with bearer token auth
-- [ ] **P0-5: Usage journal** — use for 2 weeks, note what's missing
+- [x] **P0-3: Deploy to VPS** — nginx + Let's Encrypt on `grove.mili.dev`
+- [x] **P0-4: Register as Claude.ai custom connector** — connected via OAuth, working from all surfaces
+- [x] **P0-5a: Hybrid search** — BM25 + vector + RRF fusion via TEI + sqlite-vec (replaced OpenAI API plan with self-hosted TEI for privacy)
+- [ ] **P0-5b: Usage journal** — use for 2 weeks, note what's missing
 
-**Key learned:** QMD's `query` tool requires local embedding models. Phase 1 must either: (a) make QMD's embedding backend pluggable for API embeddings, or (b) upgrade VPS to 4GB RAM. API embeddings is the better path — $0.01 for the whole vault vs $24/month for a bigger VPS.
+**Key decisions made during Phase 0:**
+- **Embeddings: self-hosted TEI** (not OpenAI API) — privacy-first, same bge-base-en-v1.5 model on Mac and VPS
+- **Embed on Mac, sync to VPS** — vec0 bulk ops OOM on VPS; Mac embeds via Node.js (not Python — Python 3.14 + vec0 has catastrophic GC issues), scp index to VPS
+- **OAuth 2.0 required** — Claude.ai custom connectors only support OAuth, not plain bearer tokens; proxy implements full OAuth flow with PKCE
+- **VPS upgraded to 8GB** — 2GB was too small for TEI + QMD + proxy; 8GB/4CPU handles everything comfortably
 
 ### Phase 1: Grove Server
 
@@ -249,12 +257,9 @@ Grove is a TypeScript API server that wraps a git-tracked Obsidian vault and exp
   - Options: `limit`, `mode` (bm25 | vector | rrf), `vault_id`, `fields` (control response size)
   - Return results with path, score, snippet, frontmatter
   - On write, call QMD's incremental update for the changed file
-  - **Embedding config:** Use OpenAI `text-embedding-3-small` by default. QMD's embedding backend should be configurable via env var. If QMD doesn't support API embeddings natively, this is the biggest integration task.
+  - **Embedding config:** Self-hosted TEI (bge-base-en-v1.5) on VPS port 8090 for query embedding. Doc embeddings pre-computed on Mac via `embed-node.ts` and synced to VPS. This is already working in Phase 0 — Phase 1 just needs to formalize the search service wrapper around `hybrid-search.ts`.
 
-  **Open question for implementation:** Does QMD support pluggable embedding backends, or is `node-llama-cpp` hardcoded? If hardcoded, we either:
-  - (a) Fork/patch QMD to accept an embedding function
-  - (b) Pre-compute embeddings externally and feed them to QMD's SQLite store
-  - (c) Keep local embeddings for v1 and revisit — the Vultr VPS may have enough CPU
+  **Resolved:** QMD's node-llama-cpp is bypassed entirely. `hybrid-search.ts` handles BM25 (QMD server) + vector (TEI + better-sqlite3 vec0) + RRF fusion directly.
 
 - [ ] **P1-5: Vault service (`src/vault.ts`)**
   Git operations on the vault.
@@ -573,13 +578,14 @@ Decisions made during planning. Reference these when implementing — don't re-l
 | Write concurrency | Serialized queue (mutex) | Git merge, CRDTs | Git merge corrupts YAML frontmatter. CRDTs are overkill for single-user. Mutex is simple and correct. |
 | Sync direction | Server writes, local pulls | Bidirectional | Prevents split brain. One source of truth for remote writes. |
 | Obsidian Sync | Disabled (git only) | Keep both | Two sync systems = conflicts. Git handles everything. |
-| Embeddings | OpenAI API | Local models (node-llama-cpp) | $0.01 for entire vault. $5/month VPS vs GPU box. Quality is equivalent or better. |
+| Embeddings | Self-hosted TEI (bge-base-en-v1.5) | OpenAI API, local sentence-transformers | Privacy-first. Same model on Mac (embedding) and VPS (query). No data leaves our infra. |
+| Embed runtime | Node.js (embed-node.ts) | Python sentence-transformers | Python 3.14 + sqlite-vec vec0 = catastrophic GC (25-47GB). Node.js + better-sqlite3 works perfectly. |
 | Search pipeline | BM25 + vector + RRF | + grep + reranker + query expansion | Over-engineered for <10K docs. Reranker/expansion add latency, not quality at this scale. |
 | Auth tokens | SHA-256 hashed, scoped, prefixed | Simple bearer strings | Hashing survives token leaks. Scopes survive multi-user. Prefix enables secret scanning. |
 | Vault scoping | In URL path from day 1 | Implicit single vault | `/v1/vaults/{id}/` is free now, breaking change later. |
 | Language | TypeScript | Go, Python | QMD is TypeScript. MCP SDK is TypeScript. Same ecosystem. |
 | HTTP framework | None (raw node:http) | Express, Fastify | Server is <2K LOC. No framework needed. |
-| TLS | Caddy reverse proxy | Nginx, certbot, built-in | Automatic HTTPS, zero config renewal. |
+| TLS | nginx + certbot | Caddy, built-in | Already running on VPS, certbot auto-renews. |
 | Agent deletes | Not allowed | Allowed with scope | Probabilistic systems should not delete personal data. |
 | Git push cadence | Batched every 30s | Per-write | Cleaner history, fewer push/pull races. |
 
@@ -601,22 +607,25 @@ Decisions made during planning. Reference these when implementing — don't re-l
 
 ## Open Questions (resolve during implementation)
 
-1. **QMD embedding backend:** Does QMD support pluggable embedding backends? If `node-llama-cpp` is hardcoded, what's the least invasive way to swap to API embeddings? Check `~/src/qmd/` source.
+1. ~~**QMD embedding backend:**~~ **Resolved.** Bypassed entirely. TEI handles query embedding on VPS; embed-node.ts handles doc embedding on Mac via TEI over SSH tunnel. QMD's node-llama-cpp is never loaded.
 
 2. **Backlink computation cost:** Grepping the entire vault for `[[Note Name]]` on every read is expensive. Options: (a) cache backlinks and invalidate on write, (b) precompute backlink index on startup, (c) make backlinks a separate endpoint/field. Decide based on vault size and latency requirements.
 
-3. **MCP tool descriptions:** The exact wording of MCP tool descriptions has a big impact on agent behavior. These need to be iterated based on real usage. Start with descriptive, adjust based on what agents do wrong.
+3. ~~**MCP tool descriptions:**~~ **Resolved.** QMD's built-in MCP tool descriptions work well. The `query` tool accepts structured searches (lex/vec/hyde). Iterate based on Claude.ai usage.
 
-4. **Domain name:** What domain for the Vultr VPS? Needs to be set up before Caddy can issue a TLS cert.
+4. ~~**Domain name:**~~ **Resolved.** `grove.mili.dev`
+
+5. **Auto-embed on vault change:** Currently embedding is manual (run embed-node.ts, scp). Should this be automated? Options: (a) cron on Mac, (b) git hook on push, (c) VPS-side embed after sync. Deferred to Phase 1.
 
 ---
 
 ## Success Criteria
 
 **Phase 0 is successful when:**
-- You can search your vault from Claude.ai on your phone and get relevant results
-- You can read a note and see its content
-- The tunnel stays up reliably for 2 weeks
+- ✅ You can search your vault from Claude.ai on your phone and get relevant results
+- ✅ You can read a note and see its content
+- ✅ Hybrid search (keyword + semantic) returns high-quality results
+- [ ] You've used it daily for 2 weeks and documented what's missing (P0-5b)
 
 **Phase 1 is successful when:**
 - Grove server runs on Vultr, accessible from all Claude surfaces
