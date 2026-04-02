@@ -240,12 +240,20 @@ RESOURCE NOTES should include a dataview backlink query:
 SAFE UPDATES — pass if_hash (from a prior get) to prevent overwriting concurrent changes. Omit for new notes.`,
       inputSchema: {
         path: z.string().describe("File path relative to vault root (e.g., 'Resources/Concepts/Context Engineering.md')"),
-        frontmatter: z.record(z.unknown()).describe("YAML frontmatter object (type and tags required)"),
+        frontmatter: z.string().describe("YAML frontmatter as JSON string (e.g., '{\"type\":\"concept\",\"tags\":[\"concept\"]}')"),
         content: z.string().describe("Note body (markdown)"),
         if_hash: z.string().optional().describe("Content hash from prior read — rejects if file changed since"),
       },
     },
-    async ({ path: notePath, frontmatter, content, if_hash }) => {
+    async ({ path: notePath, frontmatter: fmInput, content, if_hash }) => {
+      // Parse frontmatter from JSON string
+      let frontmatter: Record<string, unknown>;
+      try {
+        frontmatter = typeof fmInput === "string" ? JSON.parse(fmInput) : fmInput;
+      } catch {
+        return { content: [{ type: "text" as const, text: "Invalid frontmatter JSON" }], isError: true };
+      }
+
       // Validate path
       let absPath: string;
       try {
