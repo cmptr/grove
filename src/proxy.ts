@@ -498,57 +498,72 @@ const server = createServer(async (req, res) => {
       rateLimiter.record(key.id, isWrite ? "write" : "read");
     }
 
-    // Proxy to Grove server, piping response headers and body through
-    const groveReq = httpRequest(
-      {
-        hostname: "127.0.0.1",
-        port: GROVE_SERVER_PORT,
-        path: "/mcp",
-        method: req.method,
-        headers: (() => {
-          const h: Record<string, string> = {
-            "Accept": "application/json, text/event-stream",
-          };
-          for (const [k, v] of Object.entries(req.headers)) {
-            if (k === "authorization" || k === "host") continue;
-            if (v) h[k] = Array.isArray(v) ? v.join(", ") : v;
-          }
-          return h;
-        })(),
-      },
-      (groveRes) => {
-        // Copy response headers, add CORS
-        const resHeaders: Record<string, string | string[]> = {};
-        for (const [k, v] of Object.entries(groveRes.headers)) { if (v) resHeaders[k] = v; }
-        resHeaders["access-control-allow-origin"] = "*";
-        resHeaders["access-control-allow-methods"] = "GET, POST, DELETE, OPTIONS";
-        resHeaders["access-control-allow-headers"] = "Content-Type, Authorization, mcp-session-id";
-        resHeaders["access-control-expose-headers"] = "mcp-session-id";
-        res.writeHead(groveRes.statusCode ?? 200, resHeaders);
+    // Build headers for Grove server (strip auth, add Accept, optionally strip stale session)
+    function groveHeaders(stripSession = false): Record<string, string> {
+      const h: Record<string, string> = { "Accept": "application/json, text/event-stream" };
+      for (const [k, v] of Object.entries(req.headers)) {
+        if (k === "authorization" || k === "host") continue;
+        if (stripSession && k === "mcp-session-id") continue;
+        if (v) h[k] = Array.isArray(v) ? v.join(", ") : v;
+      }
+      return h;
+    }
 
-        // Capture body for logging while piping through
-        if (parsed?.method === "tools/call" && toolName) {
-          let resBody = "";
-          groveRes.on("data", (c) => { resBody += c; res.write(c); });
-          groveRes.on("end", () => {
-            res.end();
-            const latency = Date.now() - reqStart;
-            try {
-              logMcp(key.name, sessionStr, toolName, parsed.params.arguments, JSON.parse(resBody), latency, groveRes.statusCode ?? 200);
-            } catch {
-              logMcp(key.name, sessionStr, toolName, parsed.params.arguments, { raw_length: resBody.length }, latency, groveRes.statusCode ?? 200);
-            }
+    // Proxy to Grove server, piping response headers and body through
+    // If Grove returns 400 (invalid/stale session), retry without session ID to create a new one
+    const groveReq = httpRequest(
+      { hostname: "127.0.0.1", port: GROVE_SERVER_PORT, path: "/mcp", method: req.method, headers: groveHeaders() },
+      (groveRes) => {
+        // If stale session → retry without session ID so Grove creates a fresh one
+        if (groveRes.statusCode === 400 && sessionStr && req.method === "POST") {
+          groveRes.resume(); // drain the response
+          console.log("[proxy] stale session, retrying without session ID");
+          const retryReq = httpRequest(
+            { hostname: "127.0.0.1", port: GROVE_SERVER_PORT, path: "/mcp", method: "POST", headers: groveHeaders(true) },
+            (retryRes) => pipeGroveResponse(retryRes),
+          );
+          retryReq.on("error", (err) => {
+            if (!res.headersSent) sendJson(res, 502, { error: "Grove server unreachable" });
           });
-        } else {
-          groveRes.pipe(res);
-          if (mcpMethod !== "unknown") {
-            groveRes.on("end", () => {
-              log(key.name, req.method ?? "", "/mcp", groveRes.statusCode ?? 200, { mcp_method: mcpMethod, latency_ms: Date.now() - reqStart });
-            });
-          }
+          if (body) retryReq.write(body);
+          retryReq.end();
+          return;
         }
+        pipeGroveResponse(groveRes);
       }
     );
+
+    function pipeGroveResponse(groveRes: import("node:http").IncomingMessage) {
+      const resHeaders: Record<string, string | string[]> = {};
+      for (const [k, v] of Object.entries(groveRes.headers)) { if (v) resHeaders[k] = v; }
+      resHeaders["access-control-allow-origin"] = "*";
+      resHeaders["access-control-allow-methods"] = "GET, POST, DELETE, OPTIONS";
+      resHeaders["access-control-allow-headers"] = "Content-Type, Authorization, mcp-session-id";
+      resHeaders["access-control-expose-headers"] = "mcp-session-id";
+      res.writeHead(groveRes.statusCode ?? 200, resHeaders);
+
+      if (parsed?.method === "tools/call" && toolName) {
+        let resBody = "";
+        groveRes.on("data", (c) => { resBody += c; res.write(c); });
+        groveRes.on("end", () => {
+          res.end();
+          const latency = Date.now() - reqStart;
+          try {
+            logMcp(key.name, sessionStr, toolName, parsed.params.arguments, JSON.parse(resBody), latency, groveRes.statusCode ?? 200);
+          } catch {
+            logMcp(key.name, sessionStr, toolName, parsed.params.arguments, { raw_length: resBody.length }, latency, groveRes.statusCode ?? 200);
+          }
+        });
+      } else {
+        groveRes.pipe(res);
+        if (mcpMethod !== "unknown") {
+          groveRes.on("end", () => {
+            log(key.name, req.method ?? "", "/mcp", groveRes.statusCode ?? 200, { mcp_method: mcpMethod, latency_ms: Date.now() - reqStart });
+          });
+        }
+      }
+    }
+
     groveReq.on("error", (err) => {
       console.error("[proxy] Grove server error:", err.message);
       if (!res.headersSent) sendJson(res, 502, { error: "Grove server unreachable" });
