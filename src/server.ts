@@ -106,35 +106,70 @@ Use the content_hash as if_hash when updating the note.`,
       },
     },
     async ({ file }) => {
-      // Try direct read
-      let filePath = file.replace(/^(life\/|qmd:\/\/life\/)/, "");
-      if (!filePath.endsWith(".md")) filePath += ".md";
-      const abs = join(VAULT_PATH, filePath);
-
-      if (existsSync(abs)) {
+      // Helper: read and return a note given absolute + relative paths
+      const readNote = (abs: string, rel: string, resolvedFrom?: string) => {
         const raw = readFileSync(abs, "utf-8");
         const { frontmatter, content } = parseNote(raw);
         const hash = contentHash(raw);
-        return {
-          content: [{ type: "text" as const, text: JSON.stringify({ path: filePath, frontmatter, content, content_hash: hash }, null, 2) }],
-        };
+        const result: Record<string, unknown> = { path: rel, frontmatter, content, content_hash: hash };
+        if (resolvedFrom) result.resolved_from = resolvedFrom;
+        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+      };
+
+      // 1. Normalize the input path — strip common prefixes
+      let filePath = file.replace(/^(life\/|qmd:\/\/life\/)/, "");
+      if (!filePath.endsWith(".md")) filePath += ".md";
+
+      // 2. Try direct read at the given path
+      const abs = join(VAULT_PATH, filePath);
+      if (existsSync(abs)) return readNote(abs, filePath);
+
+      // 3. Extract the basename for searching (e.g., "Taste Graph" from "Resources/Concepts/Taste Graph.md")
+      const searchTerm = filePath.replace(/\.md$/, "").split("/").pop() ?? file;
+
+      // 4. For date-like basenames (YYYY-MM-DD), try Journal paths directly
+      const dateMatch = searchTerm.match(/^(\d{4})-\d{2}-\d{2}$/);
+      if (dateMatch) {
+        const year = dateMatch[1];
+        // Try current year folder and the year from the date
+        for (const y of [year, String(new Date().getFullYear())]) {
+          const journalPath = `Journal/${y}/${searchTerm}.md`;
+          const journalAbs = join(VAULT_PATH, journalPath);
+          if (existsSync(journalAbs)) return readNote(journalAbs, journalPath, file);
+        }
       }
 
-      // Fuzzy resolve: search by title
-      const searchTerm = filePath.replace(/\.md$/, "").split("/").pop() ?? file;
+      // 5. Case-insensitive basename search across the entire vault
+      const searchLower = searchTerm.toLowerCase();
+      const allNotes = listNotes(VAULT_PATH, "*");
+      const nameMatch = allNotes.find((n) => n.name.toLowerCase() === searchLower);
+      if (nameMatch) {
+        const matchAbs = join(VAULT_PATH, nameMatch.path);
+        if (existsSync(matchAbs)) return readNote(matchAbs, nameMatch.path, file);
+      }
+
+      // 6. Also check aliases
+      const aliasNotes = listNotes(VAULT_PATH, "*", { includeAliases: true });
+      const aliasMatch = aliasNotes.find(
+        (n) => n.aliases?.some((a) => a.toLowerCase() === searchLower),
+      );
+      if (aliasMatch) {
+        const matchAbs = join(VAULT_PATH, aliasMatch.path);
+        if (existsSync(matchAbs)) return readNote(matchAbs, aliasMatch.path, file);
+      }
+
+      // 7. Fall back to BM25 search for partial/fuzzy matches
       try {
         const results = await bm25Search(searchTerm, 3);
         if (results.length > 0) {
+          // Search results may have qmd:// prefix — strip it
           const resolved = results[0].file.replace(/^qmd:\/\/life\//, "");
-          const resolvedAbs = join(VAULT_PATH, resolved);
-          if (existsSync(resolvedAbs)) {
-            const raw = readFileSync(resolvedAbs, "utf-8");
-            const { frontmatter, content } = parseNote(raw);
-            const hash = contentHash(raw);
-            return {
-              content: [{ type: "text" as const, text: JSON.stringify({ path: resolved, frontmatter, content, content_hash: hash, resolved_from: file }, null, 2) }],
-            };
-          }
+          // The resolved path from QMD may be lowercased; find the real path via listNotes
+          const resolvedLower = resolved.toLowerCase();
+          const realNote = allNotes.find((n) => n.path.toLowerCase() === resolvedLower);
+          const realPath = realNote?.path ?? resolved;
+          const resolvedAbs = join(VAULT_PATH, realPath);
+          if (existsSync(resolvedAbs)) return readNote(resolvedAbs, realPath, file);
         }
       } catch {}
 
