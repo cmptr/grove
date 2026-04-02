@@ -18,7 +18,7 @@ import {
 } from "node:http";
 import { createHash, randomBytes } from "node:crypto";
 import { appendFileSync, readFileSync, writeFileSync, existsSync } from "node:fs";
-// hybrid-search.ts is now used by server.ts directly
+import { RateLimiter } from "./rate-limit.js";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { loadKeys, type StoredKey } from "./keys.js";
@@ -32,6 +32,7 @@ const MCP_LOG_PATH = join(LOG_DIR, "mcp.jsonl");
 const GROVE_URL = process.env.GROVE_URL ?? "https://grove.mili.dev";
 
 let keys: StoredKey[] = [];
+const rateLimiter = new RateLimiter({ reads: 120, writes: 20, windowMs: 60_000 });
 
 function reloadKeys() {
   keys = loadKeys();
@@ -485,6 +486,17 @@ const server = createServer(async (req, res) => {
     const mcpMethod = parsed?.method ?? req.method;
     const toolName = parsed?.params?.name ?? null;
     log(key.name, req.method ?? "", "/mcp", 0, { mcp_method: mcpMethod, tool: toolName });
+
+    // Rate limit tool calls
+    if (mcpMethod === "tools/call" && toolName) {
+      const isWrite = toolName === "write_note";
+      const { allowed, retryAfterMs } = rateLimiter.check(key.id, isWrite ? "write" : "read");
+      if (!allowed) {
+        sendJson(res, 429, { error: "rate_limited", retry_after_ms: retryAfterMs });
+        return;
+      }
+      rateLimiter.record(key.id, isWrite ? "write" : "read");
+    }
 
     // Proxy to Grove server, piping response headers and body through
     const groveReq = httpRequest(

@@ -23,11 +23,15 @@ import { embedFile } from "./embed-single.js";
 import { WriteQueue } from "./write-queue.js";
 import { gitCommit, gitPush, gitLog, startupRecovery, qmdReindex, listNotes } from "./vault-ops.js";
 import { validatePath, validateNote, parseNote, serializeNote, contentHash } from "./notes-validate.js";
+import { analyzeGraph, computeDigest } from "./vault-graph.js";
+import { RateLimiter, IdempotencyCache } from "./rate-limit.js";
 
 const VAULT_PATH = process.env.GROVE_VAULT ?? join(homedir(), "life");
 const PORT = Number(process.env.GROVE_SERVER_PORT ?? 8190);
 
 const writeQueue = new WriteQueue();
+const rateLimiter = new RateLimiter({ reads: 120, writes: 20, windowMs: 60_000 });
+const idempotencyCache = new IdempotencyCache(1000, 3_600_000);
 writeQueue.schedulePush(() => gitPush(VAULT_PATH));
 
 // ── Server instructions (what Claude.ai sees) ─────────────────────
@@ -343,9 +347,11 @@ Use for:
 Modes:
   health       — doc count, last commit date
   history      — recent git log (filter by since, path_prefix)
-  diagnostics  — orphan notes, broken [[links]], missing frontmatter, stale Inbox items`,
+  diagnostics  — orphan notes, broken [[links]], missing frontmatter, stale Inbox items
+  graph        — wikilink graph: most connected, bridges, clusters, orphans
+  digest       — garden lifecycle: seeds, sprouts, growing, mature, dormant, withering`,
       inputSchema: {
-        mode: z.enum(["health", "history", "diagnostics"]).describe("What to check"),
+        mode: z.enum(["health", "history", "diagnostics", "graph", "digest"]).describe("What to check"),
         since: z.string().optional().describe("For history: date filter (e.g., '1 week ago', '2026-04-01')"),
         path_prefix: z.string().optional().describe("For history: path filter (e.g., 'Journal/')"),
       },
@@ -376,6 +382,16 @@ Modes:
 
       if (mode === "diagnostics") {
         return await runDiagnostics();
+      }
+
+      if (mode === "graph") {
+        const graph = await analyzeGraph(VAULT_PATH);
+        return { content: [{ type: "text" as const, text: JSON.stringify(graph, null, 2) }] };
+      }
+
+      if (mode === "digest") {
+        const digest = await computeDigest(VAULT_PATH);
+        return { content: [{ type: "text" as const, text: JSON.stringify(digest, null, 2) }] };
       }
 
       return { content: [{ type: "text" as const, text: "Unknown mode" }] };
