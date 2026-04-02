@@ -118,416 +118,88 @@ Grove is a TypeScript API server that wraps a git-tracked Obsidian vault and exp
 - **OAuth 2.0 required** — Claude.ai custom connectors only support OAuth, not plain bearer tokens; proxy implements full OAuth flow with PKCE
 - **VPS upgraded to 8GB** — 2GB was too small for TEI + QMD + proxy; 8GB/4CPU handles everything comfortably
 
-### Phase 1: Grove Server
+### Phase 1: Close the Garden Loop
 
-**Goal:** Build and deploy the real grove server on Vultr. Replace the tunnel with a proper hosted service.
+**Goal:** Two-way data flow. Conversations on any Claude surface read from AND write back to the vault. Garden operations (plant, harvest, tend) work from Claude.ai.
 
-**Duration:** Estimated 2-3 weeks of development
+**Key insight:** Garden operations split into two categories:
+- **Query-scoped** (plant, seek, basic harvest): compose from search + read + write primitives. Claude orchestrates.
+- **Vault-scoped** (tend, wander, digest): require whole-graph knowledge. Need server-side computation.
 
-**Prerequisites:** Phase 0 validation complete. Learnings from 2-week tunnel usage incorporated.
+**Architecture:** Build a proper Grove MCP server (not more proxy interceptors). Proxy stays for auth/OAuth/CORS, forwards to Grove server. QMD becomes a search backend.
 
-#### 1.1 Project Setup
+**Duration:** Weekend-scale project (~560 lines new code)
 
-- [ ] **P1-1: Initialize project**
-  ```
-  ~/src/grove/
-  ├── src/
-  │   ├── index.ts              # Entry point
-  │   ├── server.ts             # HTTP server + MCP transport
-  │   ├── auth.ts               # Token validation middleware
-  │   ├── router.ts             # Route handling
-  │   ├── notes.ts              # Notes service (read, write, parse)
-  │   ├── search.ts             # Search service (QMD wrapper)
-  │   ├── vault.ts              # Vault service (git operations)
-  │   ├── write-queue.ts        # Serialized write queue
-  │   ├── keys.ts               # Key management
-  │   ├── logger.ts             # Audit logging
-  │   └── types.ts              # Shared types
-  ├── test/
-  │   ├── notes.test.ts
-  │   ├── search.test.ts
-  │   ├── auth.test.ts
-  │   ├── write-queue.test.ts
-  │   └── fixtures/             # Test vault with sample notes
-  ├── bin/
-  │   └── grove.ts              # CLI entry point
-  ├── deploy/
-  │   ├── Dockerfile
-  │   ├── Caddyfile
-  │   └── setup.sh              # VPS setup script
-  ├── PLAN.md                   # This file
-  ├── CLAUDE.md                 # Agent instructions for this repo
-  ├── package.json
-  └── tsconfig.json
-  ```
-  - TypeScript with strict mode
-  - Node.js >= 22
-  - Dependencies: `@tobilu/qmd`, `@modelcontextprotocol/sdk`, `better-sqlite3`
-  - Dev dependencies: `vitest`, `tsx`
-  - **No frameworks.** Raw `node:http`. The server is small enough not to need Express/Fastify.
+#### The 6 MCP Tools
 
-- [ ] **P1-2: CLAUDE.md for the grove repo**
-  Write repo-specific agent instructions so sub-agents can work autonomously.
-  - Project overview and architecture
-  - How to run locally
-  - How to run tests
-  - Code conventions
-  - What not to do
+| # | Tool | What it does | Garden operations |
+|---|------|-------------|-------------------|
+| 1 | `query` | Hybrid search (BM25 + vector + RRF) | **seek** |
+| 2 | `get` | Read note with fuzzy path resolution | **seek**, **harvest**, **wander** |
+| 3 | `multi_get` | Batch read by glob or list | **harvest** (batch entities), **tend** |
+| 4 | `write_note` | Create/update with frontmatter validation, git commit, reindex | **plant**, **harvest** (wire links, create entities) |
+| 5 | `list_notes` | Browse + metadata + entity index (names, types, aliases) | **tend** (scan), **harvest** (entity vocab), **plant** (dedup) |
+| 6 | `vault_status` | Health + diagnostics + history + metrics | **tend** (orphans, broken links), **garden** (digest), **wander** (graph stats) |
 
-#### 1.2 Core Services
+#### Where primitives compose vs where the server must help
 
-- [ ] **P1-3: Notes service (`src/notes.ts`)**
-  The core domain logic. Reads/writes notes with full parsing.
+| Operation | Composition | Calls | Server help needed? |
+|-----------|------------|-------|---------------------|
+| **Plant** (create note) | query → list_notes → write_note | 2-3 | No |
+| **Plant** (wire mentions) | query → get × N → write_note × N | 20-35 | No (interactive) |
+| **Harvest** (basic) | get → list_notes(aliases) → write_note | 3-8 | `list_notes` returns aliases |
+| **Tend** (diagnostics) | vault_status(diagnostics) | 1 | Yes — whole-graph scan |
+| **Wander** (graph walk) | vault_status(graph) | 1 | Yes — graph algorithms (Phase 1b) |
+| **Garden** (daily digest) | vault_status(digest) + vault_status(history) | 1-2 | Yes — lifecycle classification (Phase 1b) |
 
-  **`getNote(vaultPath, notePath) → NoteResponse`**
-  - Read file from disk
-  - Parse YAML frontmatter (regex-based, no external YAML lib needed — but use `yaml` package for robustness)
-  - Extract outlinks: all `[[...]]` patterns, resolve piped syntax `[[target|display]]` → target
-  - Compute backlinks: grep the vault for `[[Note Name]]` references to this note (cache this — expensive on every read)
-  - Compute lifecycle stage: seed/sprout/growing/mature/dormant/withering based on age + modification recency
-  - Compute content hash: SHA-256 of raw file content
-  - Return structured `NoteResponse`
+#### Architecture
 
-  **`putNote(vaultPath, notePath, input: NoteInput) → NoteResponse`**
-  - Validate frontmatter: `type` must be a known value (concept, person, recipe, project, company, place, journal)
-  - Validate path: must be under vault root, must be `.md`, no symlink escapes
-  - If `if_hash` provided: compare against current file hash, reject with 409 if mismatch
-  - If `idempotency_key` provided: check cache, return cached response if seen
-  - Serialize frontmatter to YAML + combine with body content
-  - Write file
-  - Git commit with key identity: `"grove (<key-name>): update <path>"`
-  - Trigger QMD reindex for this file
-  - Return the new `NoteResponse`
+```
+Claude.ai → proxy.ts (auth/OAuth/CORS/logging) → Grove MCP server (all 6 tools)
+                                                        ↓
+                                              hybrid-search.ts (search)
+                                              vault filesystem (read/write)
+                                              vault-ops.ts (git)
+                                              QMD index (sqlite)
+```
 
-  **`deleteNote(vaultPath, notePath) → void`**
-  - Move to `Archives/` (not actual delete)
-  - Add `archived_at` and `archived_by` to frontmatter
-  - Git commit
-  - Requires `admin` scope
+- **Proxy stays** for auth, OAuth, CORS, audit logging
+- **New Grove MCP server** (`src/server.ts`) replaces QMD as MCP backend — registers all 6 tools via SDK
+- **QMD becomes a search backend** — hybrid-search.ts calls QMD's HTTP endpoints internally
 
-  **`batchGet(vaultPath, paths: string[]) → NoteResponse[]`**
-  - Parallel reads for up to 50 paths
-  - Return array of responses (with nulls for not-found)
-  - Used by harvest/tend workflows that cross-reference many notes
+#### Phase 1a Tasks (Close the Loop)
 
-  **Types:**
-  ```typescript
-  interface NoteResponse {
-    path: string
-    frontmatter: Record<string, unknown>
-    content: string
-    outlinks: string[]
-    backlinks: string[]
-    lifecycle: 'seed' | 'sprout' | 'growing' | 'mature' | 'dormant' | 'withering'
-    content_hash: string
-    modified_at: string
-    created_at: string
-  }
+- [ ] **P1-1: Write queue** (`src/write-queue.ts`, ~60 lines)
+  Promise-chain mutex, push timer (30s), error isolation (failed write doesn't halt queue)
 
-  interface NoteInput {
-    frontmatter: Record<string, unknown>
-    content: string
-    if_hash?: string
-    idempotency_key?: string
-  }
+- [ ] **P1-2: Vault operations** (`src/vault-ops.ts`, ~150 lines)
+  Git commit/push/log, QMD reindex, file listing. Push with fetch+rebase; on conflict: abort, log, retry next cycle. Startup recovery: commit dirty files, push unpushed commits.
 
-  interface ApiResponse<T> {
-    data: T
-    meta: {
-      request_id: string
-      vault_version: string  // git SHA
-      api_version: string    // date-based: "2026-04-01"
-    }
-  }
+- [ ] **P1-3: Note validation** (`src/notes-validate.ts`, ~100 lines)
+  Frontmatter type whitelist, required fields per type, path ↔ type enforcement, file naming, path traversal protection, safe YAML parsing, 100KB size limit.
 
-  interface ApiError {
-    error: {
-      type: 'not_found' | 'conflict' | 'validation' | 'unauthorized' | 'rate_limited'
-      code: string
-      message: string
-      current_hash?: string  // on conflict, include current state
-    }
-  }
-  ```
+- [ ] **P1-4: Grove MCP server** (`src/server.ts`, ~250 lines)
+  Uses `@modelcontextprotocol/sdk` with Streamable HTTP transport. Registers 6 tools with Zod schemas and garden-aware descriptions. Server instructions embed vault structure, frontmatter types, linking conventions.
 
-- [ ] **P1-4: Search service (`src/search.ts`)**
-  Wraps QMD's search capabilities.
-  - Initialize QMD store with `createStore()` from `@tobilu/qmd`
-  - Expose search as a single function: `search(query, options) → SearchResult[]`
-  - Options: `limit`, `mode` (bm25 | vector | rrf), `vault_id`, `fields` (control response size)
-  - Return results with path, score, snippet, frontmatter
-  - On write, call QMD's incremental update for the changed file
-  - **Embedding config:** Self-hosted TEI (bge-base-en-v1.5) on VPS port 8090 for query embedding. Doc embeddings pre-computed on Mac via `embed-node.ts` and synced to VPS. This is already working in Phase 0 — Phase 1 just needs to formalize the search service wrapper around `hybrid-search.ts`.
+- [ ] **P1-5: Wire proxy → Grove server**
+  Change proxy MCP forward target from QMD (8181) to Grove server (8190). Auth/OAuth/CORS/logging unchanged.
 
-  **Resolved:** QMD's node-llama-cpp is bypassed entirely. `hybrid-search.ts` handles BM25 (QMD server) + vector (TEI + better-sqlite3 vec0) + RRF fusion directly.
+- [ ] **P1-6: VPS git push access**
+  SSH key with push access to vault-life repo. Startup recovery. Cron sync updated for bidirectional flow.
 
-- [ ] **P1-5: Vault service (`src/vault.ts`)**
-  Git operations on the vault.
+- [ ] **P1-7: End-to-end test**
+  Plant test (create note → verify file + commit + search), harvest test (journal → entities), tend test (diagnostics), loop test (new conversation finds planted note).
 
-  **`sync(vaultPath) → { version: string, changed: string[] }`**
-  - `git pull --rebase` (fetch + rebase to avoid merge commits)
-  - Return new HEAD SHA and list of changed files
-  - Trigger QMD reindex for changed files
+#### Phase 1b Tasks (Polish)
 
-  **`commit(vaultPath, path, message, keyName) → string`**
-  - `git add <path>`
-  - `git commit -m "<message>"` with key identity
-  - Return new commit SHA
-  - **Do not push on every commit.** Batch pushes on a 30-second timer or when write queue drains.
-
-  **`push(vaultPath) → void`**
-  - `git push origin main`
-  - Called by the push timer, not by individual writes
-
-  **`history(vaultPath, path?, since?) → HistoryEntry[]`**
-  - `git log` with optional path filter and date filter
-  - Returns commit SHA, message, author, date, changed files
-  - Used for "what changed since yesterday" queries
-
-- [ ] **P1-6: Write queue (`src/write-queue.ts`)**
-  Serializes all mutations to prevent concurrent git operations.
-  ```typescript
-  class WriteQueue {
-    private queue: Promise<void> = Promise.resolve()
-    private pushTimer: NodeJS.Timeout | null = null
-
-    async enqueue<T>(fn: () => Promise<T>): Promise<T> {
-      // Chain onto the queue so operations run sequentially
-      const result = new Promise<T>((resolve, reject) => {
-        this.queue = this.queue.then(() => fn().then(resolve, reject))
-      })
-      this.schedulePush()
-      return result
-    }
-
-    private schedulePush() {
-      if (this.pushTimer) return
-      this.pushTimer = setTimeout(() => {
-        this.pushTimer = null
-        this.enqueue(() => this.vault.push())
-      }, 30_000)
-    }
-  }
-  ```
-  - All write operations (putNote, deleteNote, sync) go through `enqueue()`
-  - Read operations bypass the queue entirely (concurrent reads are safe)
-  - Git push batched every 30 seconds
-
-#### 1.3 HTTP Layer
-
-- [ ] **P1-7: Auth middleware (`src/auth.ts`)**
-  Token validation on every request.
-  - Extract bearer token from `Authorization` header
-  - Hash with SHA-256, look up in key store
-  - Attach `KeyInfo` to request context (id, name, scopes, vault_id)
-  - Check scopes against the operation (read operations need `read`, writes need `write`, deletes need `admin`)
-  - Return 401 for invalid/missing tokens, 403 for insufficient scopes
-  - Rate limiting: 120 reads/min, 20 writes/min per key (use sliding window counter in memory)
-  - `/health` endpoint is the only unauthenticated route
-  - **Key store:** Load from `~/.grove/keys.json` on startup, watch for changes
-
-- [ ] **P1-8: Router (`src/router.ts`)**
-  HTTP route handling. Raw `node:http`, pattern-matched.
-
-  **REST endpoints:**
-  ```
-  GET    /v1/vaults/:vault/notes/*path          → notes.get
-  PUT    /v1/vaults/:vault/notes/*path          → notes.put
-  DELETE /v1/vaults/:vault/notes/*path          → notes.delete
-  POST   /v1/vaults/:vault/notes/batch          → notes.batchGet
-  POST   /v1/vaults/:vault/search               → search
-  POST   /v1/vaults/:vault/sync                 → vault.sync
-  GET    /v1/vaults/:vault/history               → vault.history
-  GET    /health                                 → health check
-  ```
-
-  **Query parameters:**
-  - `?fields=frontmatter,backlinks,content` — control response size (default: all fields)
-
-  **Response envelope:**
-  Every response wrapped in `{ data: ..., meta: { request_id, vault_version, api_version } }`
-
-  **Error responses:**
-  - 400: validation errors (bad frontmatter, invalid path)
-  - 401: no/invalid token
-  - 403: insufficient scopes
-  - 404: note not found
-  - 409: conflict (if_hash mismatch) — response includes `current_hash`
-  - 429: rate limited — response includes `Retry-After` header
-  - 500: internal error
-
-- [ ] **P1-9: MCP transport (`src/server.ts`)**
-  MCP server alongside the REST API. Same auth, same services.
-  - Use `@modelcontextprotocol/sdk` Streamable HTTP transport
-  - Mount at `/v1/vaults/:vault/mcp`
-  - Register MCP tools that map to the REST endpoints:
-
-  **MCP Tools (6 total):**
-
-  | Tool | Description | Maps to |
-  |------|-------------|---------|
-  | `search` | Search notes by keyword or meaning. Returns ranked results with snippets. | `POST /search` |
-  | `read_note` | Read a note with parsed frontmatter, links, and metadata. | `GET /notes/*path` |
-  | `write_note` | Create or update a note. Validates frontmatter. Use if_hash for safe updates. | `PUT /notes/*path` |
-  | `list_notes` | List notes in a folder or matching a pattern. | `GET /notes/*path` (directory) |
-  | `batch_read` | Read multiple notes at once. Use for cross-referencing workflows. | `POST /notes/batch` |
-  | `vault_history` | What changed recently. Use for awareness: "what's new since yesterday?" | `GET /history` |
-
-  **MCP Tool descriptions must include:**
-  - What the tool does and when to use it
-  - The vault's structure (Journal/, Resources/, Inbox/, etc.)
-  - What frontmatter types exist (concept, person, recipe, etc.)
-  - What wikilinks look like (`[[Note Name]]`, `[[Note Name|display text]]`)
-  - Example queries that work well
-  - That `if_hash` should be used when updating existing notes
-
-  **Important:** Keep tool count at 6. AI agent tool selection degrades past ~10 tools. If you need more operations later, fold them into existing tools as parameters.
-
-- [ ] **P1-10: Audit logger (`src/logger.ts`)**
-  Append-only log of all API operations.
-  - Log to SQLite table: `timestamp, key_id, key_name, method, path, status, latency_ms`
-  - Never log token values
-  - Log search queries (useful for understanding usage patterns)
-  - Log write operations with before/after content hashes
-  - **File:** `~/.grove/audit.db`
-
-#### 1.4 Configuration
-
-- [ ] **P1-11: Server configuration**
-  All config via environment variables and/or a config file.
-  ```
-  # Required
-  GROVE_VAULT_LIFE=/path/to/life/vault
-  GROVE_KEYS_PATH=~/.grove/keys.json
-
-  # Optional
-  GROVE_PORT=8420
-  GROVE_HOST=0.0.0.0
-  GROVE_PUSH_INTERVAL=30000           # ms between git pushes (default: 30s)
-  GROVE_OPENAI_API_KEY=sk-...          # for embeddings
-  GROVE_EMBEDDING_MODEL=text-embedding-3-small
-  GROVE_LOG_PATH=~/.grove/audit.db
-
-  # Future (Phase 2)
-  GROVE_VAULT_WORK=/path/to/work/vault
-  ```
-
-  Config file alternative: `~/.grove/config.json`
-  ```json
-  {
-    "vaults": {
-      "life": { "path": "/path/to/life", "default": true },
-      "work": { "path": "/path/to/canva", "readonly": true }
-    },
-    "port": 8420,
-    "push_interval": 30000
-  }
-  ```
-
-#### 1.5 CLI
-
-- [ ] **P1-12: Grove CLI (`bin/grove.ts`)**
-  Thin client over the REST API. Also handles server management.
-
-  ```bash
-  # Server management
-  grove serve                          # Start the server
-  grove serve --daemon                 # Start as background process
-
-  # Key management
-  grove keys create --name "phone"     # Create API key, print token once
-  grove keys list                      # List keys (no tokens shown)
-  grove keys revoke <id>               # Revoke a key
-  grove keys rotate <id>               # Rotate with 24h grace period
-
-  # API client (talks to the server)
-  grove search "taste graphs"          # Search
-  grove read "Resources/Concepts/Taste Graph.md"  # Read a note
-  grove write "Inbox/new-idea.md" --type concept  # Create a note
-  grove history --since yesterday      # What changed
-  grove sync                           # Trigger git sync
-
-  # Config
-  grove config                         # Show current config
-  ```
-
-  The CLI reads server URL and API key from `~/.grove/cli.json`:
-  ```json
-  {
-    "server": "https://grove.example.com",
-    "token": "grove_live_..."
-  }
-  ```
-
-#### 1.6 Deployment
-
-- [ ] **P1-13: Dockerfile**
-  ```dockerfile
-  FROM node:22-slim
-  WORKDIR /app
-  COPY package*.json ./
-  RUN npm ci --production
-  COPY dist/ ./dist/
-  COPY bin/ ./bin/
-  EXPOSE 8420
-  CMD ["node", "dist/index.js"]
-  ```
-  - Vault is mounted as a volume, not baked into the image
-  - Keys file mounted as a volume
-  - Git credentials mounted (for push/pull)
-
-- [ ] **P1-14: VPS setup script (`deploy/setup.sh`)**
-  Idempotent setup for Vultr VPS.
-  - Install Node.js 22, git, Caddy
-  - Clone vault repo(s) via git
-  - Set up SSH keys for git push/pull
-  - Install grove as a systemd service
-  - Configure Caddy for TLS (auto HTTPS via Let's Encrypt)
-  - Set up log rotation
-  - Set up cron for `git pull` every 60 seconds (backup sync in case webhooks miss)
-  - Configure firewall: only 80, 443, 22
-
-  **Caddy config (`deploy/Caddyfile`):**
-  ```
-  grove.yourdomain.com {
-    reverse_proxy localhost:8420
-  }
-  ```
-
-- [ ] **P1-15: Register as Claude.ai connector**
-  - Add `https://grove.yourdomain.com/v1/vaults/life/mcp` as custom connector
-  - Test from all surfaces: web, desktop, mobile
-  - Verify search, read, and write operations work
-
-#### 1.7 Testing
-
-- [ ] **P1-16: Test fixtures**
-  Create a small test vault in `test/fixtures/vault/` with:
-  - 5-10 sample notes across Resources/, Journal/, Inbox/
-  - Proper frontmatter, wikilinks, backlinks
-  - A git repo initialized
-  - Used by all test files
-
-- [ ] **P1-17: Unit tests**
-  - `notes.test.ts`: frontmatter parsing, wikilink extraction, backlink computation, path validation, lifecycle calculation, content hash, optimistic concurrency (if_hash)
-  - `search.test.ts`: QMD integration, result formatting, field selection
-  - `auth.test.ts`: token validation, scope checking, rate limiting, key rotation
-  - `write-queue.test.ts`: serialization, concurrent write handling, push batching
-
-- [ ] **P1-18: Integration tests**
-  - Full request cycle: auth → route → service → filesystem → response
-  - Concurrent write scenarios: two agents writing to the same note
-  - Conflict detection and resolution flow
-  - Git commit verification (key identity in commit message)
-  - Search after write (index consistency)
-
-- [ ] **P1-19: Search quality test set**
-  Before deploying simplified search (BM25 + vector + RRF without reranker/expansion):
-  - Record 20-30 real queries against current QMD with full pipeline
-  - Record top-5 results for each
-  - Run same queries against simplified pipeline
-  - Diff results, document any quality regressions
-  - Decide whether to accept or adjust
+- [ ] **P1-8: vault_status graph mode** — port graph_tools.py or shell out
+- [ ] **P1-9: vault_status digest mode** — port garden.py lifecycle classification
+- [ ] **P1-10: Auto-embed on write** — trigger embedding for new/changed docs
+- [ ] **P1-11: Rate limiting** — 20 writes/min per key, in-memory sliding window
+- [ ] **P1-12: Idempotency** — LRU cache of `{key → response}` with 1-hour TTL
+- [ ] **P1-13: Unit tests** — vitest suite for validation, write queue, vault ops
+- [ ] **P1-14: CLI client** — `grove search`, `grove read`, `grove write`, `grove history`
+- [ ] **P1-15: MCP Resources** — expose notes as cacheable resources alongside tools
 
 ### Phase 2: Multi-Vault (work vault)
 
@@ -581,6 +253,9 @@ Decisions made during planning. Reference these when implementing — don't re-l
 | Embeddings | Self-hosted TEI (bge-base-en-v1.5) | OpenAI API, local sentence-transformers | Privacy-first. Same model on Mac (embedding) and VPS (query). No data leaves our infra. |
 | Embed runtime | Node.js (embed-node.ts) | Python sentence-transformers | Python 3.14 + sqlite-vec vec0 = catastrophic GC (25-47GB). Node.js + better-sqlite3 works perfectly. |
 | Search pipeline | BM25 + vector + RRF | + grep + reranker + query expansion | Over-engineered for <10K docs. Reranker/expansion add latency, not quality at this scale. |
+| Garden API design | Workflows compose 6 primitives | Dedicated endpoints per garden operation | Plant/harvest compose naturally. Tend/wander need server-side computation folded into `vault_status`. |
+| MCP server | Proper SDK-based server | Extend proxy interceptors | Expert panel unanimous: interceptors are tech debt. Proxy stays for auth, Grove server owns the tools. |
+| Write sync | VPS writes + pushes, Mac pulls | Mac-only writes | Closes the two-way loop. Push retry with rebase-abort handles conflicts. |
 | Auth tokens | SHA-256 hashed, scoped, prefixed | Simple bearer strings | Hashing survives token leaks. Scopes survive multi-user. Prefix enables secret scanning. |
 | Vault scoping | In URL path from day 1 | Implicit single vault | `/v1/vaults/{id}/` is free now, breaking change later. |
 | Language | TypeScript | Go, Python | QMD is TypeScript. MCP SDK is TypeScript. Same ecosystem. |
@@ -628,11 +303,11 @@ Decisions made during planning. Reference these when implementing — don't re-l
 - [ ] You've used it daily for 2 weeks and documented what's missing (P0-5b)
 
 **Phase 1 is successful when:**
-- Grove server runs on Vultr, accessible from all Claude surfaces
-- Search quality matches or exceeds current QMD (verified by test set)
-- Write operations work with proper concurrency control
+- Claude.ai can create a concept note, and the next conversation (any surface) finds it via search
+- Harvest works: read a journal entry, find people mentioned, create/link entity notes
+- Tend works: vault_status(diagnostics) returns orphans, broken links, missing frontmatter
 - All writes are traceable in git log to the key that made them
-- You've used it daily for a week without data loss or corruption
+- No data loss or corruption after a week of daily use
 
 **Phase 2 is successful when:**
 - Work vault is searchable alongside life vault
@@ -643,22 +318,13 @@ Decisions made during planning. Reference these when implementing — don't re-l
 
 ## Implementation Order
 
-For agents working on this project, build in this order:
+For agents working on Phase 1a, build in this order:
 
-1. **P1-1 → P1-2:** Project setup and CLAUDE.md
-2. **P1-6:** Write queue (foundational — everything depends on this)
-3. **P1-3:** Notes service (the core domain logic)
-4. **P1-5:** Vault service (git operations)
-5. **P1-7:** Auth middleware
-6. **P1-8:** Router (wires everything together)
-7. **P1-4:** Search service (QMD integration)
-8. **P1-9:** MCP transport
-9. **P1-10:** Audit logger
-10. **P1-16 → P1-18:** Tests
-11. **P1-11:** Configuration
-12. **P1-12:** CLI
-13. **P1-13 → P1-14:** Deployment
-14. **P1-15:** Claude.ai registration
-15. **P1-19:** Search quality validation
+1. **P1-1** Write queue (foundational — everything depends on this)
+2. **P1-2 + P1-3** Vault ops + note validation (can build in parallel)
+3. **P1-4** Grove MCP server (the core — registers all 6 tools)
+4. **P1-5** Wire proxy → Grove server
+5. **P1-6** VPS git push access
+6. **P1-7** End-to-end test (plant → harvest → tend → loop)
 
-Phase 0 tasks (P0-1 through P0-5) can be done in parallel with early Phase 1 work, or as a standalone sprint beforehand.
+Phase 1b tasks (P1-8 through P1-15) can be done in any order after 1a is validated.
