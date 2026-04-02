@@ -514,19 +514,47 @@ const server = createServer(async (req, res) => {
     const groveReq = httpRequest(
       { hostname: "127.0.0.1", port: GROVE_SERVER_PORT, path: "/mcp", method: req.method, headers: groveHeaders() },
       (groveRes) => {
-        // If stale session → retry without session ID so Grove creates a fresh one
+        // If stale session → initialize a new session, then replay the request
         if (groveRes.statusCode === 400 && sessionStr && req.method === "POST") {
-          groveRes.resume(); // drain the response
-          console.log("[proxy] stale session, retrying without session ID");
-          const retryReq = httpRequest(
-            { hostname: "127.0.0.1", port: GROVE_SERVER_PORT, path: "/mcp", method: "POST", headers: groveHeaders(true) },
-            (retryRes) => pipeGroveResponse(retryRes),
-          );
-          retryReq.on("error", (err) => {
-            if (!res.headersSent) sendJson(res, 502, { error: "Grove server unreachable" });
+          groveRes.resume();
+          console.log("[proxy] stale session, initializing new Grove session");
+
+          // Step 1: send initialize to get a new session
+          const initBody = JSON.stringify({
+            jsonrpc: "2.0", id: "proxy-init",
+            method: "initialize",
+            params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "grove-proxy", version: "1" } },
           });
-          if (body) retryReq.write(body);
-          retryReq.end();
+          const initReq = httpRequest(
+            { hostname: "127.0.0.1", port: GROVE_SERVER_PORT, path: "/mcp", method: "POST",
+              headers: { "Content-Type": "application/json", "Accept": "application/json, text/event-stream", "Content-Length": String(Buffer.byteLength(initBody)) } },
+            (initRes) => {
+              let initData = "";
+              const newSession = initRes.headers["mcp-session-id"] as string | undefined;
+              initRes.on("data", (c) => initData += c);
+              initRes.on("end", () => {
+                if (!newSession) {
+                  console.error("[proxy] failed to get new session from Grove");
+                  pipeGroveResponse(groveRes); // fall back to original error
+                  return;
+                }
+                console.log("[proxy] new session:", newSession);
+                // Step 2: replay original request with new session
+                const replayHeaders = groveHeaders(true);
+                replayHeaders["mcp-session-id"] = newSession;
+                const retryReq = httpRequest(
+                  { hostname: "127.0.0.1", port: GROVE_SERVER_PORT, path: "/mcp", method: "POST", headers: replayHeaders },
+                  (retryRes) => pipeGroveResponse(retryRes),
+                );
+                retryReq.on("error", () => { if (!res.headersSent) sendJson(res, 502, { error: "Grove server unreachable" }); });
+                if (body) retryReq.write(body);
+                retryReq.end();
+              });
+            },
+          );
+          initReq.on("error", () => { if (!res.headersSent) sendJson(res, 502, { error: "Grove init failed" }); });
+          initReq.write(initBody);
+          initReq.end();
           return;
         }
         pipeGroveResponse(groveRes);
