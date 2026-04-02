@@ -18,6 +18,7 @@ import {
 } from "node:http";
 import { createHash, randomBytes } from "node:crypto";
 import { appendFileSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { hybridSearch, formatResults } from "./hybrid-search.js";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { loadKeys, type StoredKey } from "./keys.js";
@@ -406,8 +407,7 @@ const server = createServer(async (req, res) => {
 
   log(key.name, req.method ?? "", req.url ?? "", 200);
 
-  // Intercept MCP query tool calls → reroute to BM25 search (port 8177)
-  // The MCP query tool tries to load embedding models which OOM on this VPS.
+  // Intercept MCP query tool calls → hybrid search (BM25 + vector via TEI + RRF)
   if (url.pathname === "/mcp" && req.method === "POST") {
     const body = await readBody(req);
     let parsed: any;
@@ -415,48 +415,32 @@ const server = createServer(async (req, res) => {
 
     if (parsed?.method === "tools/call" && parsed?.params?.name === "query") {
       const searches = parsed.params.arguments?.searches ?? [];
-      // Extract query text from the first search
       const queryText = searches.map((s: any) => s.query).join(" ");
       const limit = parsed.params.arguments?.limit ?? 10;
 
-      // Hit BM25 search server
-      const searchUrl = `/search?q=${encodeURIComponent(queryText)}&n=${limit}`;
-      const searchReq = httpRequest(
-        { hostname: "127.0.0.1", port: 8177, path: searchUrl, method: "GET" },
-        (searchRes) => {
-          let data = "";
-          searchRes.on("data", (c) => (data += c));
-          searchRes.on("end", () => {
-            try {
-              const results = JSON.parse(data);
-              const formatted = results
-                .map((r: any) => `**${r.title}** (${r.file}, score: ${r.score})\n${r.snippet ?? ""}`)
-                .join("\n\n---\n\n");
-              const mcpResponse = {
-                jsonrpc: "2.0",
-                id: parsed.id,
-                result: {
-                  content: [{ type: "text", text: formatted || "No results found." }],
-                },
-              };
-              // Preserve session header from the original request
-              const sessionId = req.headers["mcp-session-id"];
-              const headers: Record<string, string> = {
-                "Content-Type": "application/json",
-                "access-control-allow-origin": "*",
-                "access-control-expose-headers": "mcp-session-id",
-              };
-              if (sessionId) headers["mcp-session-id"] = Array.isArray(sessionId) ? sessionId[0] : sessionId;
-              res.writeHead(200, headers);
-              res.end(JSON.stringify(mcpResponse));
-            } catch {
-              sendJson(res, 502, { error: "Search parsing failed" });
-            }
-          });
-        }
-      );
-      searchReq.on("error", () => sendJson(res, 502, { error: "Search server unreachable" }));
-      searchReq.end();
+      try {
+        const results = await hybridSearch(queryText, limit);
+        const formatted = formatResults(results);
+        const mcpResponse = {
+          jsonrpc: "2.0",
+          id: parsed.id,
+          result: {
+            content: [{ type: "text", text: formatted || "No results found." }],
+          },
+        };
+        const sessionId = req.headers["mcp-session-id"];
+        const headers: Record<string, string> = {
+          "Content-Type": "application/json",
+          "access-control-allow-origin": "*",
+          "access-control-expose-headers": "mcp-session-id",
+        };
+        if (sessionId) headers["mcp-session-id"] = Array.isArray(sessionId) ? sessionId[0] : sessionId;
+        res.writeHead(200, headers);
+        res.end(JSON.stringify(mcpResponse));
+      } catch (err: any) {
+        console.error(`[proxy] hybrid search failed: ${err.message}`);
+        sendJson(res, 502, { error: "Search failed" });
+      }
       return;
     }
 
