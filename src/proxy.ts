@@ -21,7 +21,7 @@ import { appendFileSync, readFileSync, writeFileSync, existsSync } from "node:fs
 import { RateLimiter } from "./rate-limit.js";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { loadKeys, type StoredKey } from "./keys.js";
+import { loadKeys, createKey, revokeKey, type StoredKey } from "./keys.js";
 
 const QMD_PORT = Number(process.env.QMD_PORT ?? 8181);
 const GROVE_SERVER_PORT = Number(process.env.GROVE_SERVER_PORT ?? 8190);
@@ -355,6 +355,101 @@ function proxyToQmd(req: IncomingMessage, res: ServerResponse) {
   req.pipe(proxyReq);
 }
 
+function setupPage(keyName: string | null): string {
+  return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Grove</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:-apple-system,system-ui,sans-serif;max-width:560px;margin:40px auto;padding:0 20px;color:#1a1a1a;line-height:1.5}
+  h1{font-size:1.4em;margin-bottom:4px}
+  .sub{color:#666;margin-bottom:32px;font-size:.9em}
+  .section{margin-bottom:28px}
+  .section h2{font-size:.85em;text-transform:uppercase;letter-spacing:.05em;color:#888;margin-bottom:8px}
+  .endpoint{background:#f5f5f5;padding:12px 16px;border-radius:8px;font-family:monospace;font-size:.9em;word-break:break-all;cursor:pointer;position:relative}
+  .endpoint:hover{background:#eee}
+  .endpoint::after{content:'copy';position:absolute;right:12px;top:12px;font-family:sans-serif;font-size:.75em;color:#888}
+  input,button{font-size:.9em;padding:8px 12px;border-radius:6px;border:1px solid #ddd}
+  input{width:100%;margin-bottom:8px}
+  button{background:#1a1a1a;color:#fff;border:none;cursor:pointer;padding:8px 20px}
+  button:hover{background:#333}
+  .key-list{font-size:.85em;margin-top:12px}
+  .key-item{display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #eee}
+  .key-item button{font-size:.75em;padding:4px 10px;background:#c33}
+  .token-display{background:#f0f7e6;padding:12px;border-radius:8px;font-family:monospace;font-size:.8em;word-break:break-all;margin-top:8px}
+  .note{font-size:.8em;color:#888;margin-top:4px}
+  #auth-section{margin-bottom:28px}
+  #authed{display:none}
+</style></head><body>
+<h1>Grove</h1>
+<p class="sub">Knowledge API for your Obsidian vault</p>
+
+<div class="section">
+  <h2>MCP Endpoint</h2>
+  <div class="endpoint" onclick="navigator.clipboard.writeText('${GROVE_URL}/mcp')">${GROVE_URL}/mcp</div>
+  <p class="note">Use this URL when adding Grove as an MCP connector in Claude.ai, Cursor, or any MCP client.</p>
+</div>
+
+<div id="auth-section">
+  <div class="section">
+    <h2>Authenticate</h2>
+    <input type="password" id="token-input" placeholder="Paste your API key (grove_live_...)" />
+    <button onclick="auth()">Sign in</button>
+    <p class="note">Need a key? Create one via SSH: <code>cd ~/grove && npx tsx src/keys.ts create --name my-key</code></p>
+  </div>
+</div>
+
+<div id="authed">
+  <div class="section">
+    <h2>Create API Key</h2>
+    <input type="text" id="key-name" placeholder="Key name (e.g., phone, laptop, cli)" />
+    <button onclick="createKey()">Create</button>
+    <div id="new-token" style="display:none">
+      <div class="token-display" id="token-value"></div>
+      <p class="note">Save this now — it won't be shown again.</p>
+    </div>
+  </div>
+  <div class="section">
+    <h2>API Keys</h2>
+    <div id="key-list" class="key-list">Loading...</div>
+  </div>
+</div>
+
+<script>
+let bearerToken = null;
+function auth() {
+  bearerToken = document.getElementById('token-input').value.trim();
+  if (!bearerToken) return;
+  fetch('/health', { headers: { 'Authorization': 'Bearer ' + bearerToken } })
+    .then(() => {
+      document.getElementById('auth-section').style.display = 'none';
+      document.getElementById('authed').style.display = 'block';
+      loadKeys();
+    });
+}
+function loadKeys() {
+  // We can't list keys via API yet — just show a placeholder
+  document.getElementById('key-list').innerHTML = '<p class="note">Key management available via CLI: <code>npx tsx src/keys.ts list</code></p>';
+}
+function createKey() {
+  const name = document.getElementById('key-name').value.trim();
+  if (!name) return;
+  fetch('/keys', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + bearerToken, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'create', name }),
+  }).then(r => r.json()).then(d => {
+    if (d.token) {
+      document.getElementById('token-value').textContent = d.token;
+      document.getElementById('new-token').style.display = 'block';
+      document.getElementById('key-name').value = '';
+    }
+  });
+}
+</script>
+</body></html>`;
+}
+
 function sendJson(res: ServerResponse, status: number, body: unknown) {
   res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(body));
@@ -423,6 +518,44 @@ const server = createServer(async (req, res) => {
   // Health check — unauthenticated
   if (url.pathname === "/health") {
     sendJson(res, 200, { ok: true, proxy: true });
+    return;
+  }
+
+  // ── Setup page at / ──
+  if (url.pathname === "/" && req.method === "GET") {
+    const authHeader = req.headers.authorization;
+    const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
+    const authed = token ? validateToken(token) : null;
+
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(setupPage(authed?.name ?? null));
+    return;
+  }
+
+  // ── Key management API (bearer auth required) ──
+  if (url.pathname === "/keys" && req.method === "POST") {
+    const authHeader = req.headers.authorization;
+    const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
+    const authed = token ? validateToken(token) : null;
+    if (!authed) { sendJson(res, 401, { error: "unauthorized" }); return; }
+
+    const body = await readBody(req);
+    let parsed: any;
+    try { parsed = JSON.parse(body); } catch { sendJson(res, 400, { error: "invalid json" }); return; }
+
+    if (parsed.action === "create" && parsed.name) {
+      const result = createKey(parsed.name, parsed.scopes ?? ["read", "write"], parsed.vault ?? "life");
+      reloadKeys();
+      sendJson(res, 200, { id: result.id, name: result.name, token: result.token });
+      return;
+    }
+    if (parsed.action === "revoke" && parsed.id) {
+      revokeKey(parsed.id);
+      reloadKeys();
+      sendJson(res, 200, { revoked: parsed.id });
+      return;
+    }
+    sendJson(res, 400, { error: "invalid action" });
     return;
   }
 

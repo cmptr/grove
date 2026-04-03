@@ -124,5 +124,32 @@ if (command === "create") {
   console.log("Usage: grove keys <create|list|revoke>");
 }
 
-// -- Export for proxy --
+// -- Programmatic API (used by proxy /keys endpoint) --
+export function createKey(name: string, scopes: string[] = ["read", "write"], vaultId = "life") {
+  const keys = loadKeys();
+  const raw = randomBytes(32).toString("hex");
+  const token = PREFIX + raw;
+  const key: StoredKey = {
+    id: generateId(),
+    name,
+    hashed_token: hashToken(token),
+    scopes,
+    vault_id: vaultId,
+    created_at: new Date().toISOString(),
+    last_used_at: null,
+  };
+  keys.push(key);
+  saveKeys(keys);
+  return { id: key.id, name: key.name, token };
+}
+
+export function revokeKey(id: string): boolean {
+  const keys = loadKeys();
+  const idx = keys.findIndex((k) => k.id === id);
+  if (idx === -1) return false;
+  keys.splice(idx, 1);
+  saveKeys(keys);
+  return true;
+}
+
 export { loadKeys, hashToken, type StoredKey };
