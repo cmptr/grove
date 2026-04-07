@@ -42,7 +42,9 @@ interface HybridResult {
  */
 async function embedQuery(text: string): Promise<number[]> {
   return new Promise((resolve, reject) => {
-    const body = JSON.stringify({ model: "tei", input: text });
+    // Qwen3-Embedding uses instruction prefix for queries (not documents)
+    const instructed = `Instruct: Given a search query, retrieve relevant passages from a personal knowledge vault\nQuery: ${text}`;
+    const body = JSON.stringify({ model: "tei", input: instructed });
     const req = httpRequest(
       {
         hostname: "127.0.0.1",
