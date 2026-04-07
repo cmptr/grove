@@ -56,7 +56,7 @@ function post(url: URL, body: unknown, headers: Record<string, string> = {}): Pr
         headers: {
           "Content-Type": "application/json",
           "Content-Length": Buffer.byteLength(data),
-          "Accept": "application/json",
+          "Accept": "application/json, text/event-stream",
           ...headers,
         },
       },
