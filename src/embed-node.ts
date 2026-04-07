@@ -1,13 +1,13 @@
 #!/usr/bin/env tsx
 /**
- * Embed all docs via TEI (SSH tunnel) + insert into SQLite vec0.
+ * Embed all docs via TEI + insert into SQLite vec0.
  * No Python, no PyTorch, no GC issues.
  *
- * Prerequisites:
- *   ssh -f -N -L 18090:localhost:8090 mili   # tunnel to VPS TEI
- *
- * Usage:
+ * Usage (on VPS with local TEI):
  *   npx tsx src/embed-node.ts
+ *
+ * Usage (from Mac via SSH tunnel):
+ *   TEI_URL=http://localhost:18090 npx tsx src/embed-node.ts
  */
 
 import Database from "better-sqlite3";
@@ -16,10 +16,10 @@ import { existsSync } from "node:fs";
 import { request } from "node:http";
 
 const DB_PATH = `${homedir()}/.cache/qmd/index.sqlite`;
-const TEI_URL = process.env.TEI_URL ?? "http://localhost:18090";
+const TEI_URL = process.env.TEI_URL ?? "http://localhost:8090";
 const CHUNK_SIZE = 1200; // TEI max 512 tokens; ~3 chars/token with markup
 const CHUNK_OVERLAP = 180;
-const BATCH = 8; // TEI CPU batch limit
+const BATCH = Number(process.env.BATCH_SIZE ?? 32); // GPU handles 32+ easily; use BATCH_SIZE=8 for CPU
 const MODEL_LABEL = "qwen3-embedding-0.6b";
 
 // Find vec0 extension
