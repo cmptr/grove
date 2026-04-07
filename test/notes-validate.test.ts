@@ -103,14 +103,22 @@ describe("validateNote", () => {
     expect(errors).toEqual([expect.stringContaining("Tags must include 'concept'")]);
   });
 
-  it("rejects wrong path/type combo", () => {
+  it("rejects type placed in another type's folder", () => {
     const { errors } = validateNote("Resources/People/Foo.md", {
       type: "concept",
       tags: ["concept"],
     }, "");
     expect(errors).toEqual([
-      expect.stringContaining("Type 'concept' must be under Resources/Concepts/"),
+      expect.stringContaining("Type 'concept' cannot be placed under Resources/People/"),
     ]);
+  });
+
+  it("allows type in a folder with no type claim", () => {
+    const { errors } = validateNote("Areas/Health/Sleep Tracking.md", {
+      type: "concept",
+      tags: ["concept"],
+    }, "");
+    expect(errors).toEqual([]);
   });
 
   it("allows any type in Inbox/", () => {
@@ -193,7 +201,7 @@ describe("validateNote", () => {
     expect(errors).toEqual([expect.stringContaining("Tags must include 'x-bookmark'")]);
   });
 
-  it("rejects source note in wrong folder", () => {
+  it("rejects source note in another type's folder", () => {
     const { errors } = validateNote("Resources/Concepts/test.md", {
       type: "source",
       tags: ["x-bookmark"],
@@ -201,7 +209,7 @@ describe("validateNote", () => {
       url: "https://x.com/someone/status/123",
     }, "");
     expect(errors).toEqual([
-      expect.stringContaining("Type 'source' must be under Sources/"),
+      expect.stringContaining("Type 'source' cannot be placed under Resources/Concepts/"),
     ]);
   });
 

@@ -92,19 +92,16 @@ export function validateNote(
   if (!tags.includes(spec.tag))
     errors.push(`Tags must include '${spec.tag}'`);
 
-  // Path/type consistency (skip for Inbox/ and Notes/)
+  // Path/type consistency: reject only when a note is in another type's folder
   const basename = path.split("/").pop() ?? "";
   const relSegments = path;
-  const inFlexFolder =
-    relSegments.includes("/Inbox/") ||
-    relSegments.includes("/Notes/") ||
-    relSegments.startsWith("Inbox/") ||
-    relSegments.startsWith("Notes/");
 
-  if (!inFlexFolder && type in TYPE_PATHS) {
-    const expected = TYPE_PATHS[type];
-    if (!relSegments.includes(expected))
-      errors.push(`Type '${type}' must be under ${expected}`);
+  for (const [otherType, prefix] of Object.entries(TYPE_PATHS)) {
+    if (otherType === type) continue;
+    if (relSegments.startsWith(prefix) || relSegments.includes(`/${prefix}`)) {
+      errors.push(`Type '${type}' cannot be placed under ${prefix} (that's for '${otherType}')`);
+      break;
+    }
   }
 
   // Journal filename pattern
