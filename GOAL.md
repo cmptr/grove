@@ -1,6 +1,8 @@
 # Grove — GOAL.md
 
-> Make the best personal knowledge API on the internet.
+> Your knowledge, everywhere your AI is. Shaped for every audience.
+
+Grove is a hosted knowledge API over a personal Obsidian vault. Phase 1 built the foundation — 6 MCP tools, hybrid search, git-backed writes, 150/150 on infrastructure quality. Now it becomes something bigger: a system where knowledge grows autonomously and can be selectively shared through **groves** — topic-scoped windows into your knowledge, enforced server-side.
 
 ## Fitness Function
 
@@ -9,57 +11,79 @@ bash scripts/score.sh        # human-readable
 bash scripts/score.sh --json # machine-readable
 ```
 
-**Mode: Split** — The agent can improve measurement scripts and add new checks, but cannot change the component weights or point allocations defined below.
+**Mode: Split** — Agents can improve measurement scripts and add new checks, but cannot change component weights or point allocations.
 
 ### Components (150 points total)
 
 | Component | Points | What it measures |
 |-----------|--------|------------------|
-| **Reliability** | 35 | Tests pass, error messages are helpful, no silent failures, git ops recover gracefully |
-| **Search Quality** | 25 | Hybrid search returns relevant results, BM25+vec fusion works, edge cases handled |
-| **Code Quality** | 30 | Test coverage by module, no `any` types, no swallowed errors, consistent patterns |
-| **Developer Experience** | 30 | Setup works, CLI is complete, docs are accurate, deploy is smooth |
-| **Flexibility** | 30 | Validation doesn't block reasonable requests, vault structure isn't over-prescribed |
+| **Groves** | 30 | Shared knowledge spaces work — CRUD, LLM-as-judge filtering, scope enforcement, evals pass |
+| **Discovery** | 30 | Background loop grows the concept graph autonomously — extracts, links, surfaces, respects limits |
+| **Onboarding** | 20 | Bulk ingest works — folder in, structured vault out, deduplicates, extracts concepts |
+| **Safety** | 30 | Judge evals >95% precision, snapshots/rollback work, blast radius enforced, full audit trail |
+| **Foundation** | 40 | Tests pass, no regressions, infrastructure scorecard holds (reliability, search, code quality, DX, flexibility) |
+
+---
 
 ### Scoring Details
 
-**Reliability (35 pts)**
+**Groves (30 pts)** — Shared knowledge spaces
+
+A grove is: a name + topic instructions (allow/deny) + permission level (search/read/write) + API key. The LLM judge runs server-side on the VPS, filtering every response before it reaches the consumer.
+
+- Grove CRUD works (`grove create`, `grove list`, `grove revoke`): 5 pts
+- Grove config stored and loaded (`~/.grove/groves.json`): 3 pts
+- LLM-as-judge filters responses for grove keys: 5 pts
+- Judge blocks sensitive content in eval suite (>95% precision): 5 pts
+- Judge allows on-topic content in eval suite (>90% recall): 4 pts
+- Permission levels enforced (search-only can't read full notes, read can't write): 4 pts
+- Consumer can connect their Claude to a grove via MCP endpoint: 4 pts
+
+**Discovery (30 pts)** — Autonomous knowledge growth
+
+A background loop on the VPS that watches for new/changed notes and grows the concept graph without human invocation.
+
+- Background process runs and watches for changes: 5 pts
+- Extracts new concepts from changed notes: 5 pts
+- Creates concept notes that don't exist yet: 5 pts
+- Wires wikilinks between related notes: 5 pts
+- Surfaces surprising connections (semantic neighbors): 3 pts
+- Respects blast radius limit (max N notes per run): 4 pts
+- Git-tag snapshot before each run: 3 pts
+
+**Onboarding (20 pts)** — Cold start / bulk ingest
+
+Point at a folder, get a structured vault.
+
+- `grove ingest <dir>` reads files from a directory: 5 pts
+- Parses markdown frontmatter and content: 3 pts
+- Deduplicates against existing vault (by title, content hash): 4 pts
+- Extracts concepts and creates initial graph: 5 pts
+- Handles non-markdown files gracefully (skip or convert): 3 pts
+
+**Safety (30 pts)** — Trust infrastructure
+
+The foundation that makes groves and discovery trustworthy.
+
+- Judge eval suite exists with labeled test cases: 5 pts
+- Eval precision >95% (doesn't leak sensitive notes): 5 pts
+- Eval recall >90% (doesn't over-block on-topic content): 5 pts
+- `grove rollback <tag>` reverts to a snapshot: 5 pts
+- Blast radius limit configurable and enforced: 4 pts
+- Audit log records every autonomous action with reasoning: 3 pts
+- Rate limits per grove (writes/hour): 3 pts
+
+**Foundation (40 pts)** — No regressions
+
+The infrastructure scorecard from the previous GOAL.md, sampled:
+
 - All tests pass: 10 pts
-- Every `catch` block either logs or re-throws (no empty catches): 5 pts
-- Error messages include actionable context (not just "invalid"): 5 pts
-- Git operations handle branch/remote detection (not hardcoded `origin/main`): 5 pts
-- Write queue recovers from failures without corrupting state: 5 pts
-- QMD reindex failures don't block writes: 5 pts
-
-**Search Quality (25 pts)**
-- Vec search fallback when TEI is down: 5 pts
-- BM25 search works independently: 5 pts
-- Fuzzy path resolution covers common patterns: 5 pts
-- Search handles empty/malformed queries gracefully: 5 pts
-- RRF weights are configurable (env vars or config): 5 pts
-
-**Code Quality (30 pts)**
-- Test files exist for every src module with >50 lines: 10 pts (1 pt per module)
-- No `as any` casts: 5 pts
-- Frontmatter parsing uses a real YAML parser (not regex): 5 pts
-- Consistent error handling pattern across modules: 5 pts
-- No hardcoded paths that assume specific OS/install: 5 pts
-
-**Developer Experience (30 pts)**
-- README has working setup instructions: 5 pts
-- `grove status` works against live server: 5 pts
-- CLI covers all 6 MCP tools: 5 pts
-- CLI has `--help` for every command: 5 pts
-- Deploy process documented and works in <5 commands: 5 pts
-- First-time setup from clone to running takes <10 min: 5 pts
-
-**Flexibility (30 pts)**
-- Any type string accepted in validation: 5 pts
-- Tags not forced to match type: 5 pts
-- Path enforcement only blocks cross-type conflicts: 5 pts
-- write_note description matches actual validation behavior: 5 pts
-- Lifecycle classification covers all vault folders: 5 pts
-- CLI write accepts custom tags: 5 pts
+- No empty catch blocks or `as any` casts: 5 pts
+- Every src module >50 lines has tests: 5 pts
+- Git ops use dynamic branch detection: 5 pts
+- Error messages have actionable context: 5 pts
+- CLI covers all operations with --help: 5 pts
+- README and deploy docs are current: 5 pts
 
 ---
 
@@ -80,68 +104,99 @@ bash scripts/score.sh --json # machine-readable
 
 ### Iteration Log
 
-Append one JSON line per iteration to `iterations.jsonl`:
-
 ```json
-{"ts":"2026-04-07T12:00:00Z","before":{"total":85,"reliability":25,"search":15,"code":20,"dx":15,"flexibility":10},"after":{"total":92,"reliability":25,"search":15,"code":27,"dx":15,"flexibility":10},"action":"add tests for vault-ops and embed-single","component":"code","delta":7}
+{"ts":"2026-04-07T18:00:00Z","before":{"total":40,"groves":0,"discovery":0,"onboarding":0,"safety":0,"foundation":40},"after":{"total":52,"groves":12,"discovery":0,"onboarding":0,"safety":0,"foundation":40},"action":"grove CRUD and config storage","component":"groves","delta":12}
 ```
 
 ---
 
 ## Action Catalog
 
-Prioritized by estimated impact. Work top-down.
+Prioritized by impact. **Ship Groves first** — it's the most differentiated feature and unlocks sharing.
 
-### Reliability (+35 potential)
+### Groves (+30 potential)
 | Action | Est. pts | Effort |
 |--------|----------|--------|
-| Replace hardcoded `origin/main` with detected upstream | +5 | 30 min |
-| Add recovery logging to every catch block in proxy.ts | +5 | 20 min |
-| Make error messages include fix suggestions | +5 | 30 min |
-| Add QMD health check before reindex (skip gracefully if down) | +5 | 15 min |
+| Grove config schema (`~/.grove/groves.json`) + CRUD CLI | +8 | 2 hr |
+| Wire grove key to proxy — inject topic instructions into request context | +5 | 2 hr |
+| LLM-as-judge filter layer — local model on VPS evaluates each response | +5 | 4 hr |
+| Permission level enforcement (search/read/write gates in proxy) | +4 | 2 hr |
+| Grove-specific MCP endpoint (consumer connects their Claude to your grove) | +4 | 2 hr |
+| Judge eval suite — labeled test cases, precision/recall measurement | +4 | 3 hr |
 
-### Search Quality (+25 potential)
+### Safety (+30 potential)
 | Action | Est. pts | Effort |
 |--------|----------|--------|
-| Add env vars for RRF weights (BM25_WEIGHT, VEC_WEIGHT) | +5 | 10 min |
-| Graceful BM25-only fallback when TEI is unreachable | +5 | 20 min |
-| Add search edge case tests (empty query, special chars) | +5 | 20 min |
+| Judge eval suite with labeled sensitive/safe notes | +10 | 3 hr |
+| `grove rollback <tag>` — revert vault to a git tag | +5 | 1 hr |
+| Blast radius config — max notes per background run | +4 | 30 min |
+| Audit log for autonomous actions | +3 | 1 hr |
+| Per-grove rate limits | +3 | 30 min |
 
-### Code Quality (+30 potential)
+### Discovery (+30 potential)
 | Action | Est. pts | Effort |
 |--------|----------|--------|
-| Add test files for vault-ops, vault-graph, proxy, cli, hybrid-search, embed | +10 | 2 hr |
-| Replace regex YAML parsing in vault-ops with `yaml` library | +5 | 20 min |
-| Audit and remove all `as any` casts | +5 | 30 min |
-| Standardize error handling (throw typed errors, never swallow) | +5 | 1 hr |
+| Background watcher process (triggered by git commits / write_note) | +5 | 3 hr |
+| Concept extraction from note content (entity recognition) | +5 | 4 hr |
+| Auto-create concept notes + wire wikilinks | +5 | 2 hr |
+| Semantic neighbor surfacing (embedding similarity) | +3 | 2 hr |
+| Git-tag snapshot before each run | +3 | 30 min |
+| Blast radius enforcement in loop | +4 | 30 min |
+| Discovery digest in vault_status | +5 | 1 hr |
 
-### Developer Experience (+30 potential)
+### Onboarding (+20 potential)
 | Action | Est. pts | Effort |
 |--------|----------|--------|
-| Add --help to every CLI command | +5 | 30 min |
-| Write setup guide (clone → running in <10 min) | +5 | 30 min |
-| Ensure README setup section is current and tested | +5 | 20 min |
+| `grove ingest <dir>` — read + parse directory of files | +8 | 2 hr |
+| Deduplication against existing vault | +4 | 1 hr |
+| Concept extraction from ingested content | +5 | 2 hr |
+| Non-markdown file handling (skip with warning) | +3 | 30 min |
 
-### Flexibility (+30 potential)
+### Foundation (+40 potential)
 | Action | Est. pts | Effort |
 |--------|----------|--------|
-| Most flexibility items already done in today's session | ~25 | done |
-| Remaining: verify lifecycle covers all folders end-to-end | +5 | 15 min |
+| Maintain existing test suite and code quality | +40 | ongoing |
 
 ---
 
 ## Operating Mode
 
-**Continuous** — This is a passion project. The agent should keep iterating as long as there are actions with positive expected value. When score approaches 140+, shift to finding new dimensions to measure.
+**Continuous** — with a bias toward shipping Groves first. The priority order:
+
+1. **Groves** — the most shareable, differentiated feature
+2. **Safety** — required before groves can be trusted
+3. **Discovery** — the autonomous growth loop
+4. **Onboarding** — cold start for new content
+5. **Foundation** — maintain, don't regress
 
 ---
 
 ## Constraints
 
 1. **Never break the MCP protocol.** Claude.ai connects as a custom connector. If response shape changes, every connected surface breaks.
-2. **Never add MCP tools beyond 6** without explicit approval. More tools = worse agent tool selection.
+2. **Never add MCP tools beyond 6** without explicit approval. More tools = worse agent tool selection. New capabilities compose from existing tools.
 3. **Never write to the vault outside the write queue.** Concurrent git = corruption.
-4. **Keep dependencies minimal.** Don't add packages for things Node can do natively. No web frameworks.
+4. **Keep dependencies minimal.** No web frameworks. No heavy ML libraries on VPS — use TEI and small local models.
 5. **All tests must pass before committing.** No `--no-verify`.
-6. **Don't refactor working code just for style.** If it works and has tests, leave it alone unless the score says otherwise.
-7. **Don't change PLAN.md phases or success criteria.** This file defines what to improve, not what to build.
+6. **Grove filtering must be server-side.** Never trust the consumer's client to respect topic boundaries.
+7. **Background discovery has a blast radius limit.** Default max 10 notes per run. Configurable but never unlimited.
+8. **Every autonomous write gets a git-tag snapshot.** Rollback must always be possible.
+9. **The vault is sacred.** Grove is plumbing. Discovery is a gardener. Neither is the owner.
+
+---
+
+## What Happened to the Garden Skills
+
+The garden-* skills in `~/.claude/skills/` were training wheels for when Grove was new and needed explicit workflows. As Grove matured, John stopped invoking them individually — he just talks to Grove and it figures out what to do.
+
+| Skill | Fate |
+|-------|------|
+| `/garden` | **Stays** — daily practice ritual, powered by discovery digest |
+| `/garden-wander` | **Stays** — serendipity requires a human in the loop |
+| `/garden-seek` | Absorbed — natural `query` tool use in conversation |
+| `/garden-plant` | Absorbed — natural `write_note` tool use in conversation |
+| `/garden-harvest` | Absorbed into background discovery loop |
+| `/garden-forage` | Absorbed into background discovery loop |
+| `/garden-tend` | Absorbed into background discovery loop |
+
+Skills that remain should be updated to consume discovery data rather than doing the discovery themselves.
