@@ -25,12 +25,10 @@ describe("validatePath", () => {
   });
 
   it("rejects paths containing ..", () => {
-    // Use a path that resolves inside root but still contains ..
     expect(() => validatePath(root, "sub/../other.md")).toThrow("Path contains ..");
   });
 
   it("rejects paths that escape the vault root", () => {
-    // Absolute path outside root
     expect(() => validatePath(root, "/etc/passwd.md")).toThrow();
   });
 
@@ -61,48 +59,75 @@ describe("validatePath", () => {
 // ── validateNote ────────────────────────────────────────────────────
 
 describe("validateNote", () => {
-  it("accepts a valid concept note", () => {
-    const { errors } = validateNote("Resources/Concepts/Foo.md", {
-      type: "concept",
-      tags: ["concept"],
-    }, "Some content");
-    expect(errors).toEqual([]);
-  });
-
-  it("rejects invalid type", () => {
+  // Type flexibility
+  it("accepts any type string", () => {
     const { errors } = validateNote("Inbox/test.md", {
       type: "widget",
       tags: ["widget"],
     }, "");
-    expect(errors).toEqual([expect.stringContaining("Invalid or missing type")]);
+    expect(errors).toEqual([]);
   });
 
   it("rejects missing type", () => {
     const { errors } = validateNote("Inbox/test.md", { tags: ["concept"] }, "");
-    expect(errors).toEqual([expect.stringContaining("Invalid or missing type")]);
+    expect(errors).toEqual([expect.stringContaining("Missing required field 'type'")]);
   });
 
-  it("rejects missing required fields for journal", () => {
+  // Tags — just need at least one
+  it("rejects empty tags", () => {
+    const { errors } = validateNote("Inbox/test.md", {
+      type: "concept",
+      tags: [],
+    }, "");
+    expect(errors).toEqual([expect.stringContaining("At least one tag")]);
+  });
+
+  it("rejects missing tags", () => {
+    const { errors } = validateNote("Inbox/test.md", {
+      type: "concept",
+    }, "");
+    expect(errors).toEqual([expect.stringContaining("At least one tag")]);
+  });
+
+  it("accepts any tag — no forced type-tag matching", () => {
+    const { errors } = validateNote("Resources/Concepts/Foo.md", {
+      type: "concept",
+      tags: ["ai", "research"],
+    }, "Some content");
+    expect(errors).toEqual([]);
+  });
+
+  // Known type required fields
+  it("rejects journal missing date", () => {
     const { errors } = validateNote("Journal/2026/2026-04-01.md", {
       type: "journal",
       tags: ["journal"],
     }, "");
-    expect(errors).toEqual(
-      expect.arrayContaining([
-        expect.stringContaining("Missing required field 'date'"),
-        expect.stringContaining("Missing required field 'source'"),
-      ])
-    );
+    expect(errors).toEqual([
+      expect.stringContaining("Missing required field 'date'"),
+    ]);
   });
 
-  it("rejects missing required tag", () => {
-    const { errors } = validateNote("Resources/Concepts/Foo.md", {
-      type: "concept",
-      tags: ["unrelated"],
+  it("accepts journal with just date (source not required)", () => {
+    const { errors } = validateNote("Journal/2026/2026-04-01.md", {
+      type: "journal",
+      tags: ["journal"],
+      date: "2026-04-01",
     }, "");
-    expect(errors).toEqual([expect.stringContaining("Tags must include 'concept'")]);
+    expect(errors).toEqual([]);
   });
 
+  it("rejects recipe missing meal_type", () => {
+    const { errors } = validateNote("Resources/Recipes/Pasta.md", {
+      type: "recipe",
+      tags: ["recipe"],
+    }, "");
+    expect(errors).toEqual([
+      expect.stringContaining("Missing required field 'meal_type'"),
+    ]);
+  });
+
+  // Path/type: only reject cross-type conflicts
   it("rejects type placed in another type's folder", () => {
     const { errors } = validateNote("Resources/People/Foo.md", {
       type: "concept",
@@ -121,37 +146,37 @@ describe("validateNote", () => {
     expect(errors).toEqual([]);
   });
 
-  it("allows any type in Inbox/", () => {
-    const { errors } = validateNote("Inbox/random.md", {
+  it("allows type in its own designated folder", () => {
+    const { errors } = validateNote("Resources/Concepts/Foo.md", {
       type: "concept",
       tags: ["concept"],
+    }, "Some content");
+    expect(errors).toEqual([]);
+  });
+
+  // Source notes — no special required fields
+  it("accepts a source note with any tags", () => {
+    const { errors } = validateNote("Sources/2026-04-02 @karpathy - LLM Knowledge Bases.md", {
+      type: "source",
+      tags: ["x-bookmark"],
+    }, "Some content");
+    expect(errors).toEqual([]);
+  });
+
+  it("accepts source note with non-bookmark tags", () => {
+    const { errors } = validateNote("Sources/some-article.md", {
+      type: "source",
+      tags: ["article", "research"],
     }, "");
     expect(errors).toEqual([]);
   });
 
-  it("allows any type in Notes/", () => {
-    const { errors } = validateNote("Notes/scratch.md", {
-      type: "person",
-      tags: ["person"],
-    }, "");
-    expect(errors).toEqual([]);
-  });
-
-  it("rejects oversized content", () => {
-    const huge = "x".repeat(101 * 1024);
-    const { errors } = validateNote("Inbox/big.md", {
-      type: "concept",
-      tags: ["concept"],
-    }, huge);
-    expect(errors).toEqual([expect.stringContaining("exceeds 100KB limit")]);
-  });
-
+  // Journal filename
   it("rejects bad journal filename", () => {
     const { errors } = validateNote("Journal/2026/my-journal.md", {
       type: "journal",
       tags: ["journal"],
       date: "2026-04-01",
-      source: "manual",
     }, "");
     expect(errors).toEqual([
       expect.stringContaining("Journal entries must match YYYY-MM-DD.md"),
@@ -163,64 +188,18 @@ describe("validateNote", () => {
       type: "journal",
       tags: ["journal"],
       date: "2026-04-01",
-      source: "manual",
     }, "");
     expect(errors).toEqual([]);
   });
 
-  it("accepts a valid source note", () => {
-    const { errors } = validateNote("Sources/2026-04-02 @karpathy - LLM Knowledge Bases.md", {
-      type: "source",
-      tags: ["x-bookmark"],
-      author: "@karpathy",
-      url: "https://x.com/karpathy/status/2039805659525644595",
-    }, "Some content");
-    expect(errors).toEqual([]);
-  });
-
-  it("rejects source note missing required fields", () => {
-    const { errors } = validateNote("Sources/test.md", {
-      type: "source",
-      tags: ["x-bookmark"],
-    }, "");
-    expect(errors).toEqual(
-      expect.arrayContaining([
-        expect.stringContaining("Missing required field 'author'"),
-        expect.stringContaining("Missing required field 'url'"),
-      ])
-    );
-  });
-
-  it("rejects source note missing x-bookmark tag", () => {
-    const { errors } = validateNote("Sources/test.md", {
-      type: "source",
-      tags: ["other"],
-      author: "@someone",
-      url: "https://x.com/someone/status/123",
-    }, "");
-    expect(errors).toEqual([expect.stringContaining("Tags must include 'x-bookmark'")]);
-  });
-
-  it("rejects source note in another type's folder", () => {
-    const { errors } = validateNote("Resources/Concepts/test.md", {
-      type: "source",
-      tags: ["x-bookmark"],
-      author: "@someone",
-      url: "https://x.com/someone/status/123",
-    }, "");
-    expect(errors).toEqual([
-      expect.stringContaining("Type 'source' cannot be placed under Resources/Concepts/"),
-    ]);
-  });
-
-  it("allows source note in Inbox/", () => {
-    const { errors } = validateNote("Inbox/test-source.md", {
-      type: "source",
-      tags: ["x-bookmark"],
-      author: "@someone",
-      url: "https://x.com/someone/status/123",
-    }, "");
-    expect(errors).toEqual([]);
+  // Size limit
+  it("rejects oversized content", () => {
+    const huge = "x".repeat(101 * 1024);
+    const { errors } = validateNote("Inbox/big.md", {
+      type: "concept",
+      tags: ["concept"],
+    }, huge);
+    expect(errors).toEqual([expect.stringContaining("exceeds 100KB limit")]);
   });
 });
 

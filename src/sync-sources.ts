@@ -38,12 +38,12 @@ export function readArchiveSources(dir: string): SourceNote[] {
     const raw = readFileSync(join(dir, entry.name), "utf-8");
     const { frontmatter, content } = parseNote(raw);
 
-    // Ensure source type for notes that predate the type field
+    // Backfill type for legacy notes that predate the type field
     if (!frontmatter.type) frontmatter.type = "source";
 
-    // Ensure x-bookmark tag
+    // Ensure at least one tag exists
     const tags = Array.isArray(frontmatter.tags) ? frontmatter.tags : [];
-    if (!tags.includes("x-bookmark")) tags.push("x-bookmark");
+    if (tags.length === 0) tags.push("x-bookmark");
     frontmatter.tags = tags;
 
     notes.push({
@@ -68,11 +68,6 @@ export function planSync(
   const skipped: string[] = [];
 
   for (const note of local) {
-    if (!note.frontmatter.author || !note.frontmatter.url) {
-      skipped.push(`${note.path} (missing required fields: author, url)`);
-      continue;
-    }
-
     if (existingPaths.has(note.path)) {
       skipped.push(note.path);
     } else {

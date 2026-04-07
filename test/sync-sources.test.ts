@@ -120,16 +120,14 @@ describe("planSync", () => {
     expect(plan.skipped).toContain("Sources/already-exists.md");
   });
 
-  it("skips notes missing required fields", () => {
-    const badNote: SourceNote = {
-      path: "Sources/bad.md",
+  it("creates notes without author/url — no longer required", () => {
+    const note: SourceNote = {
+      path: "Sources/minimal.md",
       frontmatter: { type: "source", tags: ["x-bookmark"] },
-      content: "no author or url",
+      content: "just content",
     };
-    const plan = planSync([badNote], new Set());
-    expect(plan.toCreate).toHaveLength(0);
-    expect(plan.skipped).toHaveLength(1);
-    expect(plan.skipped[0]).toContain("missing required fields");
+    const plan = planSync([note], new Set());
+    expect(plan.toCreate).toHaveLength(1);
   });
 
   it("handles empty local array", () => {

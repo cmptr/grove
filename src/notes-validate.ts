@@ -3,16 +3,12 @@ import { resolve, relative } from "node:path";
 import { lstatSync } from "node:fs";
 import { parse as yamlParse, stringify as yamlStringify } from "yaml";
 
-// ── Type whitelist & required fields ────────────────────────────────
-const NOTE_TYPES: Record<string, { tag: string; required: string[] }> = {
-  journal:  { tag: "journal",  required: ["date", "source"] },
-  concept:  { tag: "concept",  required: [] },
-  person:   { tag: "person",   required: [] },
-  recipe:   { tag: "recipe",   required: ["meal_type", "source"] },
-  project:  { tag: "project",  required: [] },
-  company:  { tag: "company",  required: [] },
-  place:    { tag: "place",    required: [] },
-  source:   { tag: "x-bookmark", required: ["author", "url"] },
+// ── Known types & required fields ──────────────────────────────────
+// Types with specific requirements are listed here.
+// Unlisted types are allowed — the vault is flexible.
+const KNOWN_TYPES: Record<string, { required: string[] }> = {
+  journal:  { required: ["date"] },
+  recipe:   { required: ["meal_type"] },
 };
 
 // ── Type → allowed folder prefixes (Inbox/ and Notes/ accept anything) ──
@@ -70,27 +66,28 @@ export function validateNote(
     errors.push("Content exceeds 100KB limit");
 
   const type = frontmatter.type as string | undefined;
-  if (!type || !(type in NOTE_TYPES)) {
-    errors.push(`Invalid or missing type: ${type ?? "(none)"}`);
+  if (!type || typeof type !== "string") {
+    errors.push(`Missing required field 'type'`);
     return { errors };
   }
 
-  const spec = NOTE_TYPES[type];
-
-  // Required fields
-  for (const f of spec.required) {
-    if (frontmatter[f] == null || frontmatter[f] === "")
-      errors.push(`Missing required field '${f}' for type '${type}'`);
+  // Check required fields for known types
+  const spec = KNOWN_TYPES[type];
+  if (spec) {
+    for (const f of spec.required) {
+      if (frontmatter[f] == null || frontmatter[f] === "")
+        errors.push(`Missing required field '${f}' for type '${type}'`);
+    }
   }
 
-  // Tags must include the type value
+  // Tags must exist (but we don't dictate which ones)
   const tags = Array.isArray(frontmatter.tags)
     ? frontmatter.tags
     : typeof frontmatter.tags === "string"
       ? [frontmatter.tags]
       : [];
-  if (!tags.includes(spec.tag))
-    errors.push(`Tags must include '${spec.tag}'`);
+  if (tags.length === 0)
+    errors.push(`At least one tag is required`);
 
   // Path/type consistency: reject only when a note is in another type's folder
   const basename = path.split("/").pop() ?? "";
