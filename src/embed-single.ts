@@ -18,7 +18,7 @@ const TEI_PORT = Number(process.env.TEI_PORT ?? 8090);
 const QMD_INDEX = process.env.QMD_INDEX ?? `${process.env.HOME}/.cache/qmd/index.sqlite`;
 const CHUNK_SIZE = 1200;
 const CHUNK_OVERLAP = 180;
-const MODEL_LABEL = "bge-base-en-v1.5";
+const MODEL_LABEL = "qwen3-embedding-0.6b";
 
 // ── vec0 extension discovery ─────────────────────────────────────
 

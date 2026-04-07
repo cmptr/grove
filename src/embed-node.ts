@@ -20,7 +20,7 @@ const TEI_URL = process.env.TEI_URL ?? "http://localhost:18090";
 const CHUNK_SIZE = 1200; // TEI max 512 tokens; ~3 chars/token with markup
 const CHUNK_OVERLAP = 180;
 const BATCH = 8; // TEI CPU batch limit
-const MODEL_LABEL = "bge-base-en-v1.5";
+const MODEL_LABEL = "qwen3-embedding-0.6b";
 
 // Find vec0 extension
 function findVec0(): string {
