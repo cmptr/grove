@@ -159,6 +159,61 @@ describe("validateNote", () => {
     }, "");
     expect(errors).toEqual([]);
   });
+
+  it("accepts a valid source note", () => {
+    const { errors } = validateNote("Sources/2026-04-02 @karpathy - LLM Knowledge Bases.md", {
+      type: "source",
+      tags: ["x-bookmark"],
+      author: "@karpathy",
+      url: "https://x.com/karpathy/status/2039805659525644595",
+    }, "Some content");
+    expect(errors).toEqual([]);
+  });
+
+  it("rejects source note missing required fields", () => {
+    const { errors } = validateNote("Sources/test.md", {
+      type: "source",
+      tags: ["x-bookmark"],
+    }, "");
+    expect(errors).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("Missing required field 'author'"),
+        expect.stringContaining("Missing required field 'url'"),
+      ])
+    );
+  });
+
+  it("rejects source note missing x-bookmark tag", () => {
+    const { errors } = validateNote("Sources/test.md", {
+      type: "source",
+      tags: ["other"],
+      author: "@someone",
+      url: "https://x.com/someone/status/123",
+    }, "");
+    expect(errors).toEqual([expect.stringContaining("Tags must include 'x-bookmark'")]);
+  });
+
+  it("rejects source note in wrong folder", () => {
+    const { errors } = validateNote("Resources/Concepts/test.md", {
+      type: "source",
+      tags: ["x-bookmark"],
+      author: "@someone",
+      url: "https://x.com/someone/status/123",
+    }, "");
+    expect(errors).toEqual([
+      expect.stringContaining("Type 'source' must be under Sources/"),
+    ]);
+  });
+
+  it("allows source note in Inbox/", () => {
+    const { errors } = validateNote("Inbox/test-source.md", {
+      type: "source",
+      tags: ["x-bookmark"],
+      author: "@someone",
+      url: "https://x.com/someone/status/123",
+    }, "");
+    expect(errors).toEqual([]);
+  });
 });
 
 // ── parseNote ───────────────────────────────────────────────────────

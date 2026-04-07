@@ -17,6 +17,7 @@ import { request as httpRequest } from "node:http";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { readArchiveSources, planSync } from "./sync-sources.js";
 
 // ── Config ───────────────────────────────────────────────────────
 
@@ -350,6 +351,60 @@ async function cmdDiagnostics(config: Config) {
   console.log(formatDiagnostics(raw));
 }
 
+async function cmdSync(config: Config, dir: string, flags: Record<string, string | boolean>) {
+  if (!dir) { console.error("Usage: grove sync <archive-sources-dir> [--dry-run]"); process.exit(1); }
+  const dryRun = !!flags["dry-run"];
+
+  // Read local archive
+  console.log(`Reading archive: ${dir}`);
+  const local = readArchiveSources(dir);
+  console.log(`Found ${local.length} source notes locally`);
+
+  // List existing sources on Grove
+  const listRaw = await callTool(config, "list_notes", { pattern: "Sources/*" });
+  const listData = JSON.parse(listRaw);
+  const existingPaths = new Set<string>((listData.notes ?? []).map((n: any) => n.path));
+  console.log(`Found ${existingPaths.size} source notes on Grove`);
+
+  // Plan
+  const plan = planSync(local, existingPaths);
+  console.log(`\nSync plan:`);
+  console.log(`  Create: ${plan.toCreate.length}`);
+  console.log(`  Skip:   ${plan.skipped.length}`);
+
+  if (plan.toCreate.length === 0) {
+    console.log("\nNothing to sync.");
+    return;
+  }
+
+  if (dryRun) {
+    console.log("\n[dry-run] Would create:");
+    for (const note of plan.toCreate) console.log(`  ${note.path}`);
+    return;
+  }
+
+  // Execute
+  let ok = 0;
+  let fail = 0;
+  for (const note of plan.toCreate) {
+    try {
+      const raw = await callTool(config, "write_note", {
+        path: note.path,
+        frontmatter: JSON.stringify(note.frontmatter),
+        content: note.content,
+      });
+      const result = JSON.parse(raw);
+      console.log(`  ✓ ${result.action} ${result.path}`);
+      ok++;
+    } catch (err: any) {
+      console.error(`  ✗ ${note.path}: ${err.message ?? err}`);
+      fail++;
+    }
+  }
+
+  console.log(`\nDone: ${ok} created, ${fail} failed, ${plan.skipped.length} skipped`);
+}
+
 function printUsage() {
   console.log(`grove — CLI client for the Grove knowledge API
 
@@ -358,6 +413,7 @@ Usage:
   grove read <path-or-title>            Read a note
   grove list <glob> [--aliases]         List notes
   grove write <path> --type <type>      Create note (content from stdin)
+  grove sync <dir> [--dry-run]          Sync archived Sources to Grove
   grove history [--since <date>]        Recent changes
   grove status                          Vault health
   grove diagnostics                     Run diagnostics
@@ -384,6 +440,7 @@ async function main() {
     case "read":    await cmdRead(config, positional); break;
     case "list":    await cmdList(config, positional, flags); break;
     case "write":   await cmdWrite(config, positional, flags); break;
+    case "sync":    await cmdSync(config, positional, flags); break;
     case "history": await cmdHistory(config, flags); break;
     case "status":  await cmdStatus(config); break;
     case "diagnostics": await cmdDiagnostics(config); break;

@@ -12,6 +12,7 @@ const NOTE_TYPES: Record<string, { tag: string; required: string[] }> = {
   project:  { tag: "project",  required: [] },
   company:  { tag: "company",  required: [] },
   place:    { tag: "place",    required: [] },
+  source:   { tag: "x-bookmark", required: ["author", "url"] },
 };
 
 // ── Type → allowed folder prefixes (Inbox/ and Notes/ accept anything) ──
@@ -23,6 +24,7 @@ const TYPE_PATHS: Record<string, string> = {
   company: "Resources/Companies/",
   place:   "Resources/Places/",
   journal: "Journal/",
+  source:  "Sources/",
 };
 
 const MAX_CONTENT_BYTES = 100 * 1024;
