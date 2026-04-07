@@ -222,18 +222,23 @@ Examples: "Resources/People/*.md", "Journal/2026/*.md", "path1.md,path2.md"`,
       title: "Create or update a note",
       description: `Create or update a note with validated frontmatter.
 
-STRUCTURE — put notes in the right place:
-  Resources/Concepts/Name.md   (type: concept)
-  Resources/People/Name.md     (type: person)
-  Resources/Recipes/Name.md    (type: recipe — needs meal_type, source)
-  Resources/Projects/Name.md   (type: project)
-  Journal/YYYY/YYYY-MM-DD.md   (type: journal — needs date, source)
-  Inbox/Name.md                (any type)
+STRUCTURE — common paths (but any path works):
+  Resources/Concepts/Name.md   Resources/People/Name.md
+  Resources/Recipes/Name.md    Resources/Projects/Name.md
+  Sources/Name.md              Journal/YYYY/YYYY-MM-DD.md
+  Areas/Name.md                Inbox/Name.md
+  Notes/Name.md
 
-FRONTMATTER — every note needs type + tags:
-  type: concept
-  tags: [concept]
-  aliases: ["alternate name"]  (optional)
+Only constraint: don't put a type in another type's designated folder
+(e.g., don't put type: person in Resources/Concepts/).
+
+FRONTMATTER — needs type (any string) + at least one tag:
+  type: concept          — any string works, not just known types
+  tags: [ai, research]   — at least one tag, your choice what
+  aliases: ["alt name"]  — optional
+
+Special requirements:
+  journal needs: date    recipe needs: meal_type
 
 LINKING — use [[wikilinks]] aggressively. Pipe for readability: [[Full Name|display text]].
 

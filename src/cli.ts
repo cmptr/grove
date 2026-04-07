@@ -315,9 +315,11 @@ async function cmdList(config: Config, pattern: string, flags: Record<string, st
 }
 
 async function cmdWrite(config: Config, path: string, flags: Record<string, string | boolean>) {
-  if (!path) { console.error("Usage: grove write <path> --type <type>"); process.exit(1); }
+  if (!path) { console.error("Usage: grove write <path> --type <type> [--tags tag1,tag2]"); process.exit(1); }
   const type = (flags.type as string) ?? "concept";
-  const tags = [type];
+  const tags = flags.tags
+    ? (flags.tags as string).split(",").map((t) => t.trim())
+    : [type];
 
   // Read content from stdin
   const chunks: Buffer[] = [];

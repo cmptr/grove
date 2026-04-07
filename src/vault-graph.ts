@@ -370,7 +370,7 @@ export async function computeDigest(vaultPath: string): Promise<GardenDigest> {
   }
 
   // Classify each note in Resources/, Notes/, Areas/
-  const CATEGORIZE_ROOTS = new Set(["Resources", "Notes", "Areas"]);
+  const CATEGORIZE_ROOTS = new Set(["Resources", "Notes", "Areas", "Sources", "Inbox"]);
 
   const seeds: { name: string; path: string; created: string }[] = [];
   const sprouts: { name: string; path: string; created: string }[] = [];
