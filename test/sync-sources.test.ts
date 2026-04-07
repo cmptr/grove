@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { readArchiveSources, planSync, type SourceNote } from "../src/sync-sources.js";
+import { readFileSync } from "node:fs";
+import { readArchiveSources, planSync, normalizeNote, normalizeDir, type SourceNote } from "../src/sync-sources.js";
 
 describe("readArchiveSources", () => {
   let dir: string;
@@ -134,5 +135,101 @@ describe("planSync", () => {
     const plan = planSync([], new Set(["Sources/something.md"]));
     expect(plan.toCreate).toHaveLength(0);
     expect(plan.skipped).toHaveLength(0);
+  });
+});
+
+describe("normalizeNote", () => {
+  it("normalizes quoted YAML values to match Grove serialization", () => {
+    const quoted = `---
+type: source
+author: "@karpathy"
+author_name: "Andrej Karpathy"
+url: "https://x.com/karpathy/status/123"
+tags:
+  - x-bookmark
+---
+
+# Content`;
+
+    const normalized = normalizeNote(quoted);
+    // Round-trip again — should be stable
+    expect(normalizeNote(normalized)).toBe(normalized);
+  });
+
+  it("is idempotent — normalizing twice produces same result", () => {
+    const input = `---
+type: concept
+tags:
+  - ai
+  - research
+aliases:
+  - "ML"
+---
+
+Some content here.
+`;
+    const first = normalizeNote(input);
+    const second = normalizeNote(first);
+    expect(first).toBe(second);
+  });
+
+  it("passes through files without frontmatter unchanged", () => {
+    const noFm = "Just plain content, no frontmatter.";
+    expect(normalizeNote(noFm)).toBe(noFm);
+  });
+});
+
+describe("normalizeDir", () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "grove-lint-test-"));
+  });
+
+  it("normalizes files with non-canonical YAML quoting", () => {
+    writeFileSync(
+      join(dir, "test.md"),
+      `---
+author: "@someone"
+url: "https://example.com"
+type: source
+tags:
+  - x-bookmark
+---
+
+content`,
+    );
+
+    const { changed, total } = normalizeDir(dir);
+    expect(total).toBe(1);
+
+    // Read the normalized file
+    const after = readFileSync(join(dir, "test.md"), "utf-8");
+    // Normalize again — should be stable
+    expect(normalizeNote(after)).toBe(after);
+  });
+
+  it("does not touch already-normalized files", () => {
+    // Write a file that's already in canonical form
+    const canonical = normalizeNote(`---
+type: concept
+tags:
+  - test
+---
+
+content
+`);
+    writeFileSync(join(dir, "canonical.md"), canonical);
+
+    const { changed, total } = normalizeDir(dir);
+    expect(total).toBe(1);
+    expect(changed).toHaveLength(0);
+  });
+
+  it("skips non-.md files", () => {
+    writeFileSync(join(dir, "readme.txt"), "not markdown");
+    const { changed, total } = normalizeDir(dir);
+    expect(total).toBe(0);
+    expect(changed).toHaveLength(0);
   });
 });

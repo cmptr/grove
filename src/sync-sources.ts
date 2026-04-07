@@ -6,9 +6,47 @@
  * via the write_note MCP tool.
  */
 
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, basename } from "node:path";
-import { parseNote } from "./notes-validate.js";
+import { parseNote, serializeNote } from "./notes-validate.js";
+
+/**
+ * Normalize a markdown note through Grove's YAML serializer.
+ * Returns the normalized string. If already normalized, returns the input unchanged.
+ * This prevents quoting divergence (e.g., "Foo" vs Foo) that causes merge conflicts
+ * when notes are written by different tools but synced to the same git remote.
+ */
+export function normalizeNote(raw: string): string {
+  const { frontmatter, content } = parseNote(raw);
+  if (Object.keys(frontmatter).length === 0) return raw; // no frontmatter to normalize
+  return serializeNote(frontmatter, content);
+}
+
+/**
+ * Normalize all .md files in a directory in-place.
+ * Returns count of files that were changed.
+ */
+export function normalizeDir(dir: string): { changed: string[]; total: number } {
+  const entries = readdirSync(dir, { withFileTypes: true });
+  const changed: string[] = [];
+  let total = 0;
+
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
+    total++;
+
+    const filePath = join(dir, entry.name);
+    const raw = readFileSync(filePath, "utf-8");
+    const normalized = normalizeNote(raw);
+
+    if (raw !== normalized) {
+      writeFileSync(filePath, normalized, "utf-8");
+      changed.push(entry.name);
+    }
+  }
+
+  return { changed, total };
+}
 
 export interface SourceNote {
   /** Relative vault path, e.g. "Sources/2026-04-02 @karpathy - LLM Knowledge Bases.md" */

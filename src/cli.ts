@@ -17,7 +17,7 @@ import { request as httpRequest } from "node:http";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { readArchiveSources, planSync } from "./sync-sources.js";
+import { readArchiveSources, planSync, normalizeDir } from "./sync-sources.js";
 
 // ── Config ───────────────────────────────────────────────────────
 
@@ -414,6 +414,38 @@ async function cmdSync(config: Config, dir: string, flags: Record<string, string
   console.log(`\nDone: ${ok} created, ${fail} failed, ${plan.skipped.length} skipped`);
 }
 
+function cmdLint(dir: string, flags: Record<string, string | boolean>) {
+  if (!dir) { console.error("Usage: grove lint <dir> [--dry-run]"); process.exit(1); }
+  const dryRun = !!flags["dry-run"];
+
+  if (dryRun) {
+    // Dry run: report what would change without writing
+    const { readdirSync, readFileSync } = require("node:fs");
+    const { join } = require("node:path");
+    const { normalizeNote } = require("./sync-sources.js");
+    const entries = readdirSync(dir, { withFileTypes: true });
+    let wouldChange = 0;
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
+      const raw = readFileSync(join(dir, entry.name), "utf-8");
+      if (raw !== normalizeNote(raw)) {
+        console.log(`  would normalize: ${entry.name}`);
+        wouldChange++;
+      }
+    }
+    console.log(`\n${wouldChange} file(s) would be normalized`);
+    return;
+  }
+
+  const { changed, total } = normalizeDir(dir);
+  if (changed.length === 0) {
+    console.log(`All ${total} files already normalized.`);
+  } else {
+    for (const f of changed) console.log(`  normalized: ${f}`);
+    console.log(`\n${changed.length}/${total} file(s) normalized.`);
+  }
+}
+
 function printUsage() {
   console.log(`grove — CLI client for the Grove knowledge API
 
@@ -423,6 +455,7 @@ Usage:
   grove list <glob> [--aliases]         List notes
   grove write <path> --type <type>      Create note (content from stdin)
   grove sync <dir> [--dry-run]          Sync archived Sources to Grove
+  grove lint <dir> [--dry-run]          Normalize YAML frontmatter in .md files
   grove history [--since <date>]        Recent changes
   grove status                          Vault health
   grove diagnostics                     Run diagnostics
@@ -440,6 +473,9 @@ async function main() {
     printUsage();
     return;
   }
+
+  // Local-only commands (no server needed)
+  if (command === "lint") { cmdLint(positional, flags); return; }
 
   const config = loadConfig();
   await initialize(config);
