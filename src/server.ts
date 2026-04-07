@@ -176,7 +176,9 @@ Use the content_hash as if_hash when updating the note.`,
           const resolvedAbs = join(VAULT_PATH, realPath);
           if (existsSync(resolvedAbs)) return readNote(resolvedAbs, realPath, file);
         }
-      } catch {}
+      } catch {
+        // BM25 search unavailable or errored — fall through to "not found"
+      }
 
       return { content: [{ type: "text" as const, text: `Note not found: ${file}` }] };
     },
@@ -440,7 +442,10 @@ async function runDiagnostics() {
   for (const note of notes) {
     const abs = join(VAULT_PATH, note.path);
     let raw: string;
-    try { raw = readFileSync(abs, "utf-8"); } catch { continue; }
+    try { raw = readFileSync(abs, "utf-8"); } catch {
+      // File may have been deleted between listing and reading — skip
+      continue;
+    }
 
     // Extract wikilinks
     const links = [...raw.matchAll(/\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g)].map((m) => m[1]);

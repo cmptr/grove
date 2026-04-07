@@ -102,6 +102,7 @@ export async function analyzeGraph(vaultPath: string): Promise<GraphAnalysis> {
     try {
       text = readFileSync(abs, "utf-8");
     } catch {
+      // File may have been deleted between listing and reading — skip
       continue;
     }
 
@@ -304,6 +305,7 @@ async function buildGitHistory(vaultPath: string): Promise<Map<string, GitDates>
       30_000,
     );
   } catch {
+    // git log can fail if vault isn't a git repo or has no commits — return empty map
     return map;
   }
 
@@ -358,6 +360,7 @@ export async function computeDigest(vaultPath: string): Promise<GardenDigest> {
     try {
       text = readFileSync(abs, "utf-8");
     } catch {
+      // File may have been deleted between listing and reading — skip
       continue;
     }
     fileContents.set(abs, text);
@@ -401,6 +404,7 @@ export async function computeDigest(vaultPath: string): Promise<GardenDigest> {
         created = stat.birthtime.toISOString();
         modified = stat.mtime.toISOString();
       } catch {
+        // File may have been deleted between listing and stat — skip
         continue;
       }
     }

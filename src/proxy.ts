@@ -52,7 +52,9 @@ function log(keyName: string | null, method: string, url: string, status: number
     status,
   };
   if (extra) Object.assign(entry, extra);
-  try { appendFileSync(LOG_PATH, JSON.stringify(entry) + "\n"); } catch {}
+  try { appendFileSync(LOG_PATH, JSON.stringify(entry) + "\n"); } catch {
+    // Best-effort logging — disk full or permission errors are non-fatal
+  }
 }
 
 /** Log a full MCP conversation turn: request tool + args, response summary, latency */
@@ -67,21 +69,28 @@ function logMcp(keyName: string, sessionId: string | undefined, tool: string, ar
     latency_ms: latencyMs,
     status,
   };
-  try { appendFileSync(MCP_LOG_PATH, JSON.stringify(entry) + "\n"); } catch {}
+  try { appendFileSync(MCP_LOG_PATH, JSON.stringify(entry) + "\n"); } catch {
+    // Best-effort logging — disk full or permission errors are non-fatal
+  }
 }
 
 /** Extract a readable summary from an MCP response for logging */
 function summarizeMcpResponse(response: unknown): unknown {
   if (!response || typeof response !== "object") return response;
-  const r = response as any;
+  const r = response as Record<string, unknown>;
   // tools/call response: { result: { content: [{ type, text }] } }
-  if (r.result?.content?.[0]?.text) {
-    const text = r.result.content[0].text as string;
-    return { text_length: text.length, preview: text.slice(0, 300) };
+  const result = r.result as Record<string, unknown> | undefined;
+  if (result?.content) {
+    const content = result.content as { type: string; text: string }[];
+    if (content[0]?.text) {
+      const text = content[0].text;
+      return { text_length: text.length, preview: text.slice(0, 300) };
+    }
   }
   // tools/list response
-  if (r.result?.tools) {
-    return { tools: (r.result.tools as any[]).map((t: any) => t.name) };
+  if (result?.tools) {
+    const tools = result.tools as { name: string }[];
+    return { tools: tools.map((t) => t.name) };
   }
   // Error response
   if (r.error) return { error: r.error };
@@ -106,6 +115,8 @@ interface AuthCode {
   redirect_uri: string;
   api_key: string; // the grove API key the user entered
   expires_at: number;
+  code_challenge?: string;
+  code_challenge_method?: string;
 }
 
 const CLIENTS_PATH = join(homedir(), ".grove", "oauth-clients.json");
@@ -113,7 +124,10 @@ const CODES_PATH = join(homedir(), ".grove", "oauth-codes.json");
 
 function loadJson<T>(path: string): T[] {
   if (!existsSync(path)) return [];
-  try { return JSON.parse(readFileSync(path, "utf-8")); } catch { return []; }
+  try { return JSON.parse(readFileSync(path, "utf-8")); } catch {
+    // File missing or corrupt JSON — start fresh with empty array
+    return [];
+  }
 }
 
 function saveJson(path: string, data: unknown) {
@@ -232,8 +246,8 @@ function handleOAuth(req: IncomingMessage, res: ServerResponse, url: URL): boole
       };
 
       // Store code_challenge for PKCE
-      (code as any).code_challenge = codeChallenge;
-      (code as any).code_challenge_method = codeChallengeMethod;
+      code.code_challenge = codeChallenge;
+      code.code_challenge_method = codeChallengeMethod;
 
       const codes = loadJson<AuthCode>(CODES_PATH);
       codes.push(code);
@@ -271,7 +285,7 @@ function handleOAuth(req: IncomingMessage, res: ServerResponse, url: URL): boole
         return;
       }
 
-      const authCode = codes[idx] as AuthCode & { code_challenge?: string; code_challenge_method?: string };
+      const authCode = codes[idx];
 
       // Check expiry
       if (Date.now() > authCode.expires_at) {
@@ -614,7 +628,9 @@ const server = createServer(async (req, res) => {
   if (url.pathname === "/mcp") {
     const body = req.method === "POST" ? await readBody(req) : "";
     let parsed: any = null;
-    if (body) try { parsed = JSON.parse(body); } catch {}
+    if (body) try { parsed = JSON.parse(body); } catch {
+      // Non-JSON body is fine — we only parse for logging metadata extraction
+    }
 
     const mcpMethod = parsed?.method ?? req.method;
     const toolName = parsed?.params?.name ?? null;
@@ -712,6 +728,7 @@ const server = createServer(async (req, res) => {
           try {
             logMcp(key.name, sessionStr, toolName, parsed.params.arguments, JSON.parse(resBody), latency, groveRes.statusCode ?? 200);
           } catch {
+            // Response isn't valid JSON — log raw length instead for diagnostics
             logMcp(key.name, sessionStr, toolName, parsed.params.arguments, { raw_length: resBody.length }, latency, groveRes.statusCode ?? 200);
           }
         });

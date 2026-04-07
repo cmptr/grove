@@ -18,6 +18,8 @@ import Database from "better-sqlite3";
 const TEI_PORT = Number(process.env.TEI_PORT ?? 8090);
 const BM25_PORT = Number(process.env.BM25_PORT ?? 8177);
 const QMD_INDEX = process.env.QMD_INDEX ?? `${process.env.HOME}/.cache/qmd/index.sqlite`;
+const BM25_WEIGHT = parseFloat(process.env.BM25_WEIGHT ?? "1.2");
+const VEC_WEIGHT = parseFloat(process.env.VEC_WEIGHT ?? "1.0");
 
 interface SearchResult {
   file: string;
@@ -263,8 +265,8 @@ export async function hybridSearch(
   }
 
   const lists: { results: SearchResult[]; weight: number; label: string }[] = [
-    { results: bm25, weight: 1.2, label: "bm25" },
-    { results: vec, weight: 1.0, label: "vector" },
+    { results: bm25, weight: BM25_WEIGHT, label: "bm25" },
+    { results: vec, weight: VEC_WEIGHT, label: "vector" },
   ];
 
   return rrfFuse(lists, limit);

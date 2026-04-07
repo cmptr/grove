@@ -5,6 +5,7 @@
 import { execFile } from "node:child_process";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, basename } from "node:path";
+import { parse as yamlParse } from "yaml";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -26,16 +27,68 @@ export interface NoteEntry {
 
 // ── Helper ───────────────────────────────────────────────────────────
 
+/** Detect the upstream remote and default branch for a repo. Cached per vault path. */
+const gitRemoteCache = new Map<string, { remote: string; branch: string }>();
+
+export async function getRemoteAndBranch(
+  vaultPath: string,
+): Promise<{ remote: string; branch: string }> {
+  const cached = gitRemoteCache.get(vaultPath);
+  if (cached) return cached;
+
+  let remote = "origin";
+  let branch = "main";
+
+  try {
+    // Detect remote from the current branch's tracking config
+    const currentBranch = (
+      await exec("git", ["rev-parse", "--abbrev-ref", "HEAD"], vaultPath)
+    ).trim();
+    const trackingRemote = (
+      await exec("git", ["config", "--get", `branch.${currentBranch}.remote`], vaultPath)
+    ).trim();
+    if (trackingRemote) remote = trackingRemote;
+  } catch {
+    // No tracking config for current branch — try listing remotes
+    try {
+      // Fall back: first remote listed
+      const remotes = (await exec("git", ["remote"], vaultPath)).trim();
+      const first = remotes.split("\n")[0]?.trim();
+      if (first) remote = first;
+    } catch {
+      // keep default "origin"
+    }
+  }
+
+  try {
+    // Detect default branch via symbolic-ref of remote HEAD
+    const ref = (
+      await exec(
+        "git",
+        ["symbolic-ref", `refs/remotes/${remote}/HEAD`],
+        vaultPath,
+      )
+    ).trim();
+    // ref looks like "refs/remotes/origin/main"
+    const last = ref.split("/").pop();
+    if (last) branch = last;
+  } catch {
+    // keep default "main"
+  }
+
+  const result = { remote, branch };
+  gitRemoteCache.set(vaultPath, result);
+  return result;
+}
+
 export function exec(
   cmd: string,
   args: string[],
   cwd: string,
   timeoutMs?: number,
 ): Promise<string> {
-  // Use full path for git/qmd in case PM2 doesn't inherit PATH
-  const fullCmd = cmd === "git" ? "/usr/bin/git" : cmd === "qmd" ? "qmd" : cmd;
   return new Promise((resolve, reject) => {
-    execFile(fullCmd, args, { cwd, timeout: timeoutMs, env: { ...process.env, PATH: `${process.env.PATH ?? ""}:/usr/bin:/usr/local/bin` } }, (err, stdout, stderr) => {
+    execFile(cmd, args, { cwd, timeout: timeoutMs, env: { ...process.env, PATH: `${process.env.PATH ?? ""}:/usr/bin:/usr/local/bin` } }, (err, stdout, stderr) => {
       if (err) {
         const msg = stderr?.trim() || err.message;
         reject(new Error(`${cmd} ${args.join(" ")}: ${msg}`));
@@ -60,15 +113,18 @@ export async function gitCommit(
 }
 
 export async function gitPush(vaultPath: string): Promise<void> {
-  await exec("git", ["fetch", "origin"], vaultPath);
+  const { remote, branch } = await getRemoteAndBranch(vaultPath);
+  await exec("git", ["fetch", remote], vaultPath);
   try {
-    await exec("git", ["rebase", "origin/main"], vaultPath);
+    await exec("git", ["rebase", `${remote}/${branch}`], vaultPath);
   } catch (err) {
-    await exec("git", ["rebase", "--abort"], vaultPath).catch(() => {});
+    await exec("git", ["rebase", "--abort"], vaultPath).catch(() => {
+      // Abort may fail if rebase already unwound — safe to ignore
+    });
     console.error("[vault-ops] rebase conflict — aborted, caller should retry");
     throw err;
   }
-  await exec("git", ["push", "origin", "main"], vaultPath);
+  await exec("git", ["push", remote, branch], vaultPath);
 }
 
 export async function gitLog(
@@ -121,9 +177,10 @@ export async function startupRecovery(vaultPath: string): Promise<void> {
     }
   }
 
+  const { remote, branch } = await getRemoteAndBranch(vaultPath);
   const unpushed = await exec(
     "git",
-    ["log", "origin/main..HEAD", "--oneline"],
+    ["log", `${remote}/${branch}..HEAD`, "--oneline"],
     vaultPath,
   );
   if (unpushed.trim()) {
@@ -166,22 +223,21 @@ function parseFrontmatter(
   if (!head.startsWith("---")) return { type: null };
   const end = head.indexOf("\n---", 3);
   if (end === -1) return { type: null };
-  const yaml = head.slice(4, end);
+  const raw = head.slice(4, end);
 
-  let type: string | null = null;
-  let aliases: string[] | undefined;
-
-  for (const line of yaml.split("\n")) {
-    const tMatch = line.match(/^type:\s*(.+)/);
-    if (tMatch) type = tMatch[1].trim().replace(/^["']|["']$/g, "");
-
-    const aMatch = line.match(/^aliases:\s*\[(.+)]/);
-    if (aMatch) {
-      aliases = aMatch[1].split(",").map((a) =>
-        a.trim().replace(/^["']|["']$/g, ""),
-      );
-    }
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = yamlParse(raw) ?? {};
+  } catch {
+    // Invalid YAML frontmatter — treat as no metadata
+    return { type: null };
   }
+
+  const type =
+    typeof parsed.type === "string" ? parsed.type : null;
+  const aliases = Array.isArray(parsed.aliases)
+    ? parsed.aliases.filter((a): a is string => typeof a === "string")
+    : undefined;
 
   return { type, aliases };
 }

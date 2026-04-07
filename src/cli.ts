@@ -31,6 +31,7 @@ function loadConfig(): Config {
   try {
     return JSON.parse(readFileSync(path, "utf-8"));
   } catch {
+    // Missing or invalid config file — can't proceed without server/token
     console.error(`Config not found: ${path}`);
     console.error(`Create it with: { "server": "https://grove.mili.dev", "token": "grove_live_..." }`);
     process.exit(1);
@@ -104,6 +105,7 @@ async function mcpRequest(config: Config, method: string, params: Record<string,
   try {
     return JSON.parse(res.body);
   } catch {
+    // Server returned non-JSON (likely HTML error page or empty response)
     console.error(`Unexpected response (${res.status}): ${res.body.slice(0, 200)}`);
     process.exit(1);
   }
@@ -193,6 +195,7 @@ function formatRead(raw: string): string {
     if (data.content) lines.push(data.content);
     return lines.join("\n");
   } catch {
+    // Response isn't structured JSON — show raw text as-is
     return raw;
   }
 }
@@ -215,6 +218,7 @@ function formatList(raw: string): string {
     }
     return lines.join("\n");
   } catch {
+    // Response isn't structured JSON — show raw text as-is
     return raw;
   }
 }
@@ -235,6 +239,7 @@ function formatHistory(raw: string): string {
     }
     return lines.join("\n");
   } catch {
+    // Response isn't structured JSON — show raw text as-is
     return raw;
   }
 }
@@ -255,6 +260,7 @@ function formatStatus(raw: string): string {
     }
     return lines.join("\n");
   } catch {
+    // Response isn't structured JSON — show raw text as-is
     return raw;
   }
 }
@@ -279,6 +285,7 @@ function formatDiagnostics(raw: string): string {
     }
     return lines.join("\n");
   } catch {
+    // Response isn't structured JSON — show raw text as-is
     return raw;
   }
 }

@@ -31,7 +31,7 @@ else
   score reliability 0 10 "Tests failing"
 fi
 
-empty_catches=$(grep -rn 'catch\s*{' src/ --include='*.ts' 2>/dev/null | grep -v 'catch (e' | grep -v 'catch (err' | grep -c '{}' 2>/dev/null || echo 0)
+empty_catches=$(grep -rn 'catch\s*{}' src/ --include='*.ts' 2>/dev/null | wc -l | tr -d ' ')
 if (( empty_catches == 0 )); then
   score reliability 5 5 "No empty catch blocks"
 else
