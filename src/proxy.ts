@@ -557,6 +557,18 @@ const server = createServer(async (req, res) => {
     let parsed: any;
     try { parsed = JSON.parse(body); } catch { sendJson(res, 400, { error: "invalid json" }); return; }
 
+    if (parsed.action === "list") {
+      const allKeys = loadKeys().map((k) => ({
+        id: k.id,
+        name: k.name,
+        scopes: k.scopes,
+        vault_id: k.vault_id,
+        created_at: k.created_at,
+        last_used_at: k.last_used_at,
+      }));
+      sendJson(res, 200, { keys: allKeys });
+      return;
+    }
     if (parsed.action === "create" && parsed.name) {
       const result = createKey(parsed.name, parsed.scopes ?? ["read", "write"], parsed.vault ?? "life");
       reloadKeys();

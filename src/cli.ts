@@ -290,6 +290,56 @@ function formatDiagnostics(raw: string): string {
   }
 }
 
+// ── Key management (remote, via /keys API) ──────────────────
+
+function keysPost(config: Config, body: unknown): Promise<{ status: number; body: string }> {
+  const url = new URL("/keys", config.server);
+  return post(url, body, { "Authorization": `Bearer ${config.token}` });
+}
+
+async function cmdKeysList(config: Config) {
+  const res = await keysPost(config, { action: "list" });
+  if (res.status === 401) { console.error("Unauthorized. Check your token in ~/.grove/cli.json"); process.exit(1); }
+  const data = JSON.parse(res.body);
+  const keys = data.keys ?? [];
+  if (keys.length === 0) { console.log("No keys."); return; }
+
+  console.log("\nID            Name                Scopes          Vault   Created      Last used");
+  console.log("─".repeat(90));
+  for (const k of keys) {
+    const created = k.created_at?.slice(0, 10) ?? "-";
+    const lastUsed = k.last_used_at?.slice(0, 10) ?? "never";
+    console.log(
+      `${(k.id ?? "").padEnd(14)}${(k.name ?? "").padEnd(20)}${(k.scopes?.join(",") ?? "").padEnd(16)}${(k.vault_id ?? "").padEnd(8)}${created.padEnd(13)}${lastUsed}`
+    );
+  }
+  console.log();
+}
+
+async function cmdKeysCreate(config: Config, name: string) {
+  if (!name) { console.error("Usage: grove keys create <name>"); process.exit(1); }
+  const res = await keysPost(config, { action: "create", name });
+  if (res.status === 401) { console.error("Unauthorized. Check your token in ~/.grove/cli.json"); process.exit(1); }
+  const data = JSON.parse(res.body);
+  console.log(`\nKey created: ${data.id}`);
+  console.log(`Name:        ${data.name}`);
+  console.log(`\nToken (shown once, save it now):\n`);
+  console.log(`  ${data.token}\n`);
+}
+
+async function cmdKeysRevoke(config: Config, id: string) {
+  if (!id) { console.error("Usage: grove keys revoke <key-id>"); process.exit(1); }
+  const res = await keysPost(config, { action: "revoke", id });
+  if (res.status === 401) { console.error("Unauthorized. Check your token in ~/.grove/cli.json"); process.exit(1); }
+  const data = JSON.parse(res.body);
+  if (data.revoked) {
+    console.log(`Revoked key: ${data.revoked}`);
+  } else {
+    console.error(`Failed to revoke: ${JSON.stringify(data)}`);
+    process.exit(1);
+  }
+}
+
 // ── Commands ─────────────────────────────────────────────────────
 
 async function cmdSearch(config: Config, query: string, flags: Record<string, string | boolean>) {
@@ -455,6 +505,7 @@ Usage:
   grove list <glob> [--aliases]         List notes
   grove write <path> --type <type>      Create note (content from stdin)
   grove sync <dir> [--dry-run]          Sync archived Sources to Grove
+  grove keys [list|create|revoke]       Manage API keys remotely
   grove lint <dir> [--dry-run]          Normalize YAML frontmatter in .md files
   grove history [--since <date>]        Recent changes
   grove status                          Vault health
@@ -478,6 +529,23 @@ async function main() {
   if (command === "lint") { cmdLint(positional, flags); return; }
 
   const config = loadConfig();
+
+  // Key management doesn't need MCP session
+  if (command === "keys") {
+    const sub = positional || "list";
+    const subArg = process.argv.slice(4)[0] ?? "";
+    switch (sub) {
+      case "list":   await cmdKeysList(config); break;
+      case "create": await cmdKeysCreate(config, subArg); break;
+      case "revoke": await cmdKeysRevoke(config, subArg); break;
+      default:
+        console.error(`Unknown keys subcommand: ${sub}`);
+        console.error("Usage: grove keys [list|create|revoke]");
+        process.exit(1);
+    }
+    return;
+  }
+
   await initialize(config);
 
   switch (command) {
