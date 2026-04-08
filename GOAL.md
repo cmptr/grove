@@ -2,7 +2,7 @@
 
 > Your knowledge, everywhere your AI is. Shaped for every audience.
 
-Grove is a hosted knowledge API over a personal Obsidian vault. Phase 1 built the foundation — 6 MCP tools, hybrid search, git-backed writes, 150/150 on infrastructure quality. Now it becomes something bigger: a system where knowledge grows autonomously and can be selectively shared through **groves** — topic-scoped windows into your knowledge, enforced server-side.
+Grove is a hosted knowledge API over a personal Obsidian vault. Phases 0-1 built the foundation — 6 MCP tools, hybrid search, git-backed writes, full infrastructure scorecard. Now we harden it, make it observable, give it a face, and open it up through **trails** — topic-scoped paths through the grove, server-side filtered.
 
 ## Fitness Function
 
@@ -13,69 +13,69 @@ bash scripts/score.sh --json # machine-readable
 
 **Mode: Split** — Agents can improve measurement scripts and add new checks, but cannot change component weights or point allocations.
 
-### Components (150 points total)
+### Components (175 points total)
 
 | Component | Points | What it measures |
 |-----------|--------|------------------|
-| **Groves** | 30 | Shared knowledge spaces work — CRUD, LLM-as-judge filtering, scope enforcement, evals pass |
-| **Discovery** | 30 | Background loop grows the concept graph autonomously — extracts, links, surfaces, respects limits |
-| **Onboarding** | 20 | Bulk ingest works — folder in, structured vault out, deduplicates, extracts concepts |
-| **Safety** | 30 | Judge evals >95% precision, snapshots/rollback work, blast radius enforced, full audit trail |
-| **Foundation** | 40 | Tests pass, no regressions, infrastructure scorecard holds (reliability, search, code quality, DX, flexibility) |
+| **Security** | 30 | Exploitable gaps closed — path traversal, CORS, body limits, scope enforcement, encryption, backups |
+| **Observability** | 30 | Full visibility — structured logs, correlation IDs, health checks, metrics, alerting |
+| **Portal** | 25 | Web dashboard — admin auth, key management, usage metrics, vault health |
+| **Trails** | 50 | Scoped sharing works — config, filtering, eval passes, audit, consumer can connect |
+| **Foundation** | 40 | No regressions — tests pass, code quality, coverage, CLI, docs |
 
 ---
 
 ### Scoring Details
 
-**Groves (30 pts)** — Shared knowledge spaces
+**Security (30 pts)** — Close every exploitable gap
 
-A grove is: a name + topic instructions (allow/deny) + permission level (search/read/write) + API key. The LLM judge runs server-side on the VPS, filtering every response before it reaches the consumer.
+- Path traversal guard rejects `..` and symlinks outside vault: 5 pts
+- CORS locked to explicit allowed origins (not `*`): 3 pts
+- Request body size limit enforced (1MB cap, 413 on oversize): 3 pts
+- Key scopes enforced (read-only key gets 403 on write): 4 pts
+- EBS volume encrypted: 3 pts
+- Daily S3 backup running: 3 pts
+- No plaintext secrets in JSON files (OAuth secrets in env vars): 4 pts
+- Key TTLs — `expires_at` in schema, expired keys rejected: 5 pts
 
-- Grove CRUD works (`grove create`, `grove list`, `grove revoke`): 5 pts
-- Grove config stored and loaded (`~/.grove/groves.json`): 3 pts
-- LLM-as-judge filters responses for grove keys: 5 pts
-- Judge blocks sensitive content in eval suite (>95% precision): 5 pts
-- Judge allows on-topic content in eval suite (>90% recall): 4 pts
-- Permission levels enforced (search-only can't read full notes, read can't write): 4 pts
-- Consumer can connect their Claude to a grove via MCP endpoint: 4 pts
+**Observability (30 pts)** — Full visibility into system health
 
-**Discovery (30 pts)** — Autonomous knowledge growth
+- Structured JSON logs to stdout with required fields (ts, rid, tool, key_id, status, duration_ms): 5 pts
+- Request correlation IDs (ULID) through proxy → server: 4 pts
+- Read audit log exists (key identity on every read): 3 pts
+- Deep health check — `/health` verifies QMD + embed server: 5 pts
+- `/metrics` endpoint returns request counts, latency percentiles, error rates: 5 pts
+- BetterStack uptime monitor pinging `/health` every 60s: 4 pts
+- Dead man's switch — daily cron heartbeat to BetterStack: 4 pts
 
-A background loop on the VPS that watches for new/changed notes and grows the concept graph without human invocation.
+**Portal (25 pts)** — Web dashboard on api.grove.md
 
-- Background process runs and watches for changes: 5 pts
-- Extracts new concepts from changed notes: 5 pts
-- Creates concept notes that don't exist yet: 5 pts
-- Wires wikilinks between related notes: 5 pts
-- Surfaces surprising connections (semantic neighbors): 3 pts
-- Respects blast radius limit (max N notes per run): 4 pts
-- Git-tag snapshot before each run: 3 pts
+- Admin auth works (admin key → session cookie with TTL): 5 pts
+- Key management UI (list, create, revoke): 6 pts
+- Usage dashboard (request volume, latency, errors over time): 6 pts
+- Vault health panel (note count, sync status, embedding coverage, index health): 5 pts
+- Dashboard loads without errors, serves from same server: 3 pts
 
-**Onboarding (20 pts)** — Cold start / bulk ingest
+**Trails (50 pts)** — Topic-scoped sharing
 
-Point at a folder, get a structured vault.
+A trail is: a name + topic boundaries (tags, types, paths) + permission level + API key. Consumers connect via MCP and see only what the trail allows.
 
-- `grove ingest <dir>` reads files from a directory: 5 pts
-- Parses markdown frontmatter and content: 3 pts
-- Deduplicates against existing vault (by title, content hash): 4 pts
-- Extracts concepts and creates initial graph: 5 pts
-- Handles non-markdown files gracefully (skip or convert): 3 pts
-
-**Safety (30 pts)** — Trust infrastructure
-
-The foundation that makes groves and discovery trustworthy.
-
-- Judge eval suite exists with labeled test cases: 5 pts
-- Eval precision >95% (doesn't leak sensitive notes): 5 pts
-- Eval recall >90% (doesn't over-block on-topic content): 5 pts
-- `grove rollback <tag>` reverts to a snapshot: 5 pts
-- Blast radius limit configurable and enforced: 4 pts
-- Audit log records every autonomous action with reasoning: 3 pts
-- Rate limits per grove (writes/hour): 3 pts
+- Trail CRUD works (`grove trails create`, `list`, `disable`, `delete`): 5 pts
+- Trail config stored and loaded (`~/.grove/trails.json`): 3 pts
+- Trail resolution in proxy (key → trail lookup, pass context to server): 4 pts
+- Tag/type/path prefilter implemented in server: 6 pts
+- `query` returns `filtered_count` in responses: 3 pts
+- `get`/`multi_get` return 404 (not 403) for hidden notes: 3 pts
+- `list_notes` only returns trail-visible notes: 3 pts
+- `write_note` constrains writes to trail scope: 3 pts
+- `vault_status` returns scoped stats for trail keys: 2 pts
+- Trail info in MCP `initialize` handshake: 3 pts
+- Trail filter eval — precision >95% on labeled dataset: 5 pts
+- Trail filter eval — recall >90% on labeled dataset: 4 pts
+- Trail audit log records every access with filtered/allowed counts: 3 pts
+- Per-trail rate limits enforced: 3 pts
 
 **Foundation (40 pts)** — No regressions
-
-The infrastructure scorecard from the previous GOAL.md, sampled:
 
 - All tests pass: 10 pts
 - No empty catch blocks or `as any` casts: 5 pts
@@ -105,69 +105,74 @@ The infrastructure scorecard from the previous GOAL.md, sampled:
 ### Iteration Log
 
 ```json
-{"ts":"2026-04-07T18:00:00Z","before":{"total":40,"groves":0,"discovery":0,"onboarding":0,"safety":0,"foundation":40},"after":{"total":52,"groves":12,"discovery":0,"onboarding":0,"safety":0,"foundation":40},"action":"grove CRUD and config storage","component":"groves","delta":12}
+{"ts":"2026-04-07T22:00:00Z","before":{"total":40,"security":0,"observability":0,"portal":0,"trails":0,"foundation":40},"after":{"total":40,"security":0,"observability":0,"portal":0,"trails":0,"foundation":40},"action":"baseline","component":"foundation","delta":0}
 ```
 
 ---
 
 ## Action Catalog
 
-Prioritized by impact. **Ship Groves first** — it's the most differentiated feature and unlocks sharing.
+Prioritized by phase order. **Security first** — close exploitable gaps before building new surfaces.
 
-### Groves (+30 potential)
-| Action | Est. pts | Effort |
-|--------|----------|--------|
-| Grove config schema (`~/.grove/groves.json`) + CRUD CLI | +8 | 2 hr |
-| Wire grove key to proxy — inject topic instructions into request context | +5 | 2 hr |
-| LLM-as-judge filter layer — local model on VPS evaluates each response | +5 | 4 hr |
-| Permission level enforcement (search/read/write gates in proxy) | +4 | 2 hr |
-| Grove-specific MCP endpoint (consumer connects their Claude to your grove) | +4 | 2 hr |
-| Judge eval suite — labeled test cases, precision/recall measurement | +4 | 3 hr |
+### Security (+30 potential)
+| Action | Est. pts | Effort | Phase task |
+|--------|----------|--------|------------|
+| Path traversal guard in server.ts | +5 | 1 hr | P2-1 |
+| CORS lockdown to explicit origins | +3 | 30 min | P2-2 |
+| Request body size limit (1MB) | +3 | 30 min | P2-3 |
+| Enforce key scopes in proxy | +4 | 1 hr | P2-4 |
+| EBS volume encryption | +3 | 1 hr | P2-5 |
+| Daily S3 backup cron | +3 | 1 hr | P2-6 |
+| Move OAuth secrets to env vars | +4 | 30 min | P2-7 |
+| Key TTLs (expires_at + rejection) | +5 | 2 hr | P2-8 |
 
-### Safety (+30 potential)
-| Action | Est. pts | Effort |
-|--------|----------|--------|
-| Judge eval suite with labeled sensitive/safe notes | +10 | 3 hr |
-| `grove rollback <tag>` — revert vault to a git tag | +5 | 1 hr |
-| Blast radius config — max notes per background run | +4 | 30 min |
-| Audit log for autonomous actions | +3 | 1 hr |
-| Per-grove rate limits | +3 | 30 min |
+### Observability (+30 potential)
+| Action | Est. pts | Effort | Phase task |
+|--------|----------|--------|------------|
+| Structured JSON logging + correlation IDs | +9 | 3 hr | P3-1, P3-2 |
+| Read audit log | +3 | 1 hr | P3-3 |
+| Deep health check (verify downstream) | +5 | 1 hr | P3-4 |
+| `/metrics` endpoint with counters | +5 | 2 hr | P3-5 |
+| BetterStack integration + alerting | +8 | 2 hr | P3-6 |
 
-### Discovery (+30 potential)
-| Action | Est. pts | Effort |
-|--------|----------|--------|
-| Background watcher process (triggered by git commits / write_note) | +5 | 3 hr |
-| Concept extraction from note content (entity recognition) | +5 | 4 hr |
-| Auto-create concept notes + wire wikilinks | +5 | 2 hr |
-| Semantic neighbor surfacing (embedding similarity) | +3 | 2 hr |
-| Git-tag snapshot before each run | +3 | 30 min |
-| Blast radius enforcement in loop | +4 | 30 min |
-| Discovery digest in vault_status | +5 | 1 hr |
+### Portal (+25 potential)
+| Action | Est. pts | Effort | Phase task |
+|--------|----------|--------|------------|
+| Admin auth (key → session cookie) | +5 | 2 hr | P4-1 |
+| Key management UI | +6 | 3 hr | P4-2 |
+| Usage dashboard | +6 | 3 hr | P4-3 |
+| Vault health panel | +5 | 2 hr | P4-4 |
+| Dashboard serving + styling | +3 | 1 hr | P4-1 |
 
-### Onboarding (+20 potential)
-| Action | Est. pts | Effort |
-|--------|----------|--------|
-| `grove ingest <dir>` — read + parse directory of files | +8 | 2 hr |
-| Deduplication against existing vault | +4 | 1 hr |
-| Concept extraction from ingested content | +5 | 2 hr |
-| Non-markdown file handling (skip with warning) | +3 | 30 min |
+### Trails (+50 potential)
+| Action | Est. pts | Effort | Phase task |
+|--------|----------|--------|------------|
+| Trail config schema + CRUD CLI | +8 | 3 hr | P5-1, P5-2 |
+| Trail resolution in proxy | +4 | 2 hr | P5-3 |
+| Server-side tag/type/path prefilter | +6 | 4 hr | P5-4 |
+| Tool behavior under trail keys (404, scoped list, filtered_count) | +14 | 4 hr | P5-5, P5-6 + tool changes |
+| Trail info in MCP handshake | +3 | 1 hr | P5-6 |
+| Trail filter eval suite | +9 | 3 hr | P5-8 |
+| Trail audit log + rate limits | +6 | 2 hr | P5-9, P5-10 |
 
 ### Foundation (+40 potential)
-| Action | Est. pts | Effort |
-|--------|----------|--------|
-| Maintain existing test suite and code quality | +40 | ongoing |
+| Action | Est. pts | Effort | Phase task |
+|--------|----------|--------|------------|
+| Maintain existing test suite and code quality | +40 | ongoing | — |
 
 ---
 
 ## Operating Mode
 
-**Continuous** — with a bias toward shipping Groves first. The priority order:
+**Continuous** — with strict phase ordering. Each phase gates the next:
 
-1. **Groves** — the most shareable, differentiated feature
-2. **Safety** — required before groves can be trusted
-3. **Discovery** — the autonomous growth loop
-4. **Onboarding** — cold start for new content
-5. **Foundation** — maintain, don't regress
+1. **Security** (Phase 2) — close exploitable gaps first
+2. **Observability** (Phase 3) — see what's happening before building new surfaces
+3. **Portal** (Phase 4) — management surface for everything that follows
+4. **Trails** (Phase 5) — the core differentiating feature
+5. **Foundation** — maintain throughout, never regress
+
+**Stopping condition:** 160/175 (allows some aspirational items to remain open).
 
 ---
 
@@ -178,25 +183,17 @@ Prioritized by impact. **Ship Groves first** — it's the most differentiated fe
 3. **Never write to the vault outside the write queue.** Concurrent git = corruption.
 4. **Keep dependencies minimal.** No web frameworks. No heavy ML libraries on VPS — use TEI and small local models.
 5. **All tests must pass before committing.** No `--no-verify`.
-6. **Grove filtering must be server-side.** Never trust the consumer's client to respect topic boundaries.
-7. **Background discovery has a blast radius limit.** Default max 10 notes per run. Configurable but never unlimited.
-8. **Every autonomous write gets a git-tag snapshot.** Rollback must always be possible.
-9. **The vault is sacred.** Grove is plumbing. Discovery is a gardener. Neither is the owner.
+6. **Trail filtering must be server-side.** Never trust the consumer's client to respect topic boundaries.
+7. **Hidden notes return 404, not 403.** Never leak note existence to trail consumers.
+8. **Security fixes before new features.** Don't build on top of exploitable gaps.
+9. **The vault is sacred.** Grove is plumbing. Trails are windows. Neither is the owner.
 
 ---
 
-## What Happened to the Garden Skills
+## Future Phases (not scored yet)
 
-The garden-* skills in `~/.claude/skills/` were training wheels for when Grove was new and needed explicit workflows. As Grove matured, John stopped invoking them individually — he just talks to Grove and it figures out what to do.
+These will get their own scoring components when the current phases are complete:
 
-| Skill | Fate |
-|-------|------|
-| `/garden` | **Stays** — daily practice ritual, powered by discovery digest |
-| `/garden-wander` | **Stays** — serendipity requires a human in the loop |
-| `/garden-seek` | Absorbed — natural `query` tool use in conversation |
-| `/garden-plant` | Absorbed — natural `write_note` tool use in conversation |
-| `/garden-harvest` | Absorbed into background discovery loop |
-| `/garden-forage` | Absorbed into background discovery loop |
-| `/garden-tend` | Absorbed into background discovery loop |
-
-Skills that remain should be updated to consume discovery data rather than doing the discovery themselves.
+- **Phase 6: LLM Judge** — Ollama + Qwen2.5-3B for semantic trail filtering. Deferred until tag/type/path prefilter proves insufficient.
+- **Phase 7: Discovery** — Background loop grows the concept graph autonomously. Requires local LLM from Phase 6.
+- **Phase 8: Multi-Vault** — Additional vaults (work vault) as separate queryable indexes.
