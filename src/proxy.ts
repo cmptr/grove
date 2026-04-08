@@ -36,6 +36,43 @@ const GROVE_URL = process.env.GROVE_URL ?? "https://api.grove.md";
 let keys: StoredKey[] = [];
 const rateLimiter = new RateLimiter({ reads: 120, writes: 20, windowMs: 60_000 });
 
+// ── Admin auth: session cookie with TTL ─────────────────────────────
+const GROVE_ADMIN_KEY = process.env.GROVE_ADMIN_KEY; // optional: restrict admin to a specific key name
+const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const adminSessions = new Map<string, { keyId: string; keyName: string; expiresAt: number }>();
+
+function createAdminSession(key: StoredKey): string {
+  const sessionId = randomBytes(32).toString("hex");
+  adminSessions.set(sessionId, {
+    keyId: key.id,
+    keyName: key.name,
+    expiresAt: Date.now() + SESSION_TTL_MS,
+  });
+  return sessionId;
+}
+
+function adminAuth(req: IncomingMessage): { keyId: string; keyName: string } | null {
+  // Check session cookie first
+  const cookies = req.headers.cookie ?? "";
+  const sessionMatch = cookies.match(/grove_session=([a-f0-9]+)/);
+  if (sessionMatch) {
+    const session = adminSessions.get(sessionMatch[1]!);
+    if (session && session.expiresAt > Date.now()) {
+      return { keyId: session.keyId, keyName: session.keyName };
+    }
+    if (session) adminSessions.delete(sessionMatch[1]!); // expired
+  }
+  // Fall back to Bearer token
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  if (!token) return null;
+  const key = validateToken(token);
+  if (!key) return null;
+  // Optionally restrict admin to a specific key
+  if (GROVE_ADMIN_KEY && key.name !== GROVE_ADMIN_KEY) return null;
+  return { keyId: key.id, keyName: key.name };
+}
+
 function reloadKeys() {
   keys = loadKeys();
 }
@@ -602,23 +639,40 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  // ── Setup page at / ──
-  if (url.pathname === "/" && req.method === "GET") {
-    const authHeader = req.headers.authorization;
-    const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
-    const authed = token ? validateToken(token) : null;
-
-    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-    res.end(setupPage(authed?.name ?? null));
+  // ── Admin login (POST /admin/login — creates session cookie) ──
+  if (url.pathname === "/admin/login" && req.method === "POST") {
+    let body: string;
+    try { body = await readBody(req); } catch { sendJson(res, 400, { error: "read error" }); return; }
+    let parsed: any;
+    try { parsed = JSON.parse(body); } catch { sendJson(res, 400, { error: "invalid json" }); return; }
+    const apiKey = parsed.api_key ?? "";
+    const key = validateToken(apiKey);
+    if (!key) { sendJson(res, 401, { error: "invalid key" }); return; }
+    const sessionId = createAdminSession(key);
+    res.writeHead(200, {
+      "Content-Type": "application/json",
+      "Set-Cookie": `grove_session=${sessionId}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`,
+    });
+    res.end(JSON.stringify({ ok: true, name: key.name }));
     return;
   }
 
-  // ── Key management API (bearer auth required) ──
-  if (url.pathname === "/keys" && req.method === "POST") {
+  // ── Setup page at / ──
+  if (url.pathname === "/" && req.method === "GET") {
+    const admin = adminAuth(req);
     const authHeader = req.headers.authorization;
     const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
-    const authed = token ? validateToken(token) : null;
-    if (!authed) { sendJson(res, 401, { error: "unauthorized" }); return; }
+    const authed = admin ?? (token ? (() => { const k = validateToken(token); return k ? { keyId: k.id, keyName: k.name } : null; })() : null);
+
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(setupPage(authed?.keyName ?? null));
+    return;
+  }
+
+  // ── Key management API (admin session cookie or bearer auth required) ──
+  if (url.pathname === "/keys" && req.method === "POST") {
+    const admin = adminAuth(req);
+    if (!admin) { sendJson(res, 401, { error: "unauthorized" }); return; }
 
     let body: string;
     try { body = await readBody(req); } catch (err: unknown) {
