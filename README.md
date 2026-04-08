@@ -7,7 +7,7 @@ Give your AI a persistent memory that works from every surface — phone, laptop
 **One URL. Any MCP client.** Add this to Claude, ChatGPT, Cursor, or any MCP-compatible client:
 
 ```
-https://grove.mili.dev/mcp
+https://api.grove.md/mcp
 ```
 
 ```

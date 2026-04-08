@@ -12,8 +12,8 @@ Grove is a TypeScript API server that wraps a git-tracked Obsidian vault and exp
 **Repo:** `~/src/grove`
 **Vault:** `~/life/` (Phase 1), `~/canva/` (Phase 2)
 **Depends on:** `@tobilu/qmd` (search engine), `@modelcontextprotocol/sdk` (MCP transport)
-**Deploys to:** Vultr VPS at `grove.mili.dev` (45.76.66.214)
-**Live:** Phase 0 complete — MCP + hybrid search (BM25 + vector + RRF) at `https://grove.mili.dev`
+**Deploys to:** Vultr VPS at `api.grove.md` (45.76.66.214)
+**Live:** Phase 0 complete — MCP + hybrid search (BM25 + vector + RRF) at `https://api.grove.md`
 
 ---
 
@@ -77,7 +77,7 @@ Grove is a TypeScript API server that wraps a git-tracked Obsidian vault and exp
 - Hybrid search (`src/hybrid-search.ts`) — BM25 + vector (TEI + sqlite-vec) + RRF fusion
 - Key management (`src/keys.ts`) — create/list/revoke, SHA-256 hashed storage in `~/.grove/keys.json`
 - Embedding pipeline (`src/embed-node.ts`) — Node.js script, embeds docs via TEI over SSH tunnel, stores in vec0
-- Deployed on Vultr VPS at `grove.mili.dev` with nginx + Let's Encrypt TLS
+- Deployed on Vultr VPS at `api.grove.md` with nginx + Let's Encrypt TLS
 - QMD MCP server + search server managed via PM2
 - TEI (Text Embeddings Inference) running via Docker for query-time embedding
 - Vault syncs every 5 min via cron
@@ -98,7 +98,7 @@ Grove is a TypeScript API server that wraps a git-tracked Obsidian vault and exp
 
 **Infrastructure:**
 - VPS: Vultr, 4 vCPU, 8GB RAM, Ubuntu 24.04, Node 22
-- Domain: `grove.mili.dev` (DNS-only in Cloudflare, nginx handles TLS)
+- Domain: `api.grove.md` (DNS-only in Cloudflare, nginx handles TLS)
 - PM2 processes: `grove-proxy` (8420), `qmd-mcp` (8181), `qmd-server` (8177)
 - TEI Docker: `tei-embeddings` on port 8090 (BAAI/bge-base-en-v1.5, `--auto-truncate`)
 - API key: `key_a3802af4` (claude-ai, read+write, life vault)
@@ -107,7 +107,7 @@ Grove is a TypeScript API server that wraps a git-tracked Obsidian vault and exp
 
 - [x] **P0-1: Auth proxy** — `src/proxy.ts`, bearer tokens + OAuth 2.0 (PKCE) for Claude.ai
 - [x] **P0-2: Key management** — `src/keys.ts`, create/list/revoke CLI
-- [x] **P0-3: Deploy to VPS** — nginx + Let's Encrypt on `grove.mili.dev`
+- [x] **P0-3: Deploy to VPS** — nginx + Let's Encrypt on `api.grove.md`
 - [x] **P0-4: Register as Claude.ai custom connector** — connected via OAuth, working from all surfaces
 - [x] **P0-5a: Hybrid search** — BM25 + vector + RRF fusion via TEI + sqlite-vec (replaced OpenAI API plan with self-hosted TEI for privacy)
 - [ ] **P0-5b: Usage journal** — use for 2 weeks, note what's missing
@@ -213,7 +213,7 @@ A grove is: a name + topic instructions (what to engage with, what to refuse) + 
   After Grove server returns results, proxy runs each result through a local model on VPS: "Given these topic instructions, should this note be visible?" Filter or redact before returning to consumer. Model: small/fast (e.g., Qwen-2.5 or similar via Ollama).
 
 - [ ] **P2-5: Grove MCP endpoint**
-  Consumer connects their Claude to `https://grove.mili.dev/mcp` with a grove key. They get a shaped view of your knowledge — can ask questions, search, read (if permitted) — but only see what the grove allows.
+  Consumer connects their Claude to `https://api.grove.md/mcp` with a grove key. They get a shaped view of your knowledge — can ask questions, search, read (if permitted) — but only see what the grove allows.
 
 #### Phase 2b: Safety Infrastructure
 
@@ -325,7 +325,7 @@ Decisions made during planning. Reference these when implementing — don't re-l
 
 3. ~~**MCP tool descriptions:**~~ **Resolved.** QMD's built-in MCP tool descriptions work well. The `query` tool accepts structured searches (lex/vec/hyde). Iterate based on Claude.ai usage.
 
-4. ~~**Domain name:**~~ **Resolved.** `grove.mili.dev`
+4. ~~**Domain name:**~~ **Resolved.** `api.grove.md`
 
 5. **Auto-embed on vault change:** Currently embedding is manual (run embed-node.ts, scp). Should this be automated? Options: (a) cron on Mac, (b) git hook on push, (c) VPS-side embed after sync. Deferred to Phase 1.
 

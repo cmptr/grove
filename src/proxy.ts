@@ -29,7 +29,7 @@ const PROXY_PORT = Number(process.env.GROVE_PORT ?? 8420);
 const LOG_DIR = join(homedir(), ".grove");
 const LOG_PATH = join(LOG_DIR, "proxy.log");
 const MCP_LOG_PATH = join(LOG_DIR, "mcp.jsonl");
-const GROVE_URL = process.env.GROVE_URL ?? "https://grove.mili.dev";
+const GROVE_URL = process.env.GROVE_URL ?? "https://api.grove.md";
 
 let keys: StoredKey[] = [];
 const rateLimiter = new RateLimiter({ reads: 120, writes: 20, windowMs: 60_000 });

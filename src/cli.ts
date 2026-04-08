@@ -33,7 +33,7 @@ function loadConfig(): Config {
   } catch {
     // Missing or invalid config file — can't proceed without server/token
     console.error(`Config not found: ${path}`);
-    console.error(`Create it with: { "server": "https://grove.mili.dev", "token": "grove_live_..." }`);
+    console.error(`Create it with: { "server": "https://api.grove.md", "token": "grove_live_..." }`);
     process.exit(1);
   }
 }
@@ -461,7 +461,7 @@ Usage:
   grove diagnostics                     Run diagnostics
 
 Config: ~/.grove/cli.json
-  { "server": "https://grove.mili.dev", "token": "grove_live_..." }`);
+  { "server": "https://api.grove.md", "token": "grove_live_..." }`);
 }
 
 // ── Main ─────────────────────────────────────────────────────────

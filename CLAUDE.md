@@ -23,17 +23,18 @@ npx tsx src/keys.ts create --name "test-key"
 
 Requires QMD running separately. The proxy does not start QMD — it expects it on ports 8181 (MCP) and 8177 (BM25 search).
 
-## Running on VPS
+## Running on AWS
 
-Grove runs on Vultr at `grove.mili.dev` (45.76.66.214). PM2 manages three processes: `grove-proxy` (8420), `qmd-mcp` (8181), `qmd-server` (8177). Nginx terminates TLS.
+Grove runs on AWS g4dn.xlarge (T4 GPU) at `api.grove.md`. PM2 manages four processes: `grove-server` (8190), `grove-proxy` (8420), `qmd-server` (8177), `embed-server` (8090). Nginx terminates TLS.
 
 ```bash
-ssh root@grove.mili.dev
-pm2 list                    # see process status
-pm2 restart grove-proxy     # restart the proxy
-pm2 logs grove-proxy        # tail logs
+ssh -i ~/.ssh/grove-aws.pem ubuntu@44.243.70.208
+sudo pm2 list               # see process status
+sudo pm2 restart grove-server # restart
+sudo pm2 logs grove-server   # tail logs
 ```
 
+Embedding uses sentence-transformers (not TEI — TEI FlashQwen3 CUDA kernel returns nulls).
 Vault syncs every 5 min via cron. Keys live at `~/.grove/keys.json`.
 
 ## Code conventions
@@ -83,11 +84,10 @@ Vault conventions (frontmatter, linking, folder structure) are defined in `~/lif
 # On your local machine:
 git push origin main
 
-# On the VPS:
-ssh root@grove.mili.dev
-cd /root/grove && git pull
-npm install && npm run build
-pm2 restart grove-proxy
+# On AWS:
+ssh -i ~/.ssh/grove-aws.pem ubuntu@44.243.70.208
+sudo bash -c 'cd /root/grove && git pull && npm install'
+sudo pm2 restart grove-server grove-proxy
 ```
 
 No CI/CD yet. Deploy is manual, intentional, and fast.

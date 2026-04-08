@@ -159,8 +159,11 @@ async function main() {
   const insertCV = db.prepare(
     "INSERT OR REPLACE INTO content_vectors (hash, seq, pos, model, embedded_at) VALUES (?,?,?,?,datetime('now'))"
   );
+  const deleteVec = db.prepare(
+    "DELETE FROM vectors_vec WHERE hash_seq = ?"
+  );
   const insertVec = db.prepare(
-    "INSERT OR REPLACE INTO vectors_vec (hash_seq, embedding) VALUES (?,?)"
+    "INSERT INTO vectors_vec (hash_seq, embedding) VALUES (?,?)"
   );
 
   // Embed + insert per batch
@@ -181,6 +184,8 @@ async function main() {
         const c = batch[j];
         const hashSeq = `${c.hash}_${c.seq}`;
         insertCV.run(c.hash, c.seq, c.pos, MODEL_LABEL);
+        // vec0 virtual tables don't support INSERT OR REPLACE — delete first
+        deleteVec.run(hashSeq);
         insertVec.run(hashSeq, float32Buffer(embs[j]));
       }
     });

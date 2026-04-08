@@ -113,9 +113,16 @@ const TEST_CASES: TestCase[] = [
  * Returns reciprocal rank of the first expected title found in results.
  * Returns 0 if none found in top-5.
  */
+function normalizeTitle(t: string): string {
+  // Strip qmd:// prefix and .md suffix if present
+  return t.replace(/^qmd:\/\/[^/]+\//, "").replace(/\.md$/, "").toLowerCase();
+}
+
 function reciprocalRank(titles: string[], expected: string[]): number {
+  const normalizedExpected = expected.map(normalizeTitle);
   for (let i = 0; i < Math.min(titles.length, 5); i++) {
-    if (expected.some((e) => titles[i].toLowerCase() === e.toLowerCase())) {
+    const norm = normalizeTitle(titles[i]);
+    if (normalizedExpected.some((e) => norm === e || norm.endsWith(e) || e.endsWith(norm))) {
       return 1 / (i + 1);
     }
   }
