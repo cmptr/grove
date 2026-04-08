@@ -24,6 +24,7 @@ import { homedir } from "node:os";
 import { loadKeys, createKey, revokeKey, isExpired, type StoredKey } from "./keys.js";
 import { generateRequestId, log as structuredLog, auditRead, auditWrite } from "./logger.js";
 import { metrics } from "./metrics.js";
+import { resolveTrail, type TrailConfig } from "./trails.js";
 
 const QMD_PORT = Number(process.env.QMD_PORT ?? 8181);
 const GROVE_SERVER_PORT = Number(process.env.GROVE_SERVER_PORT ?? 8190);
@@ -761,6 +762,23 @@ const server = createServer(async (req, res) => {
   const sessionId = req.headers["mcp-session-id"];
   const sessionStr = Array.isArray(sessionId) ? sessionId[0] : sessionId;
 
+  // Trail resolution — look up if this key is associated with a trail
+  const trail = resolveTrail(key.id);
+
+  // Per-trail rate limits
+  if (trail) {
+    const trailRateLimit = rateLimiter.check(
+      `trail:${trail.id}`,
+      "read", // default check
+    );
+    if (!trailRateLimit.allowed) {
+      structuredLog("warn", "trail.rate_limited", rid, { trail_id: trail.id, trail_name: trail.name });
+      sendJson(res, 429, { error: "trail rate limit exceeded", retry_after_ms: trailRateLimit.retryAfterMs });
+      return;
+    }
+    rateLimiter.record(`trail:${trail.id}`, "read");
+  }
+
   // Forward ALL MCP requests to the Grove server (which owns all 6 tools)
   if (url.pathname === "/mcp") {
     let body = "";
@@ -800,9 +818,23 @@ const server = createServer(async (req, res) => {
       rateLimiter.record(key.id, isWrite ? "write" : "read");
     }
 
-    // Build headers for Grove server (strip auth, add Accept, pass correlation ID, optionally strip stale session)
+    // Build headers for Grove server (strip auth, add Accept, pass correlation ID + trail info, optionally strip stale session)
     function groveHeaders(stripSession = false): Record<string, string> {
       const h: Record<string, string> = { "Accept": "application/json, text/event-stream", "X-Request-Id": rid };
+      if (trail) {
+        h["X-Trail-Id"] = trail.id;
+        h["X-Trail-Config"] = JSON.stringify({
+          id: trail.id,
+          name: trail.name,
+          allow_tags: trail.allow_tags,
+          deny_tags: trail.deny_tags,
+          allow_types: trail.allow_types,
+          deny_types: trail.deny_types,
+          allow_paths: trail.allow_paths,
+          deny_paths: trail.deny_paths,
+          rate_limit_writes: trail.rate_limit_writes,
+        });
+      }
       for (const [k, v] of Object.entries(req.headers)) {
         if (k === "authorization" || k === "host") continue;
         if (stripSession && k === "mcp-session-id") continue;

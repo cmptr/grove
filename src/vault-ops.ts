@@ -21,6 +21,7 @@ export interface NoteEntry {
   path: string;
   name: string;
   type: string | null;
+  tags?: string[];
   aliases?: string[];
   modified_at: string;
 }
@@ -219,7 +220,7 @@ function walkMd(dir: string, acc: string[] = []): string[] {
 
 function parseFrontmatter(
   head: string,
-): { type: string | null; aliases?: string[] } {
+): { type: string | null; tags?: string[]; aliases?: string[] } {
   if (!head.startsWith("---")) return { type: null };
   const end = head.indexOf("\n---", 3);
   if (end === -1) return { type: null };
@@ -235,11 +236,15 @@ function parseFrontmatter(
 
   const type =
     typeof parsed.type === "string" ? parsed.type : null;
+  const tags = Array.isArray(parsed.tags)
+    ? parsed.tags.filter((t): t is string => typeof t === "string")
+    : typeof parsed.tags === "string" ? [parsed.tags]
+    : undefined;
   const aliases = Array.isArray(parsed.aliases)
     ? parsed.aliases.filter((a): a is string => typeof a === "string")
     : undefined;
 
-  return { type, aliases };
+  return { type, tags, aliases };
 }
 
 export function listNotes(
@@ -265,6 +270,7 @@ export function listNotes(
       path: rel,
       name: basename(abs, ".md"),
       type: fm.type,
+      tags: fm.tags,
       modified_at: stat.mtime.toISOString(),
     };
     if (opts?.includeAliases && fm.aliases) {

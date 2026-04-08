@@ -18,6 +18,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { readArchiveSources, planSync, normalizeDir } from "./sync-sources.js";
+import { loadTrails, createTrail, disableTrail, deleteTrail } from "./trails.js";
 
 // ── Config ───────────────────────────────────────────────────────
 
@@ -496,6 +497,54 @@ function cmdLint(dir: string, flags: Record<string, string | boolean>) {
   }
 }
 
+// ── Trail management (local, via trails.json) ──────────────
+
+function cmdTrailsList() {
+  const trails = loadTrails();
+  if (trails.length === 0) { console.log("No trails. Create one with: grove trails create <name> --allow-tags tag1,tag2"); return; }
+  console.log("\nID              Name                Status    Tags                    Paths");
+  console.log("─".repeat(90));
+  for (const t of trails) {
+    const status = t.enabled ? "active" : "disabled";
+    const tags = t.allow_tags.length > 0 ? t.allow_tags.join(",") : "(all)";
+    const paths = t.allow_paths.length > 0 ? t.allow_paths.join(",") : "(all)";
+    console.log(`${t.id.padEnd(16)}${t.name.padEnd(20)}${status.padEnd(10)}${tags.padEnd(24)}${paths}`);
+  }
+  console.log();
+}
+
+function cmdTrailCreate(name: string, flags: Record<string, string | boolean>) {
+  if (!name) { console.error("Usage: grove trails create <name> [--allow-tags t1,t2] [--deny-tags t1,t2] [--allow-types t1,t2] [--allow-paths p1,p2]"); process.exit(1); }
+  const splitFlag = (f: string | boolean | undefined) => typeof f === "string" ? f.split(",").map((s) => s.trim()).filter(Boolean) : [];
+  const { trail, token } = createTrail({
+    name,
+    description: (flags.description as string) ?? "",
+    allow_tags: splitFlag(flags["allow-tags"]),
+    deny_tags: splitFlag(flags["deny-tags"]),
+    allow_types: splitFlag(flags["allow-types"]),
+    deny_types: splitFlag(flags["deny-types"]),
+    allow_paths: splitFlag(flags["allow-paths"]),
+    deny_paths: splitFlag(flags["deny-paths"]),
+  });
+  console.log(`\nTrail created: ${trail.id}`);
+  console.log(`Name:          ${trail.name}`);
+  console.log(`Key:           ${trail.key_id}`);
+  console.log(`\nToken (shown once, give to consumer):\n`);
+  console.log(`  ${token}\n`);
+}
+
+function cmdTrailDisable(id: string) {
+  if (!id) { console.error("Usage: grove trails disable <trail-id>"); process.exit(1); }
+  if (disableTrail(id)) { console.log(`Disabled trail: ${id}`); }
+  else { console.error(`Trail not found: ${id}`); process.exit(1); }
+}
+
+function cmdTrailDelete(id: string) {
+  if (!id) { console.error("Usage: grove trails delete <trail-id>"); process.exit(1); }
+  if (deleteTrail(id)) { console.log(`Deleted trail: ${id}`); }
+  else { console.error(`Trail not found: ${id}`); process.exit(1); }
+}
+
 function printUsage() {
   console.log(`grove — CLI client for the Grove knowledge API
 
@@ -508,6 +557,10 @@ Usage:
   grove keys                            List all API keys
   grove keys create <name>              Create a new key (token shown once)
   grove keys revoke <key-id>            Revoke a key
+  grove trails                          List all trails
+  grove trails create <name> [opts]     Create a trail (--allow-tags, --deny-tags, --allow-types, --allow-paths)
+  grove trails disable <trail-id>       Disable a trail
+  grove trails delete <trail-id>        Delete a trail
   grove lint <dir> [--dry-run]          Normalize YAML frontmatter in .md files
   grove history [--since <date>]        Recent changes
   grove status                          Vault health
@@ -534,6 +587,21 @@ async function main() {
 
   // Local-only commands (no server needed)
   if (command === "lint") { cmdLint(positional, flags); return; }
+  if (command === "trails") {
+    const sub = positional || "list";
+    const subArg = process.argv.slice(4)[0] ?? "";
+    switch (sub) {
+      case "list":    cmdTrailsList(); break;
+      case "create":  cmdTrailCreate(subArg, flags); break;
+      case "disable": cmdTrailDisable(subArg); break;
+      case "delete":  cmdTrailDelete(subArg); break;
+      default:
+        console.error(`Unknown trails subcommand: ${sub}`);
+        console.error("Usage: grove trails [list|create|disable|delete]");
+        process.exit(1);
+    }
+    return;
+  }
 
   const config = loadConfig();
 

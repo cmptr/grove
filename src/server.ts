@@ -26,6 +26,7 @@ import { validatePath, validateNote, parseNote, serializeNote, contentHash } fro
 import { analyzeGraph, computeDigest } from "./vault-graph.js";
 import { RateLimiter, IdempotencyCache } from "./rate-limit.js";
 import { log as structuredLog, auditRead } from "./logger.js";
+import { filterByTrail, trailAllowsWrite, logTrailAccess, type TrailConfig, type NoteMetadata } from "./trails.js";
 
 // ── Path traversal guard ─────────────────────────────────────────
 // Resolves a relative path against the vault and rejects any attempt
@@ -79,9 +80,14 @@ Writing: Use write_note with proper frontmatter (type + tags required). Use if_h
 // ── Create MCP server with all 6 tools ────────────────────────────
 
 function createGroveServer(): McpServer {
+  // Trail capabilities in initialize handshake — serverInfo includes trail context
+  const trailInitialize = activeTrail
+    ? `\n\nThis connection is scoped to trail "${activeTrail.name}" (${activeTrail.id}). Only notes matching the trail's topic boundaries are visible.`
+    : "";
+  const serverInfo = activeTrail ? { name: "grove", version: "1.0.0", trail: { id: activeTrail.id, name: activeTrail.name } } : { name: "grove", version: "1.0.0" };
   const server = new McpServer(
-    { name: "grove", version: "1.0.0" },
-    { instructions: INSTRUCTIONS },
+    serverInfo as { name: string; version: string },
+    { instructions: INSTRUCTIONS + trailInitialize },
   );
 
   // ── Tool 1: query ───────────────────────────────────────────────
@@ -108,9 +114,36 @@ Example: searches=[{type:'lex', query:'salary'}, {type:'vec', query:'how much do
     },
     async ({ searches, limit }) => {
       const queryText = searches.map((s) => s.query).join(" ");
-      const results = await hybridSearch(queryText, limit ?? 10);
-      const formatted = formatResults(results);
-      return { content: [{ type: "text" as const, text: formatted || "No results found." }] };
+      // Fetch more results if trail filtering is active (pre-filter reduction)
+      const fetchLimit = activeTrail ? (limit ?? 10) * 3 : (limit ?? 10);
+      const results = await hybridSearch(queryText, fetchLimit);
+      const totalFound = results.length;
+
+      // Trail prefilter: filter results by trail scope
+      let filtered = results;
+      if (activeTrail) {
+        filtered = results.filter((r) => {
+          const filePath = ((r as Record<string, unknown>).file as string ?? "").replace(/^qmd:\/\/life\//, "");
+          // Read note frontmatter for precise filtering
+          const absPath = join(VAULT_PATH, filePath);
+          try {
+            const raw = readFileSync(absPath, "utf-8");
+            const { frontmatter } = parseNote(raw);
+            const tags = Array.isArray(frontmatter.tags) ? frontmatter.tags as string[] :
+              typeof frontmatter.tags === "string" ? [frontmatter.tags] : [];
+            const meta: NoteMetadata = { path: filePath, type: frontmatter.type as string, tags };
+            return filterByTrail(activeTrail!, meta);
+          } catch {
+            // Can't read note — filter by path only
+            return filterByTrail(activeTrail!, { path: filePath });
+          }
+        }).slice(0, limit ?? 10);
+        logTrailAccess("query", activeTrail.id, activeTrail.name, "query", totalFound, filtered.length);
+      }
+
+      const formatted = formatResults(filtered);
+      const filteredCount = activeTrail ? `\n\n[filtered_count: ${filtered.length}/${totalFound}]` : "";
+      return { content: [{ type: "text" as const, text: (formatted || "No results found.") + filteredCount }] };
     },
   );
 
@@ -133,6 +166,17 @@ Use the content_hash as if_hash when updating the note.`,
       const readNote = (abs: string, rel: string, resolvedFrom?: string) => {
         const raw = readFileSync(abs, "utf-8");
         const { frontmatter, content } = parseNote(raw);
+
+        // Trail filter: if note not visible under trail, return 404 (not 403 — don't leak existence)
+        if (activeTrail) {
+          const tags = Array.isArray(frontmatter.tags) ? frontmatter.tags as string[] :
+            typeof frontmatter.tags === "string" ? [frontmatter.tags] : [];
+          const meta: NoteMetadata = { path: rel, type: frontmatter.type as string, tags };
+          if (!filterByTrail(activeTrail, meta)) {
+            return { content: [{ type: "text" as const, text: `Note not found: ${file}` }] };
+          }
+        }
+
         const hash = contentHash(raw);
         const result: Record<string, unknown> = { path: rel, frontmatter, content, content_hash: hash };
         if (resolvedFrom) result.resolved_from = resolvedFrom;
@@ -234,6 +278,16 @@ Examples: "Resources/People/*.md", "Journal/2026/*.md", "path1.md,path2.md"`,
         }
         const raw = readFileSync(abs, "utf-8");
         const { frontmatter, content } = parseNote(raw);
+        // Trail filter: hidden notes return 404 (not 403)
+        if (activeTrail) {
+          const tags = Array.isArray(frontmatter.tags) ? frontmatter.tags as string[] :
+            typeof frontmatter.tags === "string" ? [frontmatter.tags] : [];
+          const meta: NoteMetadata = { path: entry.path, type: frontmatter.type as string, tags };
+          if (!filterByTrail(activeTrail, meta)) {
+            results.push({ path: entry.path, error: "not found" });
+            continue;
+          }
+        }
         results.push({ path: entry.path, frontmatter, content: content.slice(0, 2000), content_hash: contentHash(raw) });
       }
       return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
@@ -281,6 +335,13 @@ SAFE UPDATES — pass if_hash (from a prior get) to prevent overwriting concurre
       },
     },
     async ({ path: notePath, frontmatter: fmInput, content, if_hash }) => {
+      // Trail write scope check — constrain writes to trail scope
+      if (activeTrail) {
+        if (!trailAllowsWrite(activeTrail, notePath)) {
+          return { content: [{ type: "text" as const, text: `Write not allowed: path outside trail scope` }], isError: true };
+        }
+      }
+
       // Parse frontmatter from JSON string
       let frontmatter: Record<string, unknown>;
       try {
@@ -360,7 +421,16 @@ Use for:
       },
     },
     async ({ pattern, include_aliases }) => {
-      const entries = listNotes(VAULT_PATH, pattern, { includeAliases: include_aliases ?? false });
+      let entries = listNotes(VAULT_PATH, pattern, { includeAliases: include_aliases ?? false });
+      // Trail filter: only return trail-visible notes in list
+      if (activeTrail) {
+        const totalCount = entries.length;
+        entries = entries.filter((e) => {
+          const meta: NoteMetadata = { path: e.path, type: e.type, tags: e.tags };
+          return filterByTrail(activeTrail!, meta);
+        });
+        logTrailAccess("list", activeTrail.id, activeTrail.name, "list_notes", totalCount, entries.length);
+      }
       return {
         content: [{ type: "text" as const, text: JSON.stringify({ count: entries.length, notes: entries }, null, 2) }],
       };
@@ -391,12 +461,23 @@ Modes:
         const notes = listNotes(VAULT_PATH, "*");
         const log = await gitLog(VAULT_PATH, { limit: 1 });
         const lastCommit = log[0] ?? null;
+        // Trail: return scoped stats for trail keys
+        let totalNotes = notes.length;
+        const statusResult: Record<string, unknown> = {
+          total_notes: totalNotes,
+          last_commit: lastCommit ? { date: lastCommit.date, message: lastCommit.message } : null,
+          vault_path: VAULT_PATH,
+        };
+        if (activeTrail) {
+          const visibleNotes = notes.filter((n) => {
+            const meta: NoteMetadata = { path: n.path, type: n.type, tags: n.tags };
+            return filterByTrail(activeTrail!, meta);
+          });
+          statusResult.total_notes = visibleNotes.length;
+          statusResult.scoped_stats = { trail_id: activeTrail.id, trail_name: activeTrail.name, total_in_vault: totalNotes, visible: visibleNotes.length };
+        }
         return {
-          content: [{ type: "text" as const, text: JSON.stringify({
-            total_notes: notes.length,
-            last_commit: lastCommit ? { date: lastCommit.date, message: lastCommit.message } : null,
-            vault_path: VAULT_PATH,
-          }, null, 2) }],
+          content: [{ type: "text" as const, text: JSON.stringify(statusResult, null, 2) }],
         };
       }
 
@@ -521,6 +602,8 @@ async function runDiagnostics() {
 // ── HTTP server with session management ───────────────────────────
 
 const sessions = new Map<string, StreamableHTTPServerTransport>();
+const sessionTrails = new Map<string, TrailConfig>(); // trail config per session
+let activeTrail: TrailConfig | null = null; // current request's trail (set before tool execution)
 
 async function createSession(): Promise<StreamableHTTPServerTransport> {
   const transport = new StreamableHTTPServerTransport({
@@ -583,6 +666,21 @@ const httpServer = createServer(async (req, res) => {
   // MCP endpoint
   if (req.url === "/" || req.url === "/mcp") {
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
+
+    // Set active trail from proxy headers (trail resolution happens per-request)
+    const trailConfigHeader = req.headers["x-trail-config"] as string | undefined;
+    if (trailConfigHeader) {
+      try { activeTrail = JSON.parse(trailConfigHeader); } catch { activeTrail = null; }
+    } else {
+      activeTrail = null;
+    }
+
+    // Store trail config per session for SSE reconnects
+    if (activeTrail && sessionId) {
+      sessionTrails.set(sessionId, activeTrail);
+    } else if (sessionId && sessionTrails.has(sessionId)) {
+      activeTrail = sessionTrails.get(sessionId)!;
+    }
 
     if (req.method === "POST") {
       const body = await readBody(req);
