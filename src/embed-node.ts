@@ -62,7 +62,7 @@ function chunkText(text: string, title: string): { pos: number; text: string }[]
 async function embedBatch(texts: string[]): Promise<number[][]> {
   const url = new URL(`${TEI_URL}/v1/embeddings`);
   return new Promise((resolve, reject) => {
-    const body = JSON.stringify({ model: "tei", input: texts });
+    const body = JSON.stringify({ input: texts });
     const req = request(
       {
         hostname: url.hostname,

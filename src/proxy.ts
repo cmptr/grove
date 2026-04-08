@@ -765,7 +765,7 @@ server.listen(PROXY_PORT, "0.0.0.0", () => {
   console.log(`Loaded ${keys.length} API key(s)`);
 
   // Warm up TEI so first real query isn't slow
-  const warmup = JSON.stringify({ model: "tei", input: "warmup" });
+  const warmup = JSON.stringify({ input: "warmup" });
   const wreq = httpRequest(
     { hostname: "127.0.0.1", port: 8090, path: "/v1/embeddings", method: "POST",
       headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(warmup) } },
