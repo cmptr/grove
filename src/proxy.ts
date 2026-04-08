@@ -22,6 +22,8 @@ import { RateLimiter } from "./rate-limit.js";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { loadKeys, createKey, revokeKey, isExpired, type StoredKey } from "./keys.js";
+import { generateRequestId, log as structuredLog, auditRead, auditWrite } from "./logger.js";
+import { metrics } from "./metrics.js";
 
 const QMD_PORT = Number(process.env.QMD_PORT ?? 8181);
 const GROVE_SERVER_PORT = Number(process.env.GROVE_SERVER_PORT ?? 8190);
@@ -61,6 +63,9 @@ function log(keyName: string | null, method: string, url: string, status: number
 
 /** Log a full MCP conversation turn: request tool + args, response summary, latency */
 function logMcp(keyName: string, sessionId: string | undefined, tool: string, args: unknown, response: unknown, latencyMs: number, status: number) {
+  // Record metrics for this tool call
+  metrics.record(tool, latencyMs, status >= 400);
+
   const entry = {
     ts: new Date().toISOString(),
     key: keyName,
@@ -548,6 +553,8 @@ function proxyAndCapture(hostname: string, port: number, origReq: IncomingMessag
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", `http://localhost:${PROXY_PORT}`);
+  const rid = (req.headers["x-request-id"] as string) ?? generateRequestId();
+  res.setHeader("X-Request-Id", rid);
 
   if (req.method === "OPTIONS") {
     res.writeHead(204, {
@@ -563,9 +570,35 @@ const server = createServer(async (req, res) => {
   // OAuth endpoints (unauthenticated)
   if (handleOAuth(req, res, url)) return;
 
-  // Health check — unauthenticated
+  // Deep health check — verifies downstream services (QMD, Grove server, embed)
   if (url.pathname === "/health") {
-    sendJson(res, 200, { ok: true, proxy: true });
+    const checks: Record<string, boolean> = { proxy: true };
+    const checkServer = (name: string, port: number, path: string) =>
+      new Promise<boolean>((resolve) => {
+        const r = httpRequest({ hostname: "127.0.0.1", port, path, method: "GET", timeout: 3000 }, (res) => {
+          res.resume();
+          resolve(res.statusCode === 200);
+        });
+        r.on("error", () => resolve(false));
+        r.on("timeout", () => { r.destroy(); resolve(false); });
+        r.end();
+      });
+    const [groveOk, qmdOk, embedOk] = await Promise.all([
+      checkServer("grove-server", GROVE_SERVER_PORT, "/health"),
+      checkServer("qmd", QMD_PORT, "/"),
+      checkServer("embed", 8090, "/health"),
+    ]);
+    checks["grove-server"] = groveOk;
+    checks.qmd = qmdOk;
+    checks.embed = embedOk;
+    const allOk = groveOk && qmdOk;
+    sendJson(res, allOk ? 200 : 503, { ok: allOk, checks });
+    return;
+  }
+
+  // Metrics endpoint — request counts, latency percentiles, error rates
+  if (url.pathname === "/metrics") {
+    sendJson(res, 200, metrics.getMetrics());
     return;
   }
 
@@ -658,14 +691,14 @@ const server = createServer(async (req, res) => {
   const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
 
   if (!token) {
-    log(null, req.method ?? "", req.url ?? "", 401);
+    structuredLog("warn", "auth.missing", rid, { method: req.method, path: req.url, status: 401 });
     sendJson(res, 401, { error: "unauthorized" });
     return;
   }
 
   const key = validateToken(token);
   if (!key) {
-    log(null, req.method ?? "", req.url ?? "", 401);
+    structuredLog("warn", "auth.invalid", rid, { method: req.method, path: req.url, status: 401 });
     sendJson(res, 401, { error: "unauthorized" });
     return;
   }
@@ -690,7 +723,17 @@ const server = createServer(async (req, res) => {
 
     const mcpMethod = parsed?.method ?? req.method;
     const toolName = parsed?.params?.name ?? null;
-    log(key.name, req.method ?? "", "/mcp", 0, { mcp_method: mcpMethod, tool: toolName });
+    structuredLog("info", "mcp.request", rid, { key_id: key.id, key_name: key.name, method: req.method, path: "/mcp", mcp_method: mcpMethod, tool: toolName });
+
+    // Audit read/write tool calls
+    if (mcpMethod === "tools/call" && toolName) {
+      const toolArgs = parsed?.params?.arguments;
+      if (toolName === "write_note") {
+        auditWrite(rid, key.id, key.name, toolName, toolArgs, null);
+      } else {
+        auditRead(rid, key.id, key.name, toolName, toolArgs);
+      }
+    }
 
     // Rate limit tool calls
     if (mcpMethod === "tools/call" && toolName) {
@@ -703,9 +746,9 @@ const server = createServer(async (req, res) => {
       rateLimiter.record(key.id, isWrite ? "write" : "read");
     }
 
-    // Build headers for Grove server (strip auth, add Accept, optionally strip stale session)
+    // Build headers for Grove server (strip auth, add Accept, pass correlation ID, optionally strip stale session)
     function groveHeaders(stripSession = false): Record<string, string> {
-      const h: Record<string, string> = { "Accept": "application/json, text/event-stream" };
+      const h: Record<string, string> = { "Accept": "application/json, text/event-stream", "X-Request-Id": rid };
       for (const [k, v] of Object.entries(req.headers)) {
         if (k === "authorization" || k === "host") continue;
         if (stripSession && k === "mcp-session-id") continue;
@@ -807,7 +850,7 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  log(key.name, req.method ?? "", req.url ?? "", 200);
+  structuredLog("info", "proxy.qmd", rid, { key_id: key.id, key_name: key.name, method: req.method, path: req.url, status: 200 });
   proxyToQmd(req, res);
 });
 

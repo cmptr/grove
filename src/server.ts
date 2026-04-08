@@ -25,6 +25,7 @@ import { gitCommit, gitPush, gitLog, startupRecovery, qmdReindex, listNotes } fr
 import { validatePath, validateNote, parseNote, serializeNote, contentHash } from "./notes-validate.js";
 import { analyzeGraph, computeDigest } from "./vault-graph.js";
 import { RateLimiter, IdempotencyCache } from "./rate-limit.js";
+import { log as structuredLog, auditRead } from "./logger.js";
 
 // ── Path traversal guard ─────────────────────────────────────────
 // Resolves a relative path against the vault and rejects any attempt
@@ -559,10 +560,16 @@ function readBody(req: IncomingMessage): Promise<string> {
 }
 
 const httpServer = createServer(async (req, res) => {
+  // Read audit: log every request with correlation ID from proxy
+  const requestId = req.headers["x-request-id"] as string | undefined;
+  if (requestId) {
+    auditRead(requestId, "server", "grove-server", req.method ?? "GET", { url: req.url });
+  }
+
   // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, mcp-session-id");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, mcp-session-id, x-request-id");
   res.setHeader("Access-Control-Expose-Headers", "mcp-session-id");
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
 
