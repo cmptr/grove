@@ -21,7 +21,7 @@ import { appendFileSync, readFileSync, writeFileSync, existsSync } from "node:fs
 import { RateLimiter } from "./rate-limit.js";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { loadKeys, createKey, revokeKey, type StoredKey } from "./keys.js";
+import { loadKeys, createKey, revokeKey, isExpired, type StoredKey } from "./keys.js";
 
 const QMD_PORT = Number(process.env.QMD_PORT ?? 8181);
 const GROVE_SERVER_PORT = Number(process.env.GROVE_SERVER_PORT ?? 8190);
@@ -40,7 +40,9 @@ function reloadKeys() {
 
 function validateToken(token: string): StoredKey | null {
   const hash = createHash("sha256").update(token).digest("hex");
-  return keys.find((k) => k.hashed_token === hash) ?? null;
+  const key = keys.find((k) => k.hashed_token === hash) ?? null;
+  if (key && isExpired(key)) return null; // expired keys are rejected
+  return key;
 }
 
 function log(keyName: string | null, method: string, url: string, status: number, extra?: Record<string, unknown>) {
@@ -490,10 +492,21 @@ function sendJson(res: ServerResponse, status: number, body: unknown) {
   res.end(JSON.stringify(body));
 }
 
+const MAX_BODY = 1048576; // 1MB body size limit
+
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on("data", (c) => chunks.push(c));
+    let size = 0;
+    req.on("data", (c) => {
+      size += c.length;
+      if (size > MAX_BODY) {
+        req.destroy();
+        reject(new Error("payload too large"));
+        return;
+      }
+      chunks.push(c);
+    });
     req.on("end", () => resolve(Buffer.concat(chunks).toString()));
     req.on("error", reject);
   });
@@ -574,7 +587,11 @@ const server = createServer(async (req, res) => {
     const authed = token ? validateToken(token) : null;
     if (!authed) { sendJson(res, 401, { error: "unauthorized" }); return; }
 
-    const body = await readBody(req);
+    let body: string;
+    try { body = await readBody(req); } catch (err: unknown) {
+      if ((err as Error).message === "payload too large") { sendJson(res, 413, { error: "payload too large" }); return; }
+      sendJson(res, 400, { error: "read error" }); return;
+    }
     let parsed: any;
     try { parsed = JSON.parse(body); } catch { sendJson(res, 400, { error: "invalid json" }); return; }
 
@@ -659,7 +676,13 @@ const server = createServer(async (req, res) => {
 
   // Forward ALL MCP requests to the Grove server (which owns all 6 tools)
   if (url.pathname === "/mcp") {
-    const body = req.method === "POST" ? await readBody(req) : "";
+    let body = "";
+    if (req.method === "POST") {
+      try { body = await readBody(req); } catch (err: unknown) {
+        if ((err as Error).message === "payload too large") { sendJson(res, 413, { error: "payload too large" }); return; }
+        sendJson(res, 400, { error: "read error" }); return;
+      }
+    }
     let parsed: any = null;
     if (body) try { parsed = JSON.parse(body); } catch {
       // Non-JSON body is fine — we only parse for logging metadata extraction

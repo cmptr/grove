@@ -11,8 +11,8 @@
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { join, relative, dirname } from "node:path";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, lstatSync } from "node:fs";
+import { join, relative, dirname, resolve } from "node:path";
 import { homedir } from "node:os";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -25,6 +25,23 @@ import { gitCommit, gitPush, gitLog, startupRecovery, qmdReindex, listNotes } fr
 import { validatePath, validateNote, parseNote, serializeNote, contentHash } from "./notes-validate.js";
 import { analyzeGraph, computeDigest } from "./vault-graph.js";
 import { RateLimiter, IdempotencyCache } from "./rate-limit.js";
+
+// ── Path traversal guard ─────────────────────────────────────────
+// Resolves a relative path against the vault and rejects any attempt
+// to escape outside the vault via ".." or symlinks.
+function sanitizePath(vaultRoot: string, filePath: string): string | null {
+  const root = resolve(vaultRoot);
+  const normalized = resolve(root, filePath);
+  if (!normalized.startsWith(root + "/") && normalized !== root) return null;
+  if (filePath.includes("..")) return null;
+  try {
+    const stat = lstatSync(normalized);
+    if (stat.isSymbolicLink()) return null;
+  } catch {
+    // File doesn't exist yet — that's fine for reads (will get "not found")
+  }
+  return normalized;
+}
 
 const VAULT_PATH = process.env.GROVE_VAULT ?? join(homedir(), "life");
 const PORT = Number(process.env.GROVE_SERVER_PORT ?? 8190);
@@ -125,8 +142,9 @@ Use the content_hash as if_hash when updating the note.`,
       let filePath = file.replace(/^(life\/|qmd:\/\/life\/)/, "");
       if (!filePath.endsWith(".md")) filePath += ".md";
 
-      // 2. Try direct read at the given path
-      const abs = join(VAULT_PATH, filePath);
+      // 2. Try direct read at the given path (with traversal guard)
+      const abs = sanitizePath(VAULT_PATH, filePath);
+      if (!abs) return { content: [{ type: "text" as const, text: `Path rejected: traversal outside vault not allowed` }] };
       if (existsSync(abs)) return readNote(abs, filePath);
 
       // 3. Extract the basename for searching (e.g., "Taste Graph" from "Resources/Concepts/Taste Graph.md")
@@ -204,7 +222,11 @@ Examples: "Resources/People/*.md", "Journal/2026/*.md", "path1.md,path2.md"`,
       }
       const results: Record<string, unknown>[] = [];
       for (const entry of entries.slice(0, 50)) {
-        const abs = join(VAULT_PATH, entry.path);
+        const abs = sanitizePath(VAULT_PATH, entry.path);
+        if (!abs) {
+          results.push({ path: entry.path, error: "path traversal outside vault not allowed" });
+          continue;
+        }
         if (!existsSync(abs)) {
           results.push({ path: entry.path, error: "not found" });
           continue;
@@ -516,11 +538,23 @@ async function createSession(): Promise<StreamableHTTPServerTransport> {
   return transport;
 }
 
+const MAX_BODY = 1048576; // 1MB body size limit
+
 function readBody(req: IncomingMessage): Promise<string> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on("data", (c) => chunks.push(c));
+    let size = 0;
+    req.on("data", (c) => {
+      size += c.length;
+      if (size > MAX_BODY) {
+        req.destroy();
+        reject(new Error("payload too large"));
+        return;
+      }
+      chunks.push(c);
+    });
     req.on("end", () => resolve(Buffer.concat(chunks).toString()));
+    req.on("error", reject);
   });
 }
 

@@ -24,6 +24,7 @@ interface StoredKey {
   vault_id: string;
   created_at: string;
   last_used_at: string | null;
+  expires_at: string | null; // ISO date string, null = never expires
 }
 
 function hashToken(token: string): string {
@@ -43,7 +44,7 @@ function generateId(): string {
   return "key_" + randomBytes(4).toString("hex");
 }
 
-function create(name: string, scopes = "read,write", vaultId = "life") {
+function create(name: string, scopes = "read,write", vaultId = "life", ttlDays?: number) {
   const keys = loadKeys();
   const raw = randomBytes(32).toString("hex");
   const token = PREFIX + raw;
@@ -55,6 +56,7 @@ function create(name: string, scopes = "read,write", vaultId = "life") {
     vault_id: vaultId,
     created_at: new Date().toISOString(),
     last_used_at: null,
+    expires_at: ttlDays ? new Date(Date.now() + ttlDays * 86400_000).toISOString() : null,
   };
   keys.push(key);
   saveKeys(keys);
@@ -125,7 +127,7 @@ if (command === "create") {
 }
 
 // -- Programmatic API (used by proxy /keys endpoint) --
-export function createKey(name: string, scopes: string[] = ["read", "write"], vaultId = "life") {
+export function createKey(name: string, scopes: string[] = ["read", "write"], vaultId = "life", ttlDays?: number) {
   const keys = loadKeys();
   const raw = randomBytes(32).toString("hex");
   const token = PREFIX + raw;
@@ -137,6 +139,7 @@ export function createKey(name: string, scopes: string[] = ["read", "write"], va
     vault_id: vaultId,
     created_at: new Date().toISOString(),
     last_used_at: null,
+    expires_at: ttlDays ? new Date(Date.now() + ttlDays * 86400_000).toISOString() : null,
   };
   keys.push(key);
   saveKeys(keys);
@@ -150,6 +153,12 @@ export function revokeKey(id: string): boolean {
   keys.splice(idx, 1);
   saveKeys(keys);
   return true;
+}
+
+/** Check if a key has expired */
+export function isExpired(key: StoredKey): boolean {
+  if (!key.expires_at) return false;
+  return new Date(key.expires_at).getTime() < Date.now();
 }
 
 export { loadKeys, hashToken, type StoredKey };
