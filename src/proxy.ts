@@ -610,20 +610,20 @@ const server = createServer(async (req, res) => {
   // Deep health check — verifies downstream services (QMD, Grove server, embed)
   if (url.pathname === "/health") {
     const checks: Record<string, boolean> = { proxy: true };
-    const checkServer = (name: string, port: number, path: string) =>
+    const checkServer = (hostname: string, port: number, path: string) =>
       new Promise<boolean>((resolve) => {
-        const r = httpRequest({ hostname: "127.0.0.1", port, path, method: "GET", timeout: 3000 }, (res) => {
+        const r = httpRequest({ hostname, port, path, method: "GET", timeout: 3000 }, (res) => {
           res.resume();
-          resolve(res.statusCode === 200);
+          resolve((res.statusCode ?? 500) < 400);
         });
         r.on("error", () => resolve(false));
         r.on("timeout", () => { r.destroy(); resolve(false); });
         r.end();
       });
     const [groveOk, qmdOk, embedOk] = await Promise.all([
-      checkServer("grove-server", GROVE_SERVER_PORT, "/health"),
-      checkServer("qmd", QMD_PORT, "/"),
-      checkServer("embed", 8090, "/health"),
+      checkServer("127.0.0.1", GROVE_SERVER_PORT, "/health"),
+      checkServer("127.0.0.1", 8177, "/health"), // BM25 search server (QMD companion)
+      checkServer("127.0.0.1", 8090, "/health"),
     ]);
     checks["grove-server"] = groveOk;
     checks.qmd = qmdOk;
