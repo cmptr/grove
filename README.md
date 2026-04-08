@@ -204,7 +204,7 @@ cd grove
 npm install
 
 # Create an API key
-npx tsx src/keys.ts create --name "my-key"
+grove keys create my-key
 # → grove_live_abc123... (save this, it's shown once)
 
 # Start QMD (search engine)

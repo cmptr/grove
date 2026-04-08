@@ -409,7 +409,7 @@ function setupPage(keyName: string | null): string {
     <h2>Authenticate</h2>
     <input type="password" id="token-input" placeholder="Paste your API key (grove_live_...)" />
     <button onclick="auth()">Sign in</button>
-    <p class="note">Need a key? Create one via SSH: <code>cd ~/grove && npx tsx src/keys.ts create --name my-key</code></p>
+    <p class="note">Need a key? Run <code>grove keys create my-key</code> from any device with an existing key.</p>
   </div>
 </div>
 
@@ -442,8 +442,29 @@ function auth() {
     });
 }
 function loadKeys() {
-  // We can't list keys via API yet — just show a placeholder
-  document.getElementById('key-list').innerHTML = '<p class="note">Key management available via CLI: <code>npx tsx src/keys.ts list</code></p>';
+  fetch('/keys', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + bearerToken, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'list' }),
+  }).then(r => r.json()).then(d => {
+    const keys = d.keys || [];
+    if (keys.length === 0) {
+      document.getElementById('key-list').innerHTML = '<p class="note">No keys.</p>';
+      return;
+    }
+    document.getElementById('key-list').innerHTML = keys.map(k =>
+      '<div class="key-item"><span>' + k.name + ' <span class="note">(' + k.id + ', ' + (k.scopes||[]).join(',') + ')</span></span>' +
+      '<button onclick="revokeKey(\\'' + k.id + '\\')">Revoke</button></div>'
+    ).join('');
+  });
+}
+function revokeKey(id) {
+  if (!confirm('Revoke key ' + id + '?')) return;
+  fetch('/keys', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + bearerToken, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'revoke', id }),
+  }).then(() => loadKeys());
 }
 function createKey() {
   const name = document.getElementById('key-name').value.trim();

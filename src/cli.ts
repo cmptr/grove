@@ -505,14 +505,21 @@ Usage:
   grove list <glob> [--aliases]         List notes
   grove write <path> --type <type>      Create note (content from stdin)
   grove sync <dir> [--dry-run]          Sync archived Sources to Grove
-  grove keys [list|create|revoke]       Manage API keys remotely
+  grove keys                            List all API keys
+  grove keys create <name>              Create a new key (token shown once)
+  grove keys revoke <key-id>            Revoke a key
   grove lint <dir> [--dry-run]          Normalize YAML frontmatter in .md files
   grove history [--since <date>]        Recent changes
   grove status                          Vault health
   grove diagnostics                     Run diagnostics
 
 Config: ~/.grove/cli.json
-  { "server": "https://api.grove.md", "token": "grove_live_..." }`);
+  { "server": "https://api.grove.md", "token": "grove_live_..." }
+
+New device setup:
+  1. On an existing device:  grove keys create <device-name>
+  2. Copy the token
+  3. On the new device:      mkdir -p ~/.grove && echo '{"server":"https://api.grove.md","token":"grove_live_..."}' > ~/.grove/cli.json`);
 }
 
 // ── Main ─────────────────────────────────────────────────────────

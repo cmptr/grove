@@ -17,8 +17,9 @@ Read `PLAN.md` for the full spec. This file governs how you work — PLAN.md gov
 
 ```bash
 npm run proxy          # Auth proxy on :8420, proxies to QMD MCP (:8181) and BM25 (:8177)
-npm run keys           # Key management CLI
-npx tsx src/keys.ts create --name "test-key"
+grove keys             # List API keys (remote, via ~/.grove/cli.json)
+grove keys create foo  # Create a new key (token shown once)
+grove keys revoke id   # Revoke a key
 ```
 
 Requires QMD running separately. The proxy does not start QMD — it expects it on ports 8181 (MCP) and 8177 (BM25 search).
