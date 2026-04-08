@@ -4,7 +4,7 @@
 set -euo pipefail
 
 SSH_KEY="$HOME/.ssh/grove-aws.pem"
-HOST="ubuntu@44.243.70.208"
+HOST="ubuntu@52.37.76.231"
 
 echo "Pushing to origin..."
 git push origin main

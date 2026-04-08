@@ -12,7 +12,7 @@ Grove is a TypeScript API server that wraps a git-tracked Obsidian vault and exp
 **Repo:** `~/src/grove`
 **Vault:** `~/life/` (primary), `~/canva/` (deferred — Phase 8)
 **Depends on:** `@tobilu/qmd` (search engine), `@modelcontextprotocol/sdk` (MCP transport)
-**Deploys to:** AWS g4dn.xlarge (T4 GPU) at `api.grove.md` (44.243.70.208)
+**Deploys to:** AWS g4dn.xlarge (T4 GPU) at `api.grove.md` (52.37.76.231)
 **Live:** Phases 0-1 complete — MCP + hybrid search + read/write at `https://api.grove.md`
 **Next:** Security hardening → Observability → Portal → Trails (topic-scoped sharing)
 
