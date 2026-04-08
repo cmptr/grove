@@ -2,17 +2,17 @@
  * Hybrid search: BM25 + vector + RRF fusion.
  *
  * - BM25: FTS5 full-text search directly against QMD's SQLite index
- * - Vector: embeds query via embedding server on port 8090, then cosine
+ * - Vector: embeds query via Voyage AI API, then cosine
  *   search against pre-computed vectors in QMD's SQLite vec0 table
  * - RRF: fuses both result sets via Reciprocal Rank Fusion
  */
 
-import { request as httpRequest } from "node:http";
 import { homedir } from "node:os";
 import { existsSync } from "node:fs";
 import Database from "better-sqlite3";
 
-const TEI_PORT = Number(process.env.TEI_PORT ?? 8090);
+const VOYAGE_API_KEY = process.env.VOYAGE_API_KEY ?? "";
+const VOYAGE_MODEL = process.env.VOYAGE_MODEL ?? "voyage-4-large";
 const QMD_INDEX = process.env.QMD_INDEX ?? `${process.env.HOME}/.cache/qmd/index.sqlite`;
 const BM25_WEIGHT = parseFloat(process.env.BM25_WEIGHT ?? "1.2");
 const VEC_WEIGHT = parseFloat(process.env.VEC_WEIGHT ?? "1.0");
@@ -34,41 +34,25 @@ interface HybridResult {
 }
 
 /**
- * Embed a query string via TEI (localhost:8090)
+ * Embed a query string via Voyage AI API.
  */
 async function embedQuery(text: string): Promise<number[]> {
-  return new Promise((resolve, reject) => {
-    // Qwen3-Embedding uses instruction prefix for queries (not documents)
-    const instructed = `Instruct: Given a search query, retrieve relevant passages from a personal knowledge vault\nQuery: ${text}`;
-    const body = JSON.stringify({ input: instructed });
-    const req = httpRequest(
-      {
-        hostname: "127.0.0.1",
-        port: TEI_PORT,
-        path: "/v1/embeddings",
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Content-Length": Buffer.byteLength(body),
-        },
-      },
-      (res) => {
-        let data = "";
-        res.on("data", (c) => (data += c));
-        res.on("end", () => {
-          try {
-            const parsed = JSON.parse(data);
-            resolve(parsed.data[0].embedding);
-          } catch (err) {
-            reject(new Error(`TEI parse error: ${data.slice(0, 200)}`));
-          }
-        });
-      }
-    );
-    req.on("error", reject);
-    req.write(body);
-    req.end();
+  if (!VOYAGE_API_KEY) throw new Error("VOYAGE_API_KEY not set");
+  const res = await fetch("https://api.voyageai.com/v1/embeddings", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${VOYAGE_API_KEY}`,
+    },
+    body: JSON.stringify({
+      input: text,
+      model: VOYAGE_MODEL,
+      input_type: "query",
+    }),
   });
+  if (!res.ok) throw new Error(`Voyage API error: ${res.status} ${await res.text()}`);
+  const data = (await res.json()) as { data: { embedding: number[] }[] };
+  return data.data[0].embedding;
 }
 
 /**

@@ -1,26 +1,22 @@
 #!/usr/bin/env tsx
 /**
- * Embed all docs via TEI + insert into SQLite vec0.
- * No Python, no PyTorch, no GC issues.
+ * Embed all docs via Voyage AI API + insert into SQLite vec0.
  *
- * Usage (on VPS with local TEI):
- *   npx tsx src/embed-node.ts
- *
- * Usage (from Mac via SSH tunnel):
- *   TEI_URL=http://localhost:18090 npx tsx src/embed-node.ts
+ * Usage:
+ *   VOYAGE_API_KEY=pa-... npx tsx src/embed-node.ts
  */
 
 import Database from "better-sqlite3";
 import { homedir } from "node:os";
 import { existsSync } from "node:fs";
-import { request } from "node:http";
 
 const DB_PATH = `${homedir()}/.cache/qmd/index.sqlite`;
-const TEI_URL = process.env.TEI_URL ?? "http://localhost:8090";
-const CHUNK_SIZE = 1200; // TEI max 512 tokens; ~3 chars/token with markup
+const VOYAGE_API_KEY = process.env.VOYAGE_API_KEY ?? "";
+const VOYAGE_MODEL = process.env.VOYAGE_MODEL ?? "voyage-4-large";
+const CHUNK_SIZE = 1200;
 const CHUNK_OVERLAP = 180;
-const BATCH = Number(process.env.BATCH_SIZE ?? 32); // GPU handles 32+ easily; use BATCH_SIZE=8 for CPU
-const MODEL_LABEL = "qwen3-embedding-0.6b";
+const BATCH = Number(process.env.BATCH_SIZE ?? 64); // Voyage handles large batches well
+const MODEL_LABEL = "voyage-4-large";
 
 // Find vec0 extension
 function findVec0(): string {
@@ -60,41 +56,24 @@ function chunkText(text: string, title: string): { pos: number; text: string }[]
 }
 
 async function embedBatch(texts: string[]): Promise<number[][]> {
-  const url = new URL(`${TEI_URL}/v1/embeddings`);
-  return new Promise((resolve, reject) => {
-    const body = JSON.stringify({ input: texts });
-    const req = request(
-      {
-        hostname: url.hostname,
-        port: url.port,
-        path: url.pathname,
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Content-Length": Buffer.byteLength(body),
-        },
-      },
-      (res) => {
-        let data = "";
-        res.on("data", (c) => (data += c));
-        res.on("end", () => {
-          try {
-            const result = JSON.parse(data);
-            const embs: number[][] = new Array(texts.length);
-            for (const item of result.data) {
-              embs[item.index] = item.embedding;
-            }
-            resolve(embs);
-          } catch (err) {
-            reject(new Error(`TEI parse error: ${data.slice(0, 200)}`));
-          }
-        });
-      }
-    );
-    req.on("error", reject);
-    req.write(body);
-    req.end();
+  if (!VOYAGE_API_KEY) throw new Error("VOYAGE_API_KEY not set");
+  const res = await fetch("https://api.voyageai.com/v1/embeddings", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${VOYAGE_API_KEY}`,
+    },
+    body: JSON.stringify({
+      input: texts,
+      model: VOYAGE_MODEL,
+      input_type: "document",
+    }),
   });
+  if (!res.ok) throw new Error(`Voyage API error: ${res.status} ${await res.text()}`);
+  const data = (await res.json()) as { data: { embedding: number[]; index: number }[] };
+  const embs: number[][] = new Array(texts.length);
+  for (const item of data.data) embs[item.index] = item.embedding;
+  return embs;
 }
 
 function float32Buffer(vec: number[]): Buffer {

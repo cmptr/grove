@@ -621,11 +621,12 @@ const server = createServer(async (req, res) => {
         r.on("timeout", () => { r.destroy(); resolve(false); });
         r.end();
       });
-    const [groveOk, qmdOk, embedOk] = await Promise.all([
+    const [groveOk, qmdOk] = await Promise.all([
       checkServer("127.0.0.1", GROVE_SERVER_PORT, "/health"),
       checkServer("127.0.0.1", 8177, "/health"), // BM25 search server (QMD companion)
-      checkServer("127.0.0.1", 8090, "/health"),
     ]);
+    // Embed health: just check that VOYAGE_API_KEY is set (API is external)
+    const embedOk = !!process.env.VOYAGE_API_KEY;
     checks["grove-server"] = groveOk;
     checks.qmd = qmdOk;
     checks.embed = embedOk;
@@ -949,14 +950,4 @@ server.listen(PROXY_PORT, "0.0.0.0", () => {
   console.log(`OAuth authorize: ${GROVE_URL}/oauth/authorize`);
   console.log(`Loaded ${keys.length} API key(s)`);
 
-  // Warm up TEI so first real query isn't slow
-  const warmup = JSON.stringify({ input: "warmup" });
-  const wreq = httpRequest(
-    { hostname: "127.0.0.1", port: 8090, path: "/v1/embeddings", method: "POST",
-      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(warmup) } },
-    (wres) => { wres.resume(); wres.on("end", () => console.log("TEI warmed up")); }
-  );
-  wreq.on("error", () => console.log("TEI warmup failed (may not be running yet)"));
-  wreq.write(warmup);
-  wreq.end();
 });
