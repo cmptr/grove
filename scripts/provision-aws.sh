@@ -168,91 +168,23 @@ if [[ "$INSTANCE_ID" != "None" && -n "$INSTANCE_ID" ]]; then
     --query 'Reservations[0].Instances[0].State.Name' --output text)
   log "Instance state: $INSTANCE_STATE"
 else
-  # ── 8. Launch Spot Instance ──────────────────────────────────────────────────
+  # ── 8. Launch Spot Instance (using run-instances with spot market options) ───
   log "Launching g4dn.xlarge spot instance..."
 
-  # User data: just ensure SSH is up and GPU drivers are present
-  USER_DATA=$(base64 <<'USERDATA'
-#!/bin/bash
-apt-get update -qq
-apt-get install -y -qq curl git
-USERDATA
-)
+  INSTANCE_ID=$($AWS ec2 run-instances \
+    --image-id "$AMI_ID" \
+    --instance-type "$INSTANCE_TYPE" \
+    --key-name "$KEY_NAME" \
+    --security-group-ids "$SG_ID" \
+    --subnet-id "$SUBNET_ID" \
+    --instance-market-options '{"MarketType":"spot","SpotOptions":{"MaxPrice":"'"$SPOT_MAX_PRICE"'","SpotInstanceType":"persistent","InstanceInterruptionBehavior":"stop"}}' \
+    --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":100,"VolumeType":"gp3","DeleteOnTermination":true}}]' \
+    --tag-specifications \
+      "ResourceType=instance,Tags=[{Key=$TAG_KEY,Value=$TAG_VAL},{Key=Name,Value=grove-server}]" \
+      "ResourceType=volume,Tags=[{Key=$TAG_KEY,Value=$TAG_VAL}]" \
+    --query 'Instances[0].InstanceId' --output text)
 
-  LAUNCH_SPEC=$(cat <<JSON
-{
-  "ImageId": "$AMI_ID",
-  "InstanceType": "$INSTANCE_TYPE",
-  "KeyName": "$KEY_NAME",
-  "SecurityGroupIds": ["$SG_ID"],
-  "SubnetId": "$SUBNET_ID",
-  "UserData": "$USER_DATA",
-  "BlockDeviceMappings": [
-    {
-      "DeviceName": "/dev/sda1",
-      "Ebs": {
-        "VolumeSize": 100,
-        "VolumeType": "gp3",
-        "DeleteOnTermination": true
-      }
-    }
-  ],
-  "TagSpecifications": [
-    {
-      "ResourceType": "instance",
-      "Tags": [
-        {"Key": "$TAG_KEY", "Value": "$TAG_VAL"},
-        {"Key": "Name", "Value": "grove-server"}
-      ]
-    },
-    {
-      "ResourceType": "volume",
-      "Tags": [
-        {"Key": "$TAG_KEY", "Value": "$TAG_VAL"}
-      ]
-    }
-  ]
-}
-JSON
-)
-
-  SPOT_REQUEST_ID=$($AWS ec2 request-spot-instances \
-    --spot-price "$SPOT_MAX_PRICE" \
-    --type "persistent" \
-    --instance-interruption-behavior "stop" \
-    --launch-specification "$LAUNCH_SPEC" \
-    --query 'SpotInstanceRequests[0].SpotInstanceRequestId' --output text)
-
-  $AWS ec2 create-tags --resources "$SPOT_REQUEST_ID" \
-    --tags "Key=$TAG_KEY,Value=$TAG_VAL" "Key=Name,Value=grove-spot-request"
-
-  log "Spot request submitted: $SPOT_REQUEST_ID"
-  log "Waiting for spot request to be fulfilled (up to 10 min)..."
-
-  for i in $(seq 1 40); do
-    STATE=$($AWS ec2 describe-spot-instance-requests \
-      --spot-instance-request-ids "$SPOT_REQUEST_ID" \
-      --query 'SpotInstanceRequests[0].Status.Code' --output text)
-    INSTANCE_ID=$($AWS ec2 describe-spot-instance-requests \
-      --spot-instance-request-ids "$SPOT_REQUEST_ID" \
-      --query 'SpotInstanceRequests[0].InstanceId' --output text)
-    if [[ "$STATE" == "fulfilled" && "$INSTANCE_ID" != "None" && -n "$INSTANCE_ID" ]]; then
-      log "Spot request fulfilled: $INSTANCE_ID"
-      break
-    fi
-    if [[ "$STATE" == "capacity-not-available" || "$STATE" == "price-too-low" ]]; then
-      warn "Spot request failed with status: $STATE"
-      warn "Try increasing SPOT_MAX_PRICE or switching to on-demand."
-      exit 1
-    fi
-    echo "  ... waiting ($i/40): $STATE"
-    sleep 15
-  done
-
-  if [[ -z "$INSTANCE_ID" || "$INSTANCE_ID" == "None" ]]; then
-    warn "Spot instance not fulfilled after timeout."
-    exit 1
-  fi
+  log "Instance launched: $INSTANCE_ID"
 fi
 
 # ── 9. Wait for instance running ──────────────────────────────────────────────
