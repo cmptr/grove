@@ -161,10 +161,10 @@ async function runEval(): Promise<void> {
   for (const tc of TEST_CASES) {
     process.stdout.write(`  Running: ${truncate(tc.query, 55)}... `);
 
-    // BM25
+    // BM25 (synchronous — direct FTS5 query)
     let bm25Titles: string[] = [];
     try {
-      const bm25Results = await bm25Search(tc.query, 5);
+      const bm25Results = bm25Search(tc.query, 5);
       bm25Titles = bm25Results.map((r) => r.title);
     } catch (err) {
       bm25Titles = [];

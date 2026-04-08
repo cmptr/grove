@@ -1,13 +1,10 @@
 /**
- * Hybrid search: BM25 + vector via TEI + RRF fusion.
+ * Hybrid search: BM25 + vector + RRF fusion.
  *
- * - BM25: hits the QMD search server on port 8177
- * - Vector: embeds query via TEI on port 8090, then cosine search against
- *   pre-computed vectors in QMD's SQLite index
+ * - BM25: FTS5 full-text search directly against QMD's SQLite index
+ * - Vector: embeds query via embedding server on port 8090, then cosine
+ *   search against pre-computed vectors in QMD's SQLite vec0 table
  * - RRF: fuses both result sets via Reciprocal Rank Fusion
- *
- * This runs entirely on the VPS. Doc vectors are pre-computed on Mac and
- * synced via scp. TEI embeds the query text (~85ms). No local LLM models.
  */
 
 import { request as httpRequest } from "node:http";
@@ -16,7 +13,6 @@ import { existsSync } from "node:fs";
 import Database from "better-sqlite3";
 
 const TEI_PORT = Number(process.env.TEI_PORT ?? 8090);
-const BM25_PORT = Number(process.env.BM25_PORT ?? 8177);
 const QMD_INDEX = process.env.QMD_INDEX ?? `${process.env.HOME}/.cache/qmd/index.sqlite`;
 const BM25_WEIGHT = parseFloat(process.env.BM25_WEIGHT ?? "1.2");
 const VEC_WEIGHT = parseFloat(process.env.VEC_WEIGHT ?? "1.0");
@@ -76,32 +72,55 @@ async function embedQuery(text: string): Promise<number[]> {
 }
 
 /**
- * BM25 search via QMD search server (localhost:8177)
+ * BM25 search via FTS5 directly against QMD's SQLite index.
  */
-async function bm25Search(query: string, n: number): Promise<SearchResult[]> {
-  return new Promise((resolve, reject) => {
-    const req = httpRequest(
-      {
-        hostname: "127.0.0.1",
-        port: BM25_PORT,
-        path: `/search?q=${encodeURIComponent(query)}&n=${n}`,
-        method: "GET",
-      },
-      (res) => {
-        let data = "";
-        res.on("data", (c) => (data += c));
-        res.on("end", () => {
-          try {
-            resolve(JSON.parse(data));
-          } catch {
-            reject(new Error(`BM25 parse error`));
-          }
-        });
-      }
-    );
-    req.on("error", reject);
-    req.end();
-  });
+function bm25Search(query: string, n: number): SearchResult[] {
+  const db = getDb();
+
+  // Escape FTS5 special characters and wrap terms for safe matching
+  const sanitized = query.replace(/['"]/g, "").trim();
+  if (!sanitized) return [];
+
+  const rows = db
+    .prepare(
+      `SELECT f.filepath, f.title, rank,
+              substr(f.body, 1, 200) as snippet
+       FROM documents_fts f
+       JOIN documents d ON d.path = f.filepath AND d.active = 1
+       WHERE documents_fts MATCH ?
+       ORDER BY rank
+       LIMIT ?`
+    )
+    .all(sanitized, n * 2) as { filepath: string; title: string; rank: number; snippet: string }[];
+
+  const results: SearchResult[] = [];
+  const seen = new Set<string>();
+
+  for (const row of rows) {
+    if (seen.has(row.title)) continue;
+    seen.add(row.title);
+
+    // Normalize score: FTS5 rank is negative (more negative = better match)
+    const score = Math.round(Math.abs(row.rank) * 100) / 100;
+    const collection = db
+      .prepare("SELECT collection FROM documents WHERE path = ? AND active = 1")
+      .get(row.filepath) as { collection: string } | undefined;
+
+    const file = collection?.collection
+      ? `qmd://${collection.collection}/${row.title}`
+      : row.title;
+
+    results.push({
+      file,
+      title: row.title,
+      score,
+      snippet: row.snippet?.trim().substring(0, 200) ?? "",
+    });
+
+    if (results.length >= n) break;
+  }
+
+  return results;
 }
 
 // --- Lazy-initialized SQLite connection with vec0 extension ---
@@ -248,13 +267,17 @@ export async function hybridSearch(
 ): Promise<HybridResult[]> {
   const oversample = Math.min(limit * 5, 50);
 
-  const [bm25, vec] = await Promise.all([
-    bm25Search(query, oversample),
-    vectorSearch(query, oversample).catch((err) => {
-      console.error(`[hybrid] vector search failed, falling back to BM25-only: ${err.message}`);
-      return null;
-    }),
-  ]);
+  let bm25: SearchResult[] = [];
+  try {
+    bm25 = bm25Search(query, oversample);
+  } catch (err) {
+    console.error(`[hybrid] BM25 search failed: ${(err as Error).message}`);
+  }
+
+  const vec = await vectorSearch(query, oversample).catch((err) => {
+    console.error(`[hybrid] vector search failed, falling back to BM25-only: ${err.message}`);
+    return null;
+  });
 
   if (!vec) {
     // BM25-only fallback
