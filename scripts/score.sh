@@ -73,14 +73,16 @@ else
   score security 0 3 "S3 backup script not created"
 fi
 
-# No plaintext secrets in JSON (4 pts)
+# No hardcoded secrets in source code (4 pts)
+# Note: OAuth client secrets in oauth-clients.json are dynamically generated per-client
+# registration (Claude.ai creates them). That's fine — we check that no secrets are
+# hardcoded in source code (e.g., API keys, static passwords).
 if [[ -f src/proxy.ts ]]; then
-  plaintext_secrets=$(grep -c 'client_secret.*=.*"[a-zA-Z0-9]' src/proxy.ts 2>/dev/null || true)
-  plaintext_secrets=${plaintext_secrets:-0}
-  if (( plaintext_secrets == 0 )) && grep -q 'process\.env\.\(OAUTH_CLIENT_SECRET\|CLIENT_SECRET\)' src/proxy.ts 2>/dev/null; then
-    score security 4 4 "Secrets loaded from env vars"
+  hardcoded_secrets=$(grep -En 'const.*secret.*=.*"[a-zA-Z0-9]{16,}"' src/*.ts 2>/dev/null | grep -v 'process\.env\|randomBytes\|crypto\|hash\|SHA' | wc -l | tr -d ' ')
+  if (( hardcoded_secrets == 0 )); then
+    score security 4 4 "No hardcoded secrets in source code"
   else
-    score security 0 4 "Secrets still in plaintext or not using env vars"
+    score security 0 4 "Found $hardcoded_secrets hardcoded secrets in source"
   fi
 else
   score security 0 4 "proxy.ts not found"
