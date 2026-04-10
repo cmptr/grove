@@ -25,6 +25,7 @@ import { loadKeys, createKey, revokeKey, isExpired, type StoredKey } from "./key
 import { generateRequestId, log as structuredLog, auditRead, auditWrite } from "./logger.js";
 import { metrics } from "./metrics.js";
 import { resolveTrail, type TrailConfig } from "./trails.js";
+import { handleGetNote, handleSearch } from "./rest.js";
 
 const QMD_PORT = Number(process.env.QMD_PORT ?? 8181);
 const GROVE_SERVER_PORT = Number(process.env.GROVE_SERVER_PORT ?? 8190);
@@ -594,7 +595,9 @@ const server = createServer(async (req, res) => {
   const rid = (req.headers["x-request-id"] as string) ?? generateRequestId();
   res.setHeader("X-Request-Id", rid);
 
-  if (req.method === "OPTIONS") {
+  // CORS preflight — /v1/* gets locked-down CORS (handled in the /v1/ block below),
+  // everything else gets permissive CORS for MCP/Claude.ai compatibility
+  if (req.method === "OPTIONS" && !url.pathname.startsWith("/v1/")) {
     res.writeHead(204, {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
@@ -653,7 +656,7 @@ const server = createServer(async (req, res) => {
     const sessionId = createAdminSession(key);
     res.writeHead(200, {
       "Content-Type": "application/json",
-      "Set-Cookie": `grove_session=${sessionId}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`,
+      "Set-Cookie": `grove_session=${sessionId}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`,
     });
     res.end(JSON.stringify({ ok: true, name: key.name }));
     return;
@@ -739,6 +742,105 @@ const server = createServer(async (req, res) => {
       if (!res.headersSent) sendJson(res, 502, { error: "Search server unreachable" });
     });
     req.pipe(searchReq);
+    return;
+  }
+
+  // ── REST API v1 endpoints (for grove-www note viewer) ──────────────
+  // These are GET-only, Bearer-authed, CORS-locked to grove.md.
+  if (url.pathname.startsWith("/v1/")) {
+    const REST_CORS_ORIGIN = process.env.GROVE_WWW_ORIGIN ?? "https://grove.md";
+
+    // CORS for /v1/* — locked to grove.md only
+    if (req.method === "OPTIONS") {
+      res.writeHead(204, {
+        "Access-Control-Allow-Origin": REST_CORS_ORIGIN,
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        "Access-Control-Max-Age": "86400",
+      });
+      res.end();
+      return;
+    }
+
+    // Auth — Bearer token required
+    const restAuth = req.headers.authorization;
+    const restToken = restAuth?.startsWith("Bearer ") ? restAuth.slice(7) : null;
+    if (!restToken) {
+      res.writeHead(401, { "Content-Type": "application/json", "Access-Control-Allow-Origin": REST_CORS_ORIGIN });
+      res.end(JSON.stringify({ error: "unauthorized" }));
+      return;
+    }
+    const restKey = validateToken(restToken);
+    if (!restKey) {
+      res.writeHead(401, { "Content-Type": "application/json", "Access-Control-Allow-Origin": REST_CORS_ORIGIN });
+      res.end(JSON.stringify({ error: "unauthorized" }));
+      return;
+    }
+
+    // Rate limit (REST bucket, higher limits for owner)
+    const restRateResult = rateLimiter.check(restKey.id, "read");
+    if (!restRateResult.allowed) {
+      res.writeHead(429, { "Content-Type": "application/json", "Access-Control-Allow-Origin": REST_CORS_ORIGIN });
+      res.end(JSON.stringify({ error: "rate_limited", retry_after_ms: restRateResult.retryAfterMs }));
+      return;
+    }
+    rateLimiter.record(restKey.id, "read");
+
+    const restHeaders = { "Content-Type": "application/json", "Access-Control-Allow-Origin": REST_CORS_ORIGIN };
+
+    // GET /v1/notes/* — fetch a single note with resolved links and backlinks
+    if (url.pathname.startsWith("/v1/notes/") && req.method === "GET") {
+      const notePath = decodeURIComponent(url.pathname.slice("/v1/notes/".length));
+      if (!notePath || notePath.includes("..")) {
+        res.writeHead(400, restHeaders);
+        res.end(JSON.stringify({ error: "invalid path" }));
+        return;
+      }
+
+      structuredLog("info", "rest.get_note", rid, { key_id: restKey.id, key_name: restKey.name, path: notePath });
+      try {
+        const note = await handleGetNote(notePath);
+        if (!note) {
+          res.writeHead(404, restHeaders);
+          res.end(JSON.stringify({ error: "not found" }));
+          return;
+        }
+        res.writeHead(200, { ...restHeaders, "ETag": `"${note.content_hash}"` });
+        res.end(JSON.stringify(note));
+      } catch (err) {
+        console.error("[rest] get_note error:", err);
+        res.writeHead(500, restHeaders);
+        res.end(JSON.stringify({ error: "internal error" }));
+      }
+      return;
+    }
+
+    // GET /v1/search?q=...&limit=N — hybrid search
+    if (url.pathname === "/v1/search" && req.method === "GET") {
+      const query = url.searchParams.get("q") ?? "";
+      const limit = Math.min(Number(url.searchParams.get("limit") ?? 10), 50);
+      if (!query) {
+        res.writeHead(400, restHeaders);
+        res.end(JSON.stringify({ error: "missing q parameter" }));
+        return;
+      }
+
+      structuredLog("info", "rest.search", rid, { key_id: restKey.id, key_name: restKey.name, query, limit });
+      try {
+        const results = await handleSearch(query, limit);
+        res.writeHead(200, restHeaders);
+        res.end(JSON.stringify({ results }));
+      } catch (err) {
+        console.error("[rest] search error:", err);
+        res.writeHead(500, restHeaders);
+        res.end(JSON.stringify({ error: "internal error" }));
+      }
+      return;
+    }
+
+    // Unknown /v1/ route
+    res.writeHead(404, restHeaders);
+    res.end(JSON.stringify({ error: "not found" }));
     return;
   }
 
