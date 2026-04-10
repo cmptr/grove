@@ -26,6 +26,7 @@ import { generateRequestId, log as structuredLog, auditRead, auditWrite } from "
 import { metrics } from "./metrics.js";
 import { resolveTrail, type TrailConfig } from "./trails.js";
 import { handleGetNote, handleSearch, handleListNotes, handleStats } from "./rest.js";
+import { startStatsTimer } from "./vault-stats.js";
 
 const QMD_PORT = Number(process.env.QMD_PORT ?? 8181);
 const GROVE_SERVER_PORT = Number(process.env.GROVE_SERVER_PORT ?? 8190);
@@ -1092,10 +1093,12 @@ const server = createServer(async (req, res) => {
 reloadKeys();
 setInterval(reloadKeys, 30_000);
 
+const VAULT_PATH_PROXY = process.env.GROVE_VAULT ?? join(homedir(), "life");
+startStatsTimer(VAULT_PATH_PROXY);
+
 server.listen(PROXY_PORT, "0.0.0.0", () => {
   console.log(`Grove proxy listening on http://0.0.0.0:${PROXY_PORT}`);
   console.log(`Proxying authenticated requests to QMD at http://[::1]:${QMD_PORT}`);
   console.log(`OAuth authorize: ${GROVE_URL}/oauth/authorize`);
   console.log(`Loaded ${keys.length} API key(s)`);
-
 });
