@@ -141,8 +141,27 @@ function titleSearch(query: string, n: number): SearchResult[] {
 
   const terms = extractTerms(sanitized);
   if (terms.length === 0) return [];
-  const titleQuery = terms.map(t => `title:${t}*`).join(" OR ");
 
+  // 1. Check alias index — exact and substring matches against known aliases
+  const aliasIndex = getAliasIndex();
+  const aliasHits: SearchResult[] = [];
+  const queryLower = sanitized.toLowerCase();
+  for (const [alias, entry] of aliasIndex) {
+    // Match if the query contains the alias or the alias contains a significant query term
+    if (queryLower.includes(alias) || terms.some(t => alias.includes(t.toLowerCase()) && t.length >= 3)) {
+      // Weight by how much of the alias matched — full alias match is best
+      const matchRatio = queryLower.includes(alias) ? 1.0 : 0.5;
+      aliasHits.push({
+        file: entry.file,
+        title: entry.title,
+        score: 20 * matchRatio, // High score to compete with title matches
+        snippet: `(alias: ${alias})`,
+      });
+    }
+  }
+
+  // 2. FTS5 title search
+  const titleQuery = terms.map(t => `title:${t}*`).join(" OR ");
   const rows = db
     .prepare(
       `SELECT f.filepath, f.title, rank,
@@ -158,17 +177,62 @@ function titleSearch(query: string, n: number): SearchResult[] {
   const results: SearchResult[] = [];
   const seen = new Set<string>();
 
+  // Alias hits first (highest confidence)
+  for (const hit of aliasHits) {
+    if (seen.has(hit.title)) continue;
+    seen.add(hit.title);
+    results.push(hit);
+  }
+
+  // Then FTS5 title hits
   for (const row of rows) {
     if (seen.has(row.title)) continue;
     seen.add(row.title);
-
     const score = Math.round(Math.abs(row.rank) * 100) / 100;
-
     results.push({ file: ftsFileLabel(db, row.filepath, row.title), title: row.title, score, snippet: row.snippet?.trim().substring(0, 200) ?? "" });
     if (results.length >= n) break;
   }
 
   return results;
+}
+
+// --- Alias index: maps lowercase alias → { title, file } ---
+
+let _aliasIndex: Map<string, { title: string; file: string; filepath: string }> | null = null;
+
+function getAliasIndex(): Map<string, { title: string; file: string; filepath: string }> {
+  if (_aliasIndex) return _aliasIndex;
+
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT d.path, d.title, d.collection, c.doc
+       FROM documents d
+       JOIN content c ON d.hash = c.hash
+       WHERE d.active = 1 AND c.doc LIKE '%aliases:%'`
+    )
+    .all() as { path: string; title: string; collection: string; doc: string }[];
+
+  const index = new Map<string, { title: string; file: string; filepath: string }>();
+
+  for (const row of rows) {
+    // Parse aliases from YAML frontmatter
+    const fm = row.doc.match(/^---\n([\s\S]*?)\n---/);
+    if (!fm) continue;
+    const aliasMatch = fm[1].match(/aliases:\s*\n((?:\s+-\s+"[^"]*"\n?)*)/);
+    if (!aliasMatch) continue;
+
+    const file = row.collection ? `qmd://${row.collection}/${row.title}` : row.title;
+    const aliases = [...aliasMatch[1].matchAll(/- "([^"]+)"/g)].map(m => m[1]);
+
+    for (const alias of aliases) {
+      index.set(alias.toLowerCase(), { title: row.title, file, filepath: `life/${row.path}` });
+    }
+  }
+
+  console.log(`[hybrid] alias index: ${index.size} aliases from ${rows.length} notes`);
+  _aliasIndex = index;
+  return index;
 }
 
 // --- Lazy-initialized SQLite connection with vec0 extension ---
