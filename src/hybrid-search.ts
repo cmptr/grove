@@ -109,15 +109,22 @@ function bm25Search(query: string, n: number): SearchResult[] {
     // Normalize score: FTS5 rank is negative (more negative = better match)
     const score = Math.round(Math.abs(row.rank) * 100) / 100;
 
+    // Boost Resource notes in BM25 results — concept notes are high signal
+    const docPath = row.filepath.startsWith("life/") ? row.filepath.slice(5) : row.filepath;
+    const boostedScore = docPath.startsWith("resources/") ? score * 1.3 : score;
+
     results.push({
       file: ftsFileLabel(db, row.filepath, row.title),
       title: row.title,
-      score,
+      score: boostedScore,
       snippet: row.snippet?.trim().substring(0, 200) ?? "",
     });
 
     if (results.length >= n) break;
   }
+
+  // Re-rank by boosted score
+  results.sort((a, b) => b.score - a.score);
 
   return results;
 }
