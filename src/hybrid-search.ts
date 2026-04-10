@@ -273,10 +273,13 @@ async function vectorSearch(query: string, n: number): Promise<SearchResult[]> {
     });
   }
 
-  // Re-rank by adjusted score
+  // Re-rank by adjusted score and filter out low-confidence results
   candidates.sort((a, b) => b.score - a.score);
 
-  return candidates.slice(0, n).map(({ path: _, ...rest }) => rest);
+  // Only return results with positive similarity — negative scores are noise
+  const filtered = candidates.filter(c => c.score > 0);
+
+  return (filtered.length > 0 ? filtered : candidates).slice(0, n).map(({ path: _, ...rest }) => rest);
 }
 
 /**
