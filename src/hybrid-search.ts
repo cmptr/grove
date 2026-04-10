@@ -84,7 +84,8 @@ function bm25Search(query: string, n: number): SearchResult[] {
   if (!sanitized) return [];
 
   const terms = extractTerms(sanitized);
-  const ftsQuery = terms.length > 1 ? terms.join(" OR ") : sanitized;
+  // Use prefix matching (term*) for broader recall, OR to match any term
+  const ftsQuery = terms.length > 1 ? terms.map(t => `${t}*`).join(" OR ") : sanitized;
 
   const rows = db
     .prepare(
@@ -133,7 +134,7 @@ function titleSearch(query: string, n: number): SearchResult[] {
 
   const terms = extractTerms(sanitized);
   if (terms.length === 0) return [];
-  const titleQuery = terms.map(t => `title:${t}`).join(" OR ");
+  const titleQuery = terms.map(t => `title:${t}*`).join(" OR ");
 
   const rows = db
     .prepare(
