@@ -278,7 +278,7 @@ async function vectorSearch(query: string, n: number): Promise<SearchResult[]> {
 function rrfFuse(
   lists: { results: SearchResult[]; weight: number; label: string }[],
   n: number,
-  k = 20
+  k = 30
 ): HybridResult[] {
   const scores: Record<string, number> = {};
   const meta: Record<string, SearchResult> = {};
