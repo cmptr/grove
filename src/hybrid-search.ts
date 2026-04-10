@@ -426,7 +426,35 @@ export async function hybridSearch(
     { results: titles, weight: 3.0, label: "title" },
   ];
 
-  return rrfFuse(lists, limit);
+  const fused = rrfFuse(lists, limit);
+
+  // Alias injection: if a known alias appears in the query, ensure that note
+  // is in the results (bypasses RRF when vec noise would otherwise bury it)
+  const aliasIndex = getAliasIndex();
+  const queryLower = query.toLowerCase();
+  const injected = new Set<string>();
+  for (const [alias, entry] of aliasIndex) {
+    if (alias.length >= 3 && queryLower.includes(alias) && !injected.has(entry.title)) {
+      injected.add(entry.title);
+      // If already in results, boost to top 3; if missing, inject
+      const idx = fused.findIndex(r => r.title === entry.title);
+      if (idx > 2) {
+        // Move to position 2 (after any rank-1 results that earned their spot)
+        const [item] = fused.splice(idx, 1);
+        fused.splice(Math.min(2, fused.length), 0, item);
+      } else if (idx === -1) {
+        fused.splice(Math.min(2, fused.length), 0, {
+          file: entry.file,
+          title: entry.title,
+          rrf_score: 0.5,
+          snippet: `(alias match: ${alias})`,
+          sources: ["alias"],
+        });
+      }
+    }
+  }
+
+  return fused.slice(0, limit);
 }
 
 /**
