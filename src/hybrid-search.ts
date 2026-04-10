@@ -431,10 +431,11 @@ export async function hybridSearch(
   // Alias injection: if a known alias appears in the query, ensure that note
   // is in the results (bypasses RRF when vec noise would otherwise bury it)
   const aliasIndex = getAliasIndex();
-  const queryLower = query.toLowerCase();
+  const queryLower = query.toLowerCase().replace(/['"%()\-]/g, " ");
   const injected = new Set<string>();
   for (const [alias, entry] of aliasIndex) {
     if (alias.length >= 3 && queryLower.includes(alias) && !injected.has(entry.title)) {
+      console.log(`[hybrid] alias inject: "${alias}" → ${entry.title}`);
       injected.add(entry.title);
       // If already in results, boost to top 3; if missing, inject
       const idx = fused.findIndex(r => r.title === entry.title);
