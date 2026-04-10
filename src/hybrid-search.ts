@@ -61,9 +61,16 @@ async function embedQuery(text: string): Promise<number[]> {
 function bm25Search(query: string, n: number): SearchResult[] {
   const db = getDb();
 
-  // Escape FTS5 special characters and wrap terms for safe matching
+  // Escape FTS5 special characters
   const sanitized = query.replace(/['"]/g, "").trim();
   if (!sanitized) return [];
+
+  // Build FTS5 query: try exact phrase first via implicit AND,
+  // then also try individual terms with OR for broader recall
+  const terms = sanitized.split(/\s+/).filter(t => t.length > 2);
+  const orQuery = terms.join(" OR ");
+  // Use OR query to maximize recall — FTS5 rank still orders by relevance
+  const ftsQuery = terms.length > 1 ? orQuery : sanitized;
 
   const rows = db
     .prepare(
@@ -75,7 +82,7 @@ function bm25Search(query: string, n: number): SearchResult[] {
        ORDER BY rank
        LIMIT ?`
     )
-    .all(sanitized, n * 2) as { filepath: string; title: string; rank: number; snippet: string }[];
+    .all(ftsQuery, n * 2) as { filepath: string; title: string; rank: number; snippet: string }[];
 
   const results: SearchResult[] = [];
   const seen = new Set<string>();
@@ -195,9 +202,9 @@ async function vectorSearch(query: string, n: number): Promise<SearchResult[]> {
     let score = 1.0 - distance;
 
     // Boost Resource/concept notes — they're higher signal than journal entries
-    if (doc.path.startsWith("Resources/")) score *= 1.15;
-    // Slight penalty for raw journal entries and source captures
-    if (/^Journal\/|^Sources\//.test(doc.path)) score *= 0.90;
+    if (doc.path.startsWith("Resources/")) score *= 1.25;
+    // Penalize journal entries and source captures (they dilute concept results)
+    if (/^Journal\/|^Sources\//.test(doc.path)) score *= 0.80;
 
     candidates.push({
       file: filePath,
@@ -221,7 +228,7 @@ async function vectorSearch(query: string, n: number): Promise<SearchResult[]> {
 function rrfFuse(
   lists: { results: SearchResult[]; weight: number; label: string }[],
   n: number,
-  k = 60
+  k = 20
 ): HybridResult[] {
   const scores: Record<string, number> = {};
   const meta: Record<string, SearchResult> = {};
