@@ -14,7 +14,7 @@ import Database from "better-sqlite3";
 const VOYAGE_API_KEY = process.env.VOYAGE_API_KEY ?? "";
 const VOYAGE_MODEL = process.env.VOYAGE_MODEL ?? "voyage-4-large";
 const QMD_INDEX = process.env.QMD_INDEX ?? `${process.env.HOME}/.cache/qmd/index.sqlite`;
-const BM25_WEIGHT = parseFloat(process.env.BM25_WEIGHT ?? "0.8");
+const BM25_WEIGHT = parseFloat(process.env.BM25_WEIGHT ?? "1.2");
 const VEC_WEIGHT = parseFloat(process.env.VEC_WEIGHT ?? "1.0");
 
 interface SearchResult {
@@ -84,20 +84,25 @@ function bm25Search(query: string, n: number): SearchResult[] {
   if (!sanitized) return [];
 
   const terms = extractTerms(sanitized);
-  // Use prefix matching (term*) for broader recall, OR to match any term
-  const ftsQuery = terms.length > 1 ? terms.map(t => `${t}*`).join(" OR ") : sanitized;
+  // Run two queries: AND (high precision) then OR with prefix (high recall)
+  const andQuery = terms.length > 1 ? terms.join(" ") : sanitized;
+  const orQuery = terms.length > 1 ? terms.map(t => `${t}*`).join(" OR ") : sanitized;
 
-  const rows = db
-    .prepare(
-      `SELECT f.filepath, f.title, rank,
-              substr(f.body, 1, 200) as snippet
-       FROM documents_fts f
-       JOIN documents d ON d.path = SUBSTR(f.filepath, 6) AND d.active = 1
-       WHERE documents_fts MATCH ?
-       ORDER BY rank
-       LIMIT ?`
-    )
-    .all(ftsQuery, n * 2) as { filepath: string; title: string; rank: number; snippet: string }[];
+  const stmt = db.prepare(
+    `SELECT f.filepath, f.title, rank,
+            substr(f.body, 1, 200) as snippet
+     FROM documents_fts f
+     JOIN documents d ON d.path = SUBSTR(f.filepath, 6) AND d.active = 1
+     WHERE documents_fts MATCH ?
+     ORDER BY rank
+     LIMIT ?`
+  );
+
+  type FtsRow = { filepath: string; title: string; rank: number; snippet: string };
+  // AND results first (higher quality), then OR results for additional recall
+  const andRows = terms.length > 1 ? stmt.all(andQuery, n) as FtsRow[] : [];
+  const orRows = stmt.all(orQuery, n * 2) as FtsRow[];
+  const rows: FtsRow[] = [...andRows, ...orRows];
 
   const results: SearchResult[] = [];
   const seen = new Set<string>();
