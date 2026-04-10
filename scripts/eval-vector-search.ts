@@ -36,75 +36,83 @@ interface CaseResult {
 // ── Test cases ─────────────────────────────────────────────────────────────
 
 const TEST_CASES: TestCase[] = [
-  // Concept retrieval (semantic)
-  {
-    query: "what is high agency and how to develop it",
-    expected: ["Agency & High Agency"],
-  },
-  {
-    query: "parametric design systems",
-    expected: ["Parametric Design"],
-  },
-  {
-    query: "how AI agents manage memory and context",
-    expected: ["AI Agent Memory & Context"],
-  },
-  {
-    query: "dealing with anxiety and fear",
-    expected: ["Anxiety & Fear Management"],
-  },
-  {
-    query: "building habits that stick",
-    expected: ["Atomic Habits"],
-  },
-  {
-    query: "how to do financial planning for buying a house",
-    expected: ["Financial Planning & House Purchase"],
-  },
-  {
-    query: "managing LLM context and prompt design",
-    expected: ["Prompt Engineering", "AI Agent Memory & Context"],
-  },
-  {
-    query: "AI coding tools and developer experience",
-    expected: ["AI Coding Agents", "Claude Code Workflows"],
-  },
-  {
-    query: "emotional regulation techniques",
-    expected: ["Emotional Regulation"],
-  },
-  {
-    query: "design automation and generative systems",
-    expected: ["Design Automation & Generative Design"],
-  },
+  // ═══════════════════════════════════════════════════════════════════
+  // TIER 1: Easy — query contains title keywords (BM25 + title should hit)
+  // ═══════════════════════════════════════════════════════════════════
 
-  // Cross-type retrieval
-  {
-    query: "shrimp pasta recipe with miso",
-    expected: ["Brown Butter Miso Shrimp Angel Hair"],
-  },
-  {
-    query: "quick peanut noodle recipe",
-    expected: ["15-Minute Peanut Noodles"],
-  },
-  {
-    query: "beef stew recipe",
-    expected: ["Baba Beef Stew Patsy Edition", "Baba's Beef Stew (via DD)"],
-  },
+  // Concepts — direct keyword match
+  { query: "parametric design systems", expected: ["Parametric Design"] },
+  { query: "AI coding agents and tools", expected: ["AI Coding Agents"] },
+  { query: "competitive moats in business", expected: ["Competitive Moats"] },
+  { query: "attachment theory and bids for connection", expected: ["Attachment Theory"] },
+  { query: "Claude Code workflows and tips", expected: ["Claude Code Workflows"] },
+  { query: "sourdough bread recipe", expected: ["Sourdough Bread"] },
+  { query: "MCP model context protocol", expected: ["MCP (Model Context Protocol)"] },
+  { query: "FIRE math and the 4% rule", expected: ["4% Rule & 25x Multiple"] },
 
-  // Semantic gap (harder — query terms don't match title)
-  {
-    query: "how to stop overthinking everything",
-    expected: ["Anxiety & Fear Management", "OCD & Pure O"],
-  },
-  {
-    query: "building a personal AI that knows you",
-    expected: ["AI Personal Assistant Agents", "AI Agent Memory & Context"],
-  },
-  {
-    query: "what makes a product defensible",
-    expected: ["Competitive Moats"],
-  },
+  // Recipes — ingredient/dish match
+  { query: "shrimp pasta recipe with miso", expected: ["Brown Butter Miso Shrimp Angel Hair"] },
+  { query: "slow cooker carnitas", expected: ["Slow Cooker Carnitas"] },
+  { query: "peanut noodle recipe", expected: ["15-Minute Peanut Noodles"] },
+  { query: "chicken fajitas", expected: ["Chicken Fajitas"] },
+  { query: "weeknight bolognese", expected: ["Weeknight Bolognese"] },
+
+  // People — name match
+  { query: "Andrej Karpathy", expected: ["Andrej Karpathy"] },
+  { query: "Simon Willison", expected: ["Simon Willison"] },
+  { query: "Tenzin Wangyal Rinpoche", expected: ["Tenzin Wangyal Rinpoche"] },
+
+  // ═══════════════════════════════════════════════════════════════════
+  // TIER 2: Medium — partial keyword overlap or alias match
+  // ═══════════════════════════════════════════════════════════════════
+
+  // Concepts — query uses related but not exact terms
+  { query: "dealing with anxiety and fear", expected: ["Anxiety & Fear Management"] },
+  { query: "how AI agents manage memory and context", expected: ["AI Agent Memory & Context"] },
+  { query: "building habits that stick", expected: ["Atomic Habits"] },
+  { query: "what is high agency and how to develop it", expected: ["Agency & High Agency"] },
+  { query: "design automation and generative systems", expected: ["Design Automation & Generative Design"] },
+  { query: "emotional regulation techniques", expected: ["Emotional Regulation"] },
+  { query: "financial planning for buying a house", expected: ["Financial Planning & House Purchase"] },
+  { query: "managing LLM context and prompt design", expected: ["Prompt Engineering", "AI Agent Memory & Context"] },
+  { query: "AI image generation and art", expected: ["AI Image Generation"] },
+  { query: "building a personal AI assistant", expected: ["AI Personal Assistant Agents"] },
+  { query: "bootstrapped growth strategy", expected: ["Bootstrapped Growth"] },
+  { query: "AI text to video tools", expected: ["AI Video Generation"] },
+  { query: "vibe coding and AI-first development", expected: ["Vibe Coding"] },
+  { query: "agent sandbox and code execution", expected: ["Agent Sandboxes"] },
+
+  // Recipes — natural language description
+  { query: "beef stew recipe", expected: ["Baba Beef Stew Patsy Edition", "Baba's Beef Stew (via DD)"] },
+  { query: "Korean style chicken in air fryer", expected: ["Korean-Style Air Fryer Chicken"] },
+  { query: "slow cooker beef with soy and ginger", expected: ["Slow Cooker Korean Beef", "Slow Cooker Gyudon-Style Beef & Onion Bowls"] },
+  { query: "easy salmon with miso", expected: ["Sheet Pan Miso Salmon", "Crispy Rice Salmon Salad"] },
+  { query: "spicy chicken meatballs", expected: ["Honey-Gochujang Glazed Chicken Meatballs"] },
+
+  // People — alias or partial name
+  { query: "Raven Lee therapist", expected: ["Dr. B. Raven Lee"] },
+  { query: "claydank", expected: ["Clay Dankert"] },
+
+  // ═══════════════════════════════════════════════════════════════════
+  // TIER 3: Hard — semantic gap (zero keyword overlap with title)
+  // ═══════════════════════════════════════════════════════════════════
+
+  // Vernacular → concept framework
+  { query: "how to stop overthinking everything", expected: ["Anxiety & Fear Management", "OCD & Pure O"] },
+  { query: "feeling like a fraud at work", expected: ["Career Anxiety & Imposter Syndrome"] },
+  { query: "what makes a product defensible", expected: ["Competitive Moats"] },
+  { query: "how to be more present and mindful", expected: ["Being Present", "Meditation & Mindfulness"] },
+  { query: "dealing with grief after losing someone", expected: ["Grief & Loss"] },
+  { query: "why do I keep checking my phone", expected: ["Phone Addiction"] },
+  { query: "learning to say what you really mean", expected: ["Authenticity In Relationships"] },
+  { query: "making decisions fast vs slow", expected: ["Type 1 vs Type 2 Decisions", "Thinking Fast and Slow"] },
+  { query: "leading a team through ambiguity", expected: ["Fluid Leadership", "Organizational Leadership"] },
+  { query: "how to stop analyzing and just do it", expected: ["Over-Intellectualizing"] },
+
+  // Paraphrase → jargon
+  { query: "getting users to keep coming back", expected: ["Cohort Retention Analysis"] },
+  { query: "building something competitors can't copy", expected: ["Competitive Moats"] },
+  { query: "AI tools that write code for you", expected: ["AI Coding Agents", "Vibe Coding"] },
 ];
 
 // ── Helpers ────────────────────────────────────────────────────────────────
