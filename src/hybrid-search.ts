@@ -114,6 +114,56 @@ function bm25Search(query: string, n: number): SearchResult[] {
   return results;
 }
 
+/**
+ * Title-only FTS5 search — matches query terms against note titles.
+ * Catches concept notes that vector search misses due to semantic gap.
+ */
+function titleSearch(query: string, n: number): SearchResult[] {
+  const db = getDb();
+
+  const sanitized = query.replace(/['"]/g, "").trim();
+  if (!sanitized) return [];
+
+  // Build title-scoped FTS5 query with OR for broad recall
+  const terms = sanitized.split(/\s+/).filter(t => t.length > 2);
+  if (terms.length === 0) return [];
+  const titleQuery = terms.map(t => `title:${t}`).join(" OR ");
+
+  const rows = db
+    .prepare(
+      `SELECT f.filepath, f.title, rank,
+              substr(f.body, 1, 200) as snippet
+       FROM documents_fts f
+       JOIN documents d ON d.path = f.filepath AND d.active = 1
+       WHERE documents_fts MATCH ?
+       ORDER BY rank
+       LIMIT ?`
+    )
+    .all(titleQuery, n * 2) as { filepath: string; title: string; rank: number; snippet: string }[];
+
+  const results: SearchResult[] = [];
+  const seen = new Set<string>();
+
+  for (const row of rows) {
+    if (seen.has(row.title)) continue;
+    seen.add(row.title);
+
+    const score = Math.round(Math.abs(row.rank) * 100) / 100;
+    const collection = db
+      .prepare("SELECT collection FROM documents WHERE path = ? AND active = 1")
+      .get(row.filepath) as { collection: string } | undefined;
+
+    const file = collection?.collection
+      ? `qmd://${collection.collection}/${row.title}`
+      : row.title;
+
+    results.push({ file, title: row.title, score, snippet: row.snippet?.trim().substring(0, 200) ?? "" });
+    if (results.length >= n) break;
+  }
+
+  return results;
+}
+
 // --- Lazy-initialized SQLite connection with vec0 extension ---
 
 let _db: InstanceType<typeof Database> | null = null;
@@ -290,9 +340,18 @@ export async function hybridSearch(
     }));
   }
 
+  // Title search — fast FTS5 title-only match for concept note discovery
+  let titles: SearchResult[] = [];
+  try {
+    titles = titleSearch(query, oversample);
+  } catch (err) {
+    console.error(`[hybrid] title search failed: ${(err as Error).message}`);
+  }
+
   const lists: { results: SearchResult[]; weight: number; label: string }[] = [
     { results: bm25, weight: BM25_WEIGHT, label: "bm25" },
     { results: vec, weight: VEC_WEIGHT, label: "vector" },
+    { results: titles, weight: 1.5, label: "title" },
   ];
 
   return rrfFuse(lists, limit);
@@ -311,4 +370,4 @@ export function formatResults(results: HybridResult[]): string {
     .join("\n\n---\n\n");
 }
 
-export { embedQuery, bm25Search, vectorSearch };
+export { embedQuery, bm25Search, vectorSearch, titleSearch };
