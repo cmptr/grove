@@ -119,6 +119,7 @@ export interface NoteMetadata {
   path: string;
   tags?: string[];
   type?: string;
+  private?: boolean;
 }
 
 /**
@@ -126,6 +127,9 @@ export interface NoteMetadata {
  * Returns true if the note passes ALL filters.
  */
 export function filterByTrail(trail: TrailConfig, note: NoteMetadata): boolean {
+  // Private notes are always excluded from trails (strict boolean check)
+  if (note.private === true) return false;
+
   // Path allow filter
   if (trail.allow_paths.length > 0) {
     const pathAllowed = trail.allow_paths.some((prefix) => note.path.startsWith(prefix));

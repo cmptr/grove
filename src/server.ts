@@ -131,7 +131,7 @@ Example: searches=[{type:'lex', query:'salary'}, {type:'vec', query:'how much do
             const { frontmatter } = parseNote(raw);
             const tags = Array.isArray(frontmatter.tags) ? frontmatter.tags as string[] :
               typeof frontmatter.tags === "string" ? [frontmatter.tags] : [];
-            const meta: NoteMetadata = { path: filePath, type: frontmatter.type as string, tags };
+            const meta: NoteMetadata = { path: filePath, type: frontmatter.type as string, tags, private: frontmatter.private === true };
             return filterByTrail(activeTrail!, meta);
           } catch {
             // Can't read note — filter by path only
@@ -171,7 +171,7 @@ Use the content_hash as if_hash when updating the note.`,
         if (activeTrail) {
           const tags = Array.isArray(frontmatter.tags) ? frontmatter.tags as string[] :
             typeof frontmatter.tags === "string" ? [frontmatter.tags] : [];
-          const meta: NoteMetadata = { path: rel, type: frontmatter.type as string, tags };
+          const meta: NoteMetadata = { path: rel, type: frontmatter.type as string, tags, private: frontmatter.private === true };
           if (!filterByTrail(activeTrail, meta)) {
             return { content: [{ type: "text" as const, text: `Note not found: ${file}` }] };
           }
@@ -282,7 +282,7 @@ Examples: "Resources/People/*.md", "Journal/2026/*.md", "path1.md,path2.md"`,
         if (activeTrail) {
           const tags = Array.isArray(frontmatter.tags) ? frontmatter.tags as string[] :
             typeof frontmatter.tags === "string" ? [frontmatter.tags] : [];
-          const meta: NoteMetadata = { path: entry.path, type: frontmatter.type as string, tags };
+          const meta: NoteMetadata = { path: entry.path, type: frontmatter.type as string, tags, private: frontmatter.private === true };
           if (!filterByTrail(activeTrail, meta)) {
             results.push({ path: entry.path, error: "not found" });
             continue;
@@ -426,7 +426,7 @@ Use for:
       if (activeTrail) {
         const totalCount = entries.length;
         entries = entries.filter((e) => {
-          const meta: NoteMetadata = { path: e.path, type: e.type, tags: e.tags };
+          const meta: NoteMetadata = { path: e.path, type: e.type ?? undefined, tags: e.tags, private: e.private };
           return filterByTrail(activeTrail!, meta);
         });
         logTrailAccess("list", activeTrail.id, activeTrail.name, "list_notes", totalCount, entries.length);
@@ -470,7 +470,7 @@ Modes:
         };
         if (activeTrail) {
           const visibleNotes = notes.filter((n) => {
-            const meta: NoteMetadata = { path: n.path, type: n.type, tags: n.tags };
+            const meta: NoteMetadata = { path: n.path, type: n.type ?? undefined, tags: n.tags, private: n.private };
             return filterByTrail(activeTrail!, meta);
           });
           statusResult.total_notes = visibleNotes.length;

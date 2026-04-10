@@ -187,6 +187,29 @@ describe("filterByTrail", () => {
     const recall = allowed.length / onTopicNotes.length;
     expect(recall).toBeGreaterThanOrEqual(0.9); // >90% recall
   });
+
+  // ── private frontmatter tests ──
+
+  it("excludes notes with private: true regardless of trail config", () => {
+    const trail = makeTrail(); // empty filters — allows everything
+    expect(filterByTrail(trail, { path: "Journal/2026/2026-04-09.md", type: "journal", tags: [], private: true })).toBe(false);
+  });
+
+  it("allows notes without private field", () => {
+    const trail = makeTrail();
+    expect(filterByTrail(trail, { path: "Resources/Concepts/AI.md", type: "concept", tags: ["ai"] })).toBe(true);
+  });
+
+  it("allows notes with private: false", () => {
+    const trail = makeTrail();
+    expect(filterByTrail(trail, { path: "Resources/Concepts/AI.md", type: "concept", tags: ["ai"], private: false })).toBe(true);
+  });
+
+  it("private check takes priority over all other filters", () => {
+    const trail = makeTrail({ allow_types: ["concept"], allow_tags: ["ai"] });
+    // Note matches type and tag filters, but is private
+    expect(filterByTrail(trail, { path: "Resources/Concepts/Secret.md", type: "concept", tags: ["ai"], private: true })).toBe(false);
+  });
 });
 
 // ── trailAllowsWrite tests ──
