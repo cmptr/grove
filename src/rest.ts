@@ -263,6 +263,31 @@ export async function handleGetNote(notePath: string, trail?: TrailConfig | null
   const targets = extractWikilinks(note.content);
   const links = await resolveLinks(targets);
 
+  // Trail filter wikilinks: mark trail-invisible notes as non-existent
+  if (trail) {
+    for (const [target, info] of Object.entries(links)) {
+      if (info.exists && info.path) {
+        try {
+          const linkAbs = join(VAULT_PATH, info.path + ".md");
+          const raw = readFileSync(linkAbs, "utf-8");
+          const { frontmatter } = parseNote(raw);
+          const linkTags = Array.isArray(frontmatter.tags) ? frontmatter.tags as string[] : [];
+          const linkMeta: NoteMetadata = {
+            path: info.path + ".md",
+            type: frontmatter.type as string | undefined,
+            tags: linkTags,
+            private: frontmatter.private === true,
+          };
+          if (!filterByTrail(trail, linkMeta)) {
+            links[target] = { path: null, exists: false };
+          }
+        } catch {
+          links[target] = { path: null, exists: false };
+        }
+      }
+    }
+  }
+
   // Get backlinks (filter by trail if scoped)
   let backlinks = getBacklinks(note.path);
   if (trail) {

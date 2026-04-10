@@ -10,6 +10,7 @@
 import { homedir } from "node:os";
 import { existsSync } from "node:fs";
 import Database from "better-sqlite3";
+import { searchMetrics } from "./metrics.js";
 
 const VOYAGE_API_KEY = process.env.VOYAGE_API_KEY ?? "";
 const VOYAGE_MODEL = process.env.VOYAGE_MODEL ?? "voyage-4-large";
@@ -389,6 +390,7 @@ export async function hybridSearch(
   query: string,
   limit: number = 10
 ): Promise<HybridResult[]> {
+  const searchStart = Date.now();
   const oversample = Math.min(limit * 5, 50);
 
   let bm25: SearchResult[] = [];
@@ -405,13 +407,15 @@ export async function hybridSearch(
 
   if (!vec) {
     // BM25-only fallback
-    return bm25.slice(0, limit).map((r) => ({
+    const fallbackResults = bm25.slice(0, limit).map((r) => ({
       file: r.file,
       title: r.title,
       rrf_score: r.score,
       snippet: r.snippet,
       sources: ["bm25"],
     }));
+    searchMetrics.recordSearch(query, fallbackResults.length, Date.now() - searchStart);
+    return fallbackResults;
   }
 
   // Title search — fast FTS5 title-only match for concept note discovery
@@ -456,7 +460,9 @@ export async function hybridSearch(
     }
   }
 
-  return fused.slice(0, limit);
+  const finalResults = fused.slice(0, limit);
+  searchMetrics.recordSearch(query, finalResults.length, Date.now() - searchStart);
+  return finalResults;
 }
 
 /**
