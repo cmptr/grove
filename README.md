@@ -19,7 +19,7 @@ https://api.grove.md/mcp
                        ▼
 ┌─────────────────────────────────────────────────────────┐
 │                    Grove Server                          │
-│   Auth · Rate Limiting · Write Queue · Graph Analysis    │
+│   Auth · Rate Limiting · Write Queue · Trails · Graph    │
 └──────────────────────┬──────────────────────────────────┘
                        │
             ┌──────────┼──────────┐
@@ -128,6 +128,7 @@ Grove is remote, bidirectional, and opinionated. It treats your vault as a struc
 | Search | Keyword or vector | Hybrid BM25 + vector (RRF) |
 | Graph analysis | No | Centrality, clusters, lifecycle |
 | Auth | None needed | OAuth 2.0 + bearer tokens |
+| Scoped sharing | No | Trails — topic-scoped access with deny lists |
 | Embeddings | Usually OpenAI API | Self-hosted, privacy-first |
 
 ## The write flow
@@ -272,7 +273,99 @@ MCP is now an [open standard](https://modelcontextprotocol.io/) under the Linux 
 
 - **Multi-vault** — Add a second vault (work knowledge base) with per-vault keys and cross-vault search
 - **grove.md** — A hosted version where you connect your GitHub repo and get an MCP endpoint. No VPS required. Cross-client: Claude, ChatGPT, Cursor, anything MCP.
-- **Sharing** — Permissions model for selective vault access (show someone your recipes but not your journal)
+- **Trail portal** — Web dashboard for managing trails, viewing per-trail usage, and a consumer onboarding page with MCP connection instructions
+- **Semantic filtering** — LLM judge for trail edge cases where tag/type/path filtering is too coarse (deferred until real edge cases prove the need)
+
+## Trails: scoped sharing
+
+Share slices of your knowledge without exposing the whole vault. A **trail** is a topic-scoped window into your grove — you define what's visible (tags, types, paths) and what's hidden, then hand someone a token. They connect via MCP and see only what the trail allows.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Your vault (1,000 notes)              │
+│                                                         │
+│   ┌─────────────┐  ┌──────────────┐  ┌──────────────┐  │
+│   │  AI Research │  │   Journal    │  │   Finances   │  │
+│   │   trail ✓    │  │   hidden ✗   │  │   hidden ✗   │  │
+│   └─────────────┘  └──────────────┘  └──────────────┘  │
+└─────────────────────────────────────────────────────────┘
+         │
+         ▼  trail-scoped token
+┌─────────────────────────────────────────────────────────┐
+│  Consumer sees: 200 notes on AI, ML, tech, design       │
+│  Consumer can't see: journal, health, finances, private │
+│  Consumer gets 404 (not 403) for hidden notes           │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Creating a trail
+
+```bash
+grove trails create "AI Research" \
+  --allow-tags ai,ml,tech,design \
+  --deny-tags private,personal,finance,health \
+  --allow-paths "Resources/" \
+  --deny-paths "Journal/,Areas/Finances/,Areas/Health/"
+
+# → Trail created: trail_a1b2c3d4
+# → Token (shown once, give to consumer):
+# →   grove_live_abc123...
+```
+
+The token is a standard Grove bearer token, scoped to this trail. Give it to a collaborator, plug it into a Claude custom connector, or use it in any MCP client. They'll never know what they can't see — hidden notes return 404, not 403.
+
+### How tools behave under a trail
+
+Every one of the six MCP tools respects trail scope automatically:
+
+| Tool | Trail behavior |
+|------|---------------|
+| `query` | Searches the full index for recall, then strips non-trail notes before returning results |
+| `get` | Returns 404 for notes outside the trail (doesn't leak that the note exists) |
+| `multi_get` | Silently omits non-trail notes from results |
+| `list_notes` | Only returns trail-visible notes |
+| `write_note` | Constrains writes to trail-allowed paths/tags (if write access is enabled) |
+| `vault_status` | Returns scoped stats — note count and types within trail only |
+
+### Filtering model
+
+Trails use a deterministic prefilter — no LLM in the loop, sub-millisecond per note. Filters combine with AND logic:
+
+- **allow_tags** — note must have at least one matching tag
+- **deny_tags** — note must NOT have any of these tags
+- **allow_types** — note type must be one of these (empty = all types)
+- **deny_types** — note type must NOT be one of these
+- **allow_paths** — note path must start with one of these prefixes (empty = all paths)
+- **deny_paths** — note path must NOT start with any of these prefixes
+
+The test suite verifies 100% precision (zero sensitive notes leak through) and 100% recall (all on-topic notes pass through) on labeled datasets of 20 sensitive and 20 on-topic notes.
+
+### Managing trails
+
+```bash
+grove trails                    # list all trails
+grove trails disable trail_id   # temporarily disable (consumer gets auth errors)
+grove trails delete trail_id    # permanently remove trail + revoke its key
+```
+
+Each trail has independent rate limits (default: 60 reads/min, 0 writes/min). All trail access is logged with the trail ID, tool used, total results found, and how many were filtered.
+
+### Consumer setup
+
+Give your consumer the token and the MCP endpoint. That's it:
+
+```json
+{
+  "mcpServers": {
+    "grove": {
+      "url": "https://api.grove.md/mcp",
+      "headers": { "Authorization": "Bearer grove_live_abc123..." }
+    }
+  }
+}
+```
+
+They get the same six tools, same hybrid search, same write validation — just scoped to what you've chosen to share.
 
 ## When you don't need Grove
 
