@@ -12,6 +12,7 @@ import { homedir } from "node:os";
 import { hybridSearch, bm25Search } from "./hybrid-search.js";
 import { listNotes } from "./vault-ops.js";
 import { parseNote, contentHash } from "./notes-validate.js";
+import { filterByTrail, type TrailConfig, type NoteMetadata } from "./trails.js";
 
 const VAULT_PATH = process.env.GROVE_VAULT ?? join(homedir(), "life");
 
@@ -237,17 +238,48 @@ export interface SearchResult {
 
 /**
  * Fetch a note by path or title. Returns note content, resolved wikilinks, and backlinks.
+ * If a trail is provided, applies trail filtering (returns null for hidden notes).
  */
-export async function handleGetNote(notePath: string): Promise<NoteResponse | null> {
+export async function handleGetNote(notePath: string, trail?: TrailConfig | null): Promise<NoteResponse | null> {
   const note = await resolveNote(notePath);
   if (!note) return null;
+
+  // Trail filter: if note not visible, return null (404, not 403)
+  if (trail) {
+    const tags = Array.isArray(note.frontmatter.tags) ? note.frontmatter.tags as string[] :
+      typeof note.frontmatter.tags === "string" ? [note.frontmatter.tags] : [];
+    const meta: NoteMetadata = {
+      path: note.path,
+      type: note.frontmatter.type as string | undefined,
+      tags,
+      private: note.frontmatter.private === true,
+    };
+    if (!filterByTrail(trail, meta)) return null;
+  }
 
   // Extract and resolve wikilinks from content
   const targets = extractWikilinks(note.content);
   const links = await resolveLinks(targets);
 
-  // Get backlinks
-  const backlinks = getBacklinks(note.path);
+  // Get backlinks (filter by trail if scoped)
+  let backlinks = getBacklinks(note.path);
+  if (trail) {
+    backlinks = backlinks.filter((bl) => {
+      try {
+        const abs = join(VAULT_PATH, bl);
+        const raw = readFileSync(abs, "utf-8");
+        const { frontmatter } = parseNote(raw);
+        const blTags = Array.isArray(frontmatter.tags) ? frontmatter.tags as string[] : [];
+        const blMeta: NoteMetadata = {
+          path: bl,
+          type: frontmatter.type as string | undefined,
+          tags: blTags,
+          private: frontmatter.private === true,
+        };
+        return filterByTrail(trail, blMeta);
+      } catch { return false; }
+    });
+  }
 
   return {
     path: note.path,
@@ -270,14 +302,26 @@ export interface ListEntry {
 
 /**
  * List notes under a path prefix. Returns metadata for each note.
+ * If a trail is provided, filters to trail-visible notes only.
  */
-export function handleListNotes(prefix: string): ListEntry[] {
-  // Ensure prefix ends with / for directory matching
+export function handleListNotes(prefix: string, trail?: TrailConfig | null): ListEntry[] {
   const dirPrefix = prefix.endsWith("/") ? prefix : prefix + "/";
   const allNotes = listNotes(VAULT_PATH, "*");
 
   return allNotes
-    .filter((n) => n.path.startsWith(dirPrefix))
+    .filter((n) => {
+      if (!n.path.startsWith(dirPrefix)) return false;
+      if (trail) {
+        const meta: NoteMetadata = {
+          path: n.path,
+          type: n.type ?? undefined,
+          tags: n.tags ?? [],
+          private: n.private,
+        };
+        return filterByTrail(trail, meta);
+      }
+      return true;
+    })
     .map((n) => ({
       path: n.path,
       name: n.name,
@@ -290,13 +334,33 @@ export function handleListNotes(prefix: string): ListEntry[] {
 
 /**
  * Search notes via hybrid search. Returns structured results.
+ * If a trail is provided, filters results to trail-visible notes.
  */
-export async function handleSearch(query: string, limit: number = 10): Promise<SearchResult[]> {
-  const results = await hybridSearch(query, limit);
-  return results.map((r) => ({
+export async function handleSearch(query: string, limit: number = 10, trail?: TrailConfig | null): Promise<SearchResult[]> {
+  const fetchLimit = trail ? limit * 3 : limit; // over-fetch for trail filtering
+  const results = await hybridSearch(query, fetchLimit);
+
+  let filtered = results.map((r) => ({
     path: r.file.replace(/^qmd:\/\/life\//, ""),
     title: r.title,
     snippet: r.snippet ?? "",
     score: r.rrf_score,
   }));
+
+  if (trail) {
+    const allNotes = listNotes(VAULT_PATH, "*");
+    filtered = filtered.filter((r) => {
+      const note = allNotes.find((n) => n.path === r.path || n.path === r.path + ".md");
+      if (!note) return false;
+      const meta: NoteMetadata = {
+        path: note.path,
+        type: note.type ?? undefined,
+        tags: note.tags ?? [],
+        private: note.private,
+      };
+      return filterByTrail(trail, meta);
+    });
+  }
+
+  return filtered.slice(0, limit);
 }

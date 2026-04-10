@@ -788,6 +788,9 @@ const server = createServer(async (req, res) => {
 
     const restHeaders = { "Content-Type": "application/json", "Access-Control-Allow-Origin": REST_CORS_ORIGIN };
 
+    // Resolve trail for this key (null = owner, full access)
+    const restTrail = resolveTrail(restKey.id);
+
     // GET /v1/notes/* — fetch a single note with resolved links and backlinks
     if (url.pathname.startsWith("/v1/notes/") && req.method === "GET") {
       const notePath = decodeURIComponent(url.pathname.slice("/v1/notes/".length));
@@ -799,7 +802,7 @@ const server = createServer(async (req, res) => {
 
       structuredLog("info", "rest.get_note", rid, { key_id: restKey.id, key_name: restKey.name, path: notePath });
       try {
-        const note = await handleGetNote(notePath);
+        const note = await handleGetNote(notePath, restTrail);
         if (!note) {
           res.writeHead(404, restHeaders);
           res.end(JSON.stringify({ error: "not found" }));
@@ -827,7 +830,7 @@ const server = createServer(async (req, res) => {
 
       structuredLog("info", "rest.search", rid, { key_id: restKey.id, key_name: restKey.name, query, limit });
       try {
-        const results = await handleSearch(query, limit);
+        const results = await handleSearch(query, limit, restTrail);
         res.writeHead(200, restHeaders);
         res.end(JSON.stringify({ results }));
       } catch (err) {
@@ -849,7 +852,7 @@ const server = createServer(async (req, res) => {
 
       structuredLog("info", "rest.list", rid, { key_id: restKey.id, key_name: restKey.name, prefix });
       try {
-        const entries = handleListNotes(prefix);
+        const entries = handleListNotes(prefix, restTrail);
         res.writeHead(200, restHeaders);
         res.end(JSON.stringify({ prefix, entries }));
       } catch (err) {
