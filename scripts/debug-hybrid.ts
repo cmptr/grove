@@ -4,9 +4,7 @@ import { titleSearch, bm25Search, vectorSearch, hybridSearch } from "../src/hybr
 const queries = [
   { q: "AI coding tools and developer experience", expected: "AI Coding Agents" },
   { q: "building a personal AI that knows you", expected: "AI Personal Assistant Agents" },
-  { q: "how to stop overthinking everything", expected: "Anxiety & Fear Management" },
   { q: "what makes a product defensible", expected: "Competitive Moats" },
-  { q: "context window engineering for LLMs", expected: "Context Engineering" },
 ];
 
 async function main() {
@@ -14,11 +12,19 @@ async function main() {
     console.log(`\n=== ${q} ===`);
     console.log(`Expected: ${expected}`);
 
-    const t = titleSearch(q, 5);
-    console.log("title:", t.map(r => r.title).join(", ") || "(none)");
+    try {
+      const t = titleSearch(q, 10);
+      console.log(`title (${t.length} results):`, t.map(r => r.title).join(", ") || "(none)");
+    } catch (e: any) {
+      console.log("title ERROR:", e.message);
+    }
 
-    const b = bm25Search(q, 5);
-    console.log("bm25:", b.map(r => r.title).join(", ") || "(none)");
+    try {
+      const b = bm25Search(q, 10);
+      console.log(`bm25 (${b.length} results):`, b.slice(0, 5).map(r => r.title).join(", ") || "(none)");
+    } catch (e: any) {
+      console.log("bm25 ERROR:", e.message);
+    }
 
     try {
       const h = await hybridSearch(q, 5);
