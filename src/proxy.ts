@@ -25,7 +25,7 @@ import { loadKeys, createKey, revokeKey, isExpired, type StoredKey } from "./key
 import { generateRequestId, log as structuredLog, auditRead, auditWrite } from "./logger.js";
 import { metrics } from "./metrics.js";
 import { resolveTrail, type TrailConfig } from "./trails.js";
-import { handleGetNote, handleSearch } from "./rest.js";
+import { handleGetNote, handleSearch, handleListNotes } from "./rest.js";
 
 const QMD_PORT = Number(process.env.QMD_PORT ?? 8181);
 const GROVE_SERVER_PORT = Number(process.env.GROVE_SERVER_PORT ?? 8190);
@@ -832,6 +832,28 @@ const server = createServer(async (req, res) => {
         res.end(JSON.stringify({ results }));
       } catch (err) {
         console.error("[rest] search error:", err);
+        res.writeHead(500, restHeaders);
+        res.end(JSON.stringify({ error: "internal error" }));
+      }
+      return;
+    }
+
+    // GET /v1/list?prefix=... — list notes under a path prefix
+    if (url.pathname === "/v1/list" && req.method === "GET") {
+      const prefix = url.searchParams.get("prefix") ?? "";
+      if (prefix.includes("..")) {
+        res.writeHead(400, restHeaders);
+        res.end(JSON.stringify({ error: "invalid prefix" }));
+        return;
+      }
+
+      structuredLog("info", "rest.list", rid, { key_id: restKey.id, key_name: restKey.name, prefix });
+      try {
+        const entries = handleListNotes(prefix);
+        res.writeHead(200, restHeaders);
+        res.end(JSON.stringify({ prefix, entries }));
+      } catch (err) {
+        console.error("[rest] list error:", err);
         res.writeHead(500, restHeaders);
         res.end(JSON.stringify({ error: "internal error" }));
       }

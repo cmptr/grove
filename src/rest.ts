@@ -260,6 +260,34 @@ export async function handleGetNote(notePath: string): Promise<NoteResponse | nu
   };
 }
 
+export interface ListEntry {
+  path: string;
+  name: string;
+  type: string | null;
+  tags: string[];
+  modified_at: string;
+}
+
+/**
+ * List notes under a path prefix. Returns metadata for each note.
+ */
+export function handleListNotes(prefix: string): ListEntry[] {
+  // Ensure prefix ends with / for directory matching
+  const dirPrefix = prefix.endsWith("/") ? prefix : prefix + "/";
+  const allNotes = listNotes(VAULT_PATH, "*");
+
+  return allNotes
+    .filter((n) => n.path.startsWith(dirPrefix))
+    .map((n) => ({
+      path: n.path,
+      name: n.name,
+      type: n.type,
+      tags: n.tags ?? [],
+      modified_at: n.modified_at,
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
 /**
  * Search notes via hybrid search. Returns structured results.
  */
