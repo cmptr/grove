@@ -15,7 +15,7 @@ const VOYAGE_API_KEY = process.env.VOYAGE_API_KEY ?? "";
 const VOYAGE_MODEL = process.env.VOYAGE_MODEL ?? "voyage-4-large";
 const QMD_INDEX = process.env.QMD_INDEX ?? `${process.env.HOME}/.cache/qmd/index.sqlite`;
 const BM25_WEIGHT = parseFloat(process.env.BM25_WEIGHT ?? "1.2");
-const VEC_WEIGHT = parseFloat(process.env.VEC_WEIGHT ?? "1.0");
+const VEC_WEIGHT = parseFloat(process.env.VEC_WEIGHT ?? "1.2");
 
 interface SearchResult {
   file: string;
@@ -84,25 +84,20 @@ function bm25Search(query: string, n: number): SearchResult[] {
   if (!sanitized) return [];
 
   const terms = extractTerms(sanitized);
-  // Run two queries: AND (high precision) then OR with prefix (high recall)
-  const andQuery = terms.length > 1 ? terms.join(" ") : sanitized;
-  const orQuery = terms.length > 1 ? terms.map(t => `${t}*`).join(" OR ") : sanitized;
+  // Prefix matching with OR for broad recall — FTS5 rank handles relevance
+  const ftsQuery = terms.length > 1 ? terms.map(t => `${t}*`).join(" OR ") : sanitized;
 
-  const stmt = db.prepare(
-    `SELECT f.filepath, f.title, rank,
-            substr(f.body, 1, 200) as snippet
-     FROM documents_fts f
-     JOIN documents d ON d.path = SUBSTR(f.filepath, 6) AND d.active = 1
-     WHERE documents_fts MATCH ?
-     ORDER BY rank
-     LIMIT ?`
-  );
-
-  type FtsRow = { filepath: string; title: string; rank: number; snippet: string };
-  // AND results first (higher quality), then OR results for additional recall
-  const andRows = terms.length > 1 ? stmt.all(andQuery, n) as FtsRow[] : [];
-  const orRows = stmt.all(orQuery, n * 2) as FtsRow[];
-  const rows: FtsRow[] = [...andRows, ...orRows];
+  const rows = db
+    .prepare(
+      `SELECT f.filepath, f.title, rank,
+              substr(f.body, 1, 200) as snippet
+       FROM documents_fts f
+       JOIN documents d ON d.path = SUBSTR(f.filepath, 6) AND d.active = 1
+       WHERE documents_fts MATCH ?
+       ORDER BY rank
+       LIMIT ?`
+    )
+    .all(ftsQuery, n * 2) as { filepath: string; title: string; rank: number; snippet: string }[];
 
   const results: SearchResult[] = [];
   const seen = new Set<string>();
@@ -297,12 +292,6 @@ function rrfFuse(
       if (!sources[key]) sources[key] = new Set();
       sources[key].add(label);
     }
-  }
-
-  // Multi-source boost: results found by 2+ backends are more trustworthy
-  for (const key of Object.keys(scores)) {
-    const nSources = sources[key]?.size ?? 0;
-    if (nSources >= 2) scores[key] *= 1.0 + (nSources - 1) * 0.3;
   }
 
   return Object.keys(scores)
