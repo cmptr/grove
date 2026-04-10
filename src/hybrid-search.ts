@@ -55,6 +55,24 @@ async function embedQuery(text: string): Promise<number[]> {
   return data.data[0].embedding;
 }
 
+// ── Shared helpers ──────────────────────────────────────────────────
+
+const STOPWORDS = new Set(["the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by", "from", "is", "it", "that", "this", "was", "are", "be", "has", "had", "not", "you", "how", "what", "who", "why", "when", "do", "does", "can"]);
+
+/** Extract search terms from a query, removing stopwords but keeping short terms like "AI". */
+function extractTerms(query: string): string[] {
+  return query.split(/\s+/).filter(t => t.length >= 2 && !STOPWORDS.has(t.toLowerCase()));
+}
+
+/** Build the qmd:// file label for an FTS5 result. filepath has life/ prefix. */
+function ftsFileLabel(db: InstanceType<typeof Database>, filepath: string, title: string): string {
+  const docPath = filepath.startsWith("life/") ? filepath.slice(5) : filepath;
+  const collection = db
+    .prepare("SELECT collection FROM documents WHERE path = ? AND active = 1")
+    .get(docPath) as { collection: string } | undefined;
+  return collection?.collection ? `qmd://${collection.collection}/${title}` : title;
+}
+
 /**
  * BM25 search via FTS5 directly against QMD's SQLite index.
  */
@@ -65,9 +83,7 @@ function bm25Search(query: string, n: number): SearchResult[] {
   const sanitized = query.replace(/['"]/g, "").trim();
   if (!sanitized) return [];
 
-  // Build FTS5 query with OR for broader recall — keep short terms like "AI"
-  const stopwords = new Set(["the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by", "from", "is", "it", "that", "this", "was", "are", "be", "has", "had", "not", "you", "how", "what", "who", "why", "when", "do", "does", "can"]);
-  const terms = sanitized.split(/\s+/).filter(t => t.length >= 2 && !stopwords.has(t.toLowerCase()));
+  const terms = extractTerms(sanitized);
   const ftsQuery = terms.length > 1 ? terms.join(" OR ") : sanitized;
 
   const rows = db
@@ -91,16 +107,9 @@ function bm25Search(query: string, n: number): SearchResult[] {
 
     // Normalize score: FTS5 rank is negative (more negative = better match)
     const score = Math.round(Math.abs(row.rank) * 100) / 100;
-    const collection = db
-      .prepare("SELECT collection FROM documents WHERE path = ? AND active = 1")
-      .get(row.filepath) as { collection: string } | undefined;
-
-    const file = collection?.collection
-      ? `qmd://${collection.collection}/${row.title}`
-      : row.title;
 
     results.push({
-      file,
+      file: ftsFileLabel(db, row.filepath, row.title),
       title: row.title,
       score,
       snippet: row.snippet?.trim().substring(0, 200) ?? "",
@@ -122,9 +131,7 @@ function titleSearch(query: string, n: number): SearchResult[] {
   const sanitized = query.replace(/['"]/g, "").trim();
   if (!sanitized) return [];
 
-  // Build title-scoped FTS5 query — keep short terms like "AI", "UX"
-  const stopwords = new Set(["the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by", "from", "is", "it", "that", "this", "was", "are", "be", "has", "had", "not", "you", "how", "what", "who", "why", "when", "do", "does", "can"]);
-  const terms = sanitized.split(/\s+/).filter(t => t.length >= 2 && !stopwords.has(t.toLowerCase()));
+  const terms = extractTerms(sanitized);
   if (terms.length === 0) return [];
   const titleQuery = terms.map(t => `title:${t}`).join(" OR ");
 
@@ -148,15 +155,8 @@ function titleSearch(query: string, n: number): SearchResult[] {
     seen.add(row.title);
 
     const score = Math.round(Math.abs(row.rank) * 100) / 100;
-    const collection = db
-      .prepare("SELECT collection FROM documents WHERE path = ? AND active = 1")
-      .get(row.filepath) as { collection: string } | undefined;
 
-    const file = collection?.collection
-      ? `qmd://${collection.collection}/${row.title}`
-      : row.title;
-
-    results.push({ file, title: row.title, score, snippet: row.snippet?.trim().substring(0, 200) ?? "" });
+    results.push({ file: ftsFileLabel(db, row.filepath, row.title), title: row.title, score, snippet: row.snippet?.trim().substring(0, 200) ?? "" });
     if (results.length >= n) break;
   }
 
