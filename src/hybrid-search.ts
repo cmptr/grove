@@ -142,19 +142,17 @@ function titleSearch(query: string, n: number): SearchResult[] {
   const terms = extractTerms(sanitized);
   if (terms.length === 0) return [];
 
-  // 1. Check alias index — exact and substring matches against known aliases
+  // 1. Check alias index — match when query contains a known alias phrase
   const aliasIndex = getAliasIndex();
   const aliasHits: SearchResult[] = [];
   const queryLower = sanitized.toLowerCase();
   for (const [alias, entry] of aliasIndex) {
-    // Match if the query contains the alias or the alias contains a significant query term
-    if (queryLower.includes(alias) || terms.some(t => alias.includes(t.toLowerCase()) && t.length >= 3)) {
-      // Weight by how much of the alias matched — full alias match is best
-      const matchRatio = queryLower.includes(alias) ? 1.0 : 0.5;
+    // Only match if the full alias appears in the query (case-insensitive)
+    if (alias.length >= 3 && queryLower.includes(alias)) {
       aliasHits.push({
         file: entry.file,
         title: entry.title,
-        score: 20 * matchRatio, // High score to compete with title matches
+        score: 20,
         snippet: `(alias: ${alias})`,
       });
     }
