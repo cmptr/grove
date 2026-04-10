@@ -437,7 +437,6 @@ export async function hybridSearch(
   const injected = new Set<string>();
   for (const [alias, entry] of aliasIndex) {
     if (alias.length >= 3 && queryLower.includes(alias) && !injected.has(entry.title)) {
-      console.log(`[hybrid] alias inject: "${alias}" → ${entry.title}`);
       injected.add(entry.title);
       // If already in results, boost to top 3; if missing, inject
       const idx = fused.findIndex(r => r.title === entry.title);
