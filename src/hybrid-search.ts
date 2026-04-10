@@ -155,14 +155,14 @@ async function vectorSearch(query: string, n: number): Promise<SearchResult[]> {
 
   const db = getDb();
 
-  // Oversample to allow deduplication by file
+  // Oversample aggressively to allow re-ranking after dedup
   const rows = db
     .prepare(
       `SELECT hash_seq, distance FROM vectors_vec WHERE embedding MATCH ? ORDER BY distance LIMIT ?`
     )
-    .all(buf, n * 3) as { hash_seq: string; distance: number }[];
+    .all(buf, n * 5) as { hash_seq: string; distance: number }[];
 
-  const results: SearchResult[] = [];
+  const candidates: (SearchResult & { path: string })[] = [];
   const seenFiles = new Set<string>();
 
   for (const { hash_seq, distance } of rows) {
@@ -192,18 +192,27 @@ async function vectorSearch(query: string, n: number): Promise<SearchResult[]> {
       snippet = text.trim().substring(0, 200);
     }
 
-    results.push({
+    let score = 1.0 - distance;
+
+    // Boost Resource/concept notes — they're higher signal than journal entries
+    if (doc.path.startsWith("Resources/")) score *= 1.15;
+    // Slight penalty for raw journal entries and source captures
+    if (/^Journal\/|^Sources\//.test(doc.path)) score *= 0.90;
+
+    candidates.push({
       file: filePath,
       title: doc.title,
-      score: Math.round((1.0 - distance) * 10000) / 10000,
+      score: Math.round(score * 10000) / 10000,
       snippet,
       docid: `#${docHash.substring(0, 6)}`,
+      path: doc.path,
     });
-
-    if (results.length >= n) break;
   }
 
-  return results;
+  // Re-rank by adjusted score
+  candidates.sort((a, b) => b.score - a.score);
+
+  return candidates.slice(0, n).map(({ path: _, ...rest }) => rest);
 }
 
 /**
