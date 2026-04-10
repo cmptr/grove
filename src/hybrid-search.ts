@@ -61,7 +61,10 @@ const STOPWORDS = new Set(["the", "a", "an", "and", "or", "but", "in", "on", "at
 
 /** Extract search terms from a query, removing stopwords but keeping short terms like "AI". */
 function extractTerms(query: string): string[] {
-  return query.split(/\s+/).filter(t => t.length >= 2 && !STOPWORDS.has(t.toLowerCase()));
+  return query
+    .replace(/[%"'()\-]/g, " ") // strip FTS5 special chars
+    .split(/\s+/)
+    .filter(t => t.length >= 2 && !STOPWORDS.has(t.toLowerCase()));
 }
 
 /** Build the qmd:// file label for an FTS5 result. filepath has life/ prefix. */
@@ -80,7 +83,7 @@ function bm25Search(query: string, n: number): SearchResult[] {
   const db = getDb();
 
   // Escape FTS5 special characters
-  const sanitized = query.replace(/['"]/g, "").trim();
+  const sanitized = query.replace(/['"%()\-]/g, " ").trim();
   if (!sanitized) return [];
 
   const terms = extractTerms(sanitized);
@@ -136,7 +139,7 @@ function bm25Search(query: string, n: number): SearchResult[] {
 function titleSearch(query: string, n: number): SearchResult[] {
   const db = getDb();
 
-  const sanitized = query.replace(/['"]/g, "").trim();
+  const sanitized = query.replace(/['"%()\-]/g, " ").trim();
   if (!sanitized) return [];
 
   const terms = extractTerms(sanitized);
