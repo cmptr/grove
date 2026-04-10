@@ -62,8 +62,8 @@ const TEST_CASES: TestCase[] = [
     expected: ["Financial Planning & House Purchase"],
   },
   {
-    query: "context window engineering for LLMs",
-    expected: ["Context Engineering"],
+    query: "managing LLM context and prompt design",
+    expected: ["Prompt Engineering", "AI Agent Memory & Context"],
   },
   {
     query: "AI coding tools and developer experience",
