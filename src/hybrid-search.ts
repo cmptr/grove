@@ -217,14 +217,16 @@ function getAliasIndex(): Map<string, { title: string; file: string; filepath: s
   const index = new Map<string, { title: string; file: string; filepath: string }>();
 
   for (const row of rows) {
-    // Parse aliases from YAML frontmatter
+    // Parse aliases from YAML frontmatter (handles both quoted and unquoted)
     const fm = row.doc.match(/^---\n([\s\S]*?)\n---/);
     if (!fm) continue;
-    const aliasMatch = fm[1].match(/aliases:\s*\n((?:\s+-\s+"[^"]*"\n?)*)/);
+    const aliasMatch = fm[1].match(/aliases:\s*\n((?:\s+-\s+.*\n?)*)/);
     if (!aliasMatch) continue;
 
     const file = row.collection ? `qmd://${row.collection}/${row.title}` : row.title;
-    const aliases = [...aliasMatch[1].matchAll(/- "([^"]+)"/g)].map(m => m[1]);
+    const aliases = [...aliasMatch[1].matchAll(/-\s+"?([^"\n]+)"?\s*$/gm)]
+      .map(m => m[1].trim())
+      .filter(a => a.length > 0);
 
     for (const alias of aliases) {
       index.set(alias.toLowerCase(), { title: row.title, file, filepath: `life/${row.path}` });
