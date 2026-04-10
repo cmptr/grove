@@ -14,7 +14,7 @@ import Database from "better-sqlite3";
 const VOYAGE_API_KEY = process.env.VOYAGE_API_KEY ?? "";
 const VOYAGE_MODEL = process.env.VOYAGE_MODEL ?? "voyage-4-large";
 const QMD_INDEX = process.env.QMD_INDEX ?? `${process.env.HOME}/.cache/qmd/index.sqlite`;
-const BM25_WEIGHT = parseFloat(process.env.BM25_WEIGHT ?? "1.2");
+const BM25_WEIGHT = parseFloat(process.env.BM25_WEIGHT ?? "1.5");
 const VEC_WEIGHT = parseFloat(process.env.VEC_WEIGHT ?? "1.0");
 
 interface SearchResult {
