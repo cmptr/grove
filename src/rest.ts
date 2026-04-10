@@ -13,6 +13,8 @@ import { hybridSearch, bm25Search } from "./hybrid-search.js";
 import { listNotes } from "./vault-ops.js";
 import { parseNote, contentHash } from "./notes-validate.js";
 import { filterByTrail, type TrailConfig, type NoteMetadata } from "./trails.js";
+import { getStats } from "./vault-stats.js";
+import { searchMetrics, metrics } from "./metrics.js";
 
 const VAULT_PATH = process.env.GROVE_VAULT ?? join(homedir(), "life");
 
@@ -363,4 +365,55 @@ export async function handleSearch(query: string, limit: number = 10, trail?: Tr
   }
 
   return filtered.slice(0, limit);
+}
+
+const VALID_STATS_SECTIONS = new Set(["vault", "freshness", "graph", "index", "lifecycle", "search", "server"]);
+
+/**
+ * Get precomputed vault statistics, optionally filtered by section.
+ * Returns null if stats haven't been computed yet.
+ */
+export function handleStats(
+  sections?: string[],
+  trail?: TrailConfig | null,
+  isAdmin?: boolean,
+): Record<string, unknown> | null {
+  const stats = getStats(VAULT_PATH);
+  if (!stats) return null;
+
+  const result: Record<string, unknown> = {
+    computed_at: stats.computed_at,
+  };
+
+  // If trail is active, note that stats are vault-wide
+  if (trail) {
+    result.trail_note = "stats are vault-wide, not trail-scoped";
+  }
+
+  const include = (key: string): boolean =>
+    !sections || sections.includes(key);
+
+  if (include("vault")) result.vault = stats.vault;
+  if (include("freshness")) result.freshness = stats.freshness;
+  if (include("graph")) result.graph = stats.graph;
+  if (include("index")) result.index = stats.index;
+  if (include("lifecycle")) result.lifecycle = stats.lifecycle;
+
+  // Search stats are admin-only
+  if (include("search") && isAdmin) {
+    result.search = searchMetrics.getSearchStats();
+  }
+
+  // Server metrics
+  if (include("server")) {
+    const m = metrics.getMetrics();
+    result.server = {
+      started_at: m.started_at,
+      uptime_seconds: m.uptime_seconds,
+      total_requests: m.total_requests,
+      error_rate: m.error_rate,
+    };
+  }
+
+  return result;
 }

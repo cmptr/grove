@@ -79,3 +79,86 @@ function percentile(sorted: number[], p: number): number {
 
 // Singleton
 export const metrics = new MetricsCollector();
+
+/* --- Search-specific analytics --- */
+
+interface SearchEntry {
+  query: string;
+  result_count: number;
+  latency_ms: number;
+  timestamp: number;
+}
+
+interface SearchStats {
+  queries_1h: number;
+  avg_latency_ms: number;
+  zero_result_rate: number;
+  top_queries: string[];
+}
+
+const SEARCH_BUFFER_SIZE = 1000;
+
+class SearchTracker {
+  private buffer: SearchEntry[] = [];
+  private cursor = 0;
+  private full = false;
+
+  recordSearch(query: string, resultCount: number, latencyMs: number): void {
+    const entry: SearchEntry = {
+      query,
+      result_count: resultCount,
+      latency_ms: latencyMs,
+      timestamp: Date.now(),
+    };
+    this.buffer[this.cursor] = entry;
+    this.cursor = (this.cursor + 1) % SEARCH_BUFFER_SIZE;
+    if (!this.full && this.cursor === 0) this.full = true;
+  }
+
+  getSearchStats(): SearchStats {
+    const now = Date.now();
+    const cutoff = now - WINDOW_MS;
+    const recent: SearchEntry[] = [];
+
+    const len = this.full ? SEARCH_BUFFER_SIZE : this.cursor;
+    for (let i = 0; i < len; i++) {
+      const entry = this.buffer[i]!;
+      if (entry.timestamp >= cutoff) {
+        recent.push(entry);
+      }
+    }
+
+    if (recent.length === 0) {
+      return { queries_1h: 0, avg_latency_ms: 0, zero_result_rate: 0, top_queries: [] };
+    }
+
+    const totalLatency = recent.reduce((sum, e) => sum + e.latency_ms, 0);
+    const zeroCount = recent.filter((e) => e.result_count === 0).length;
+
+    // Top 5 most frequent queries (lowercased, deduplicated)
+    const freq = new Map<string, number>();
+    for (const e of recent) {
+      const key = e.query.toLowerCase();
+      freq.set(key, (freq.get(key) ?? 0) + 1);
+    }
+    const topQueries = [...freq.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([q]) => q);
+
+    return {
+      queries_1h: recent.length,
+      avg_latency_ms: Math.round(totalLatency / recent.length),
+      zero_result_rate: zeroCount / recent.length,
+      top_queries: topQueries,
+    };
+  }
+
+  reset(): void {
+    this.buffer = [];
+    this.cursor = 0;
+    this.full = false;
+  }
+}
+
+export const searchMetrics = new SearchTracker();

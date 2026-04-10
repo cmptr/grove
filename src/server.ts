@@ -24,6 +24,7 @@ import { WriteQueue } from "./write-queue.js";
 import { gitCommit, gitPush, gitLog, startupRecovery, qmdReindex, listNotes } from "./vault-ops.js";
 import { validatePath, validateNote, parseNote, serializeNote, contentHash } from "./notes-validate.js";
 import { analyzeGraph, computeDigest } from "./vault-graph.js";
+import { getStats, startStatsTimer, refreshStats } from "./vault-stats.js";
 import { RateLimiter, IdempotencyCache } from "./rate-limit.js";
 import { log as structuredLog, auditRead } from "./logger.js";
 import { filterByTrail, trailAllowsWrite, logTrailAccess, type TrailConfig, type NoteMetadata } from "./trails.js";
@@ -390,6 +391,9 @@ SAFE UPDATES — pass if_hash (from a prior get) to prevent overwriting concurre
         const sha = await gitCommit(VAULT_PATH, relPath, commitMsg);
         await qmdReindex(relPath);
 
+        // Refresh stats cache after write (fire-and-forget)
+        refreshStats(VAULT_PATH).catch(() => {});
+
         return { path: relPath, action, content_hash: contentHash(serialized), commit: sha };
       });
 
@@ -458,10 +462,30 @@ Modes:
     },
     async ({ mode, since, path_prefix }) => {
       if (mode === "health") {
+        const stats = getStats(VAULT_PATH);
+        if (stats) {
+          const statusResult: Record<string, unknown> = {
+            total_notes: stats.vault.total_notes,
+            vault_path: VAULT_PATH,
+            by_folder: stats.vault.by_folder,
+            by_type: stats.vault.by_type,
+            frontmatter_completeness: stats.vault.frontmatter_completeness,
+            freshness: stats.freshness,
+            lifecycle: stats.lifecycle,
+            computed_at: stats.computed_at,
+          };
+          // Trail: add scoped note to indicate these are vault-wide stats
+          if (activeTrail) {
+            statusResult.trail_note = "stats are vault-wide; use list_notes for trail-scoped counts";
+          }
+          return {
+            content: [{ type: "text" as const, text: JSON.stringify(statusResult, null, 2) }],
+          };
+        }
+        // Fallback: stats not yet computed, do the old way
         const notes = listNotes(VAULT_PATH, "*");
         const log = await gitLog(VAULT_PATH, { limit: 1 });
         const lastCommit = log[0] ?? null;
-        // Trail: return scoped stats for trail keys
         let totalNotes = notes.length;
         const statusResult: Record<string, unknown> = {
           total_notes: totalNotes,
@@ -496,6 +520,11 @@ Modes:
       }
 
       if (mode === "graph") {
+        const stats = getStats(VAULT_PATH);
+        if (stats) {
+          return { content: [{ type: "text" as const, text: JSON.stringify(stats.graph, null, 2) }] };
+        }
+        // Fallback: compute directly
         const graph = await analyzeGraph(VAULT_PATH);
         return { content: [{ type: "text" as const, text: JSON.stringify(graph, null, 2) }] };
       }
@@ -738,6 +767,10 @@ async function start() {
   } catch (err) {
     console.warn("[grove] startup recovery failed:", (err as Error).message);
   }
+
+  // Start background stats computation (every 5 min)
+  startStatsTimer(VAULT_PATH);
+  console.log("[grove] stats timer started (5 min interval)");
 
   httpServer.listen(PORT, "127.0.0.1", () => {
     console.log(`[grove] MCP server listening on http://127.0.0.1:${PORT}`);

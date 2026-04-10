@@ -25,7 +25,7 @@ import { loadKeys, createKey, revokeKey, isExpired, type StoredKey } from "./key
 import { generateRequestId, log as structuredLog, auditRead, auditWrite } from "./logger.js";
 import { metrics } from "./metrics.js";
 import { resolveTrail, type TrailConfig } from "./trails.js";
-import { handleGetNote, handleSearch, handleListNotes } from "./rest.js";
+import { handleGetNote, handleSearch, handleListNotes, handleStats } from "./rest.js";
 
 const QMD_PORT = Number(process.env.QMD_PORT ?? 8181);
 const GROVE_SERVER_PORT = Number(process.env.GROVE_SERVER_PORT ?? 8190);
@@ -860,6 +860,27 @@ const server = createServer(async (req, res) => {
         res.writeHead(500, restHeaders);
         res.end(JSON.stringify({ error: "internal error" }));
       }
+      return;
+    }
+
+    // GET /v1/stats?sections=vault,graph — vault analytics
+    if (url.pathname === "/v1/stats" && req.method === "GET") {
+      const sectionsParam = url.searchParams.get("sections");
+      const sections = sectionsParam ? sectionsParam.split(",").map(s => s.trim()) : undefined;
+
+      // Admin check: owner keys (no trail) get search stats
+      const isAdmin = !restTrail;
+
+      structuredLog("info", "rest.stats", rid, { key_id: restKey.id, key_name: restKey.name, sections: sections?.join(",") });
+
+      const stats = handleStats(sections, restTrail, isAdmin);
+      if (!stats) {
+        res.writeHead(503, restHeaders);
+        res.end(JSON.stringify({ error: "stats not yet computed, try again shortly" }));
+        return;
+      }
+      res.writeHead(200, restHeaders);
+      res.end(JSON.stringify(stats));
       return;
     }
 

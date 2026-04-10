@@ -1,0 +1,397 @@
+/**
+ * Vault analytics computation and caching.
+ *
+ * Walks all .md files once, parses frontmatter, aggregates stats,
+ * queries the QMD SQLite index for index health, and wraps everything
+ * in a cache layer so stats are precomputed rather than per-request.
+ */
+
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join, relative, basename } from "node:path";
+import { parse as yamlParse } from "yaml";
+import Database from "better-sqlite3";
+import { analyzeGraph, computeDigest } from "./vault-graph.js";
+
+// ── Types ────────────────────────────────────────────────────────────
+
+export interface VaultStats {
+  vault: {
+    total_notes: number;
+    by_folder: Record<string, number>;
+    by_type: Record<string, number>;
+    frontmatter_completeness: number;
+    tag_cardinality: number;
+    top_tags: { tag: string; count: number }[];
+  };
+  freshness: {
+    today: number;
+    this_week: number;
+    this_month: number;
+    stale_90d: number;
+    velocity_7d: number;
+  };
+  graph: {
+    nodes: number;
+    edges: number;
+    avg_links_per_note: number;
+    orphan_count: number;
+    cluster_count: number;
+    most_connected: { name: string; path: string; links: number }[];
+  };
+  index: {
+    indexed_docs: number;
+    vault_docs: number;
+    drift: number;
+    embedding_coverage: number;
+    index_size_mb: number;
+    last_reindex: string | null;
+  };
+  lifecycle: {
+    seeds: number;
+    sprouts: number;
+    growing: number;
+    mature: number;
+    dormant: number;
+    withering: number;
+  };
+  computed_at: string;
+}
+
+// ── Internals ────────────────────────────────────────────────────────
+
+const SKIP = new Set([".obsidian", ".git", ".trash", "node_modules", ".claude"]);
+
+function walkMd(dir: string, acc: string[] = []): string[] {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name.startsWith(".") || SKIP.has(entry.name)) continue;
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) walkMd(full, acc);
+    else if (entry.name.endsWith(".md")) acc.push(full);
+  }
+  return acc;
+}
+
+interface Frontmatter {
+  type: string | null;
+  tags: string[];
+}
+
+function parseFrontmatter(head: string): Frontmatter {
+  if (!head.startsWith("---")) return { type: null, tags: [] };
+  const end = head.indexOf("\n---", 3);
+  if (end === -1) return { type: null, tags: [] };
+  const raw = head.slice(4, end);
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = yamlParse(raw) ?? {};
+  } catch {
+    return { type: null, tags: [] };
+  }
+
+  const type = typeof parsed.type === "string" ? parsed.type : null;
+  const tags = Array.isArray(parsed.tags)
+    ? parsed.tags.filter((t): t is string => typeof t === "string")
+    : typeof parsed.tags === "string"
+      ? [parsed.tags]
+      : [];
+
+  return { type, tags };
+}
+
+// ── Vault Section ────────────────────────────────────────────────────
+
+interface VaultSection {
+  total_notes: number;
+  by_folder: Record<string, number>;
+  by_type: Record<string, number>;
+  frontmatter_completeness: number;
+  tag_cardinality: number;
+  top_tags: { tag: string; count: number }[];
+}
+
+interface FileInfo {
+  abs: string;
+  rel: string;
+  mtime: Date;
+  fm: Frontmatter;
+}
+
+function computeVaultSection(
+  vaultPath: string,
+  files: string[],
+): { section: VaultSection; fileInfos: FileInfo[] } {
+  const by_folder: Record<string, number> = {};
+  const by_type: Record<string, number> = {};
+  const tagCounts = new Map<string, number>();
+  let completeCount = 0;
+  const fileInfos: FileInfo[] = [];
+
+  for (const abs of files) {
+    const rel = relative(vaultPath, abs);
+    const topFolder = rel.split("/")[0];
+    by_folder[topFolder] = (by_folder[topFolder] ?? 0) + 1;
+
+    let head: string;
+    let mtime: Date;
+    try {
+      head = readFileSync(abs, "utf-8").slice(0, 500);
+      mtime = statSync(abs).mtime;
+    } catch {
+      continue;
+    }
+
+    const fm = parseFrontmatter(head);
+    fileInfos.push({ abs, rel, mtime, fm });
+
+    const typeKey = fm.type ?? "untyped";
+    by_type[typeKey] = (by_type[typeKey] ?? 0) + 1;
+
+    if (fm.type && fm.tags.length >= 1) completeCount++;
+
+    for (const tag of fm.tags) {
+      tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
+    }
+  }
+
+  const total_notes = files.length;
+  const frontmatter_completeness =
+    total_notes > 0 ? completeCount / total_notes : 0;
+  const tag_cardinality = tagCounts.size;
+
+  const sortedTags = [...tagCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 20)
+    .map(([tag, count]) => ({ tag, count }));
+
+  return {
+    section: {
+      total_notes,
+      by_folder,
+      by_type,
+      frontmatter_completeness,
+      tag_cardinality,
+      top_tags: sortedTags,
+    },
+    fileInfos,
+  };
+}
+
+// ── Freshness Section ────────────────────────────────────────────────
+
+function computeFreshness(fileInfos: FileInfo[]): VaultStats["freshness"] {
+  const now = Date.now();
+  const DAY = 86_400_000;
+
+  let today = 0;
+  let thisWeek = 0;
+  let thisMonth = 0;
+  let stale90d = 0;
+
+  for (const { mtime } of fileInfos) {
+    const age = now - mtime.getTime();
+    if (age < DAY) today++;
+    if (age < 7 * DAY) thisWeek++;
+    if (age < 30 * DAY) thisMonth++;
+    if (age >= 90 * DAY) stale90d++;
+  }
+
+  return {
+    today,
+    this_week: thisWeek,
+    this_month: thisMonth,
+    stale_90d: stale90d,
+    velocity_7d: Math.round((thisWeek / 7) * 100) / 100,
+  };
+}
+
+// ── Graph Section ────────────────────────────────────────────────────
+
+async function computeGraphSection(
+  vaultPath: string,
+): Promise<VaultStats["graph"]> {
+  try {
+    const g = await analyzeGraph(vaultPath);
+    return {
+      nodes: g.nodes,
+      edges: g.edges,
+      avg_links_per_note: g.nodes > 0
+        ? Math.round((g.edges / g.nodes) * 100) / 100
+        : 0,
+      orphan_count: g.orphans.length,
+      cluster_count: g.clusters.length,
+      most_connected: g.most_connected.slice(0, 10),
+    };
+  } catch (err) {
+    console.warn("[vault-stats] graph analysis failed:", err);
+    return {
+      nodes: 0,
+      edges: 0,
+      avg_links_per_note: 0,
+      orphan_count: 0,
+      cluster_count: 0,
+      most_connected: [],
+    };
+  }
+}
+
+// ── Index Section ────────────────────────────────────────────────────
+
+function computeIndexSection(totalNotes: number): VaultStats["index"] {
+  const indexPath =
+    process.env.QMD_INDEX ??
+    join(process.env.HOME ?? "", ".cache/qmd/index.sqlite");
+
+  const defaults: VaultStats["index"] = {
+    indexed_docs: 0,
+    vault_docs: totalNotes,
+    drift: totalNotes,
+    embedding_coverage: -1,
+    index_size_mb: 0,
+    last_reindex: null,
+  };
+
+  let db: InstanceType<typeof Database> | null = null;
+  try {
+    db = new Database(indexPath, { readonly: true });
+
+    const docRow = db.prepare("SELECT COUNT(*) AS cnt FROM documents WHERE active = 1").get() as
+      | { cnt: number }
+      | undefined;
+    const indexedDocs = docRow?.cnt ?? 0;
+
+    let embeddingCoverage = -1;
+    try {
+      const vecRow = db
+        .prepare(
+          "SELECT COUNT(DISTINCT substr(hash_seq, 1, instr(hash_seq, '_') - 1)) AS cnt FROM vectors_vec",
+        )
+        .get() as { cnt: number } | undefined;
+      const embeddedDocs = vecRow?.cnt ?? 0;
+      embeddingCoverage =
+        indexedDocs > 0
+          ? Math.round((embeddedDocs / indexedDocs) * 100) / 100
+          : 0;
+    } catch {
+      // vec0 extension not loaded — leave as -1
+    }
+
+    let indexSizeMb = 0;
+    let lastReindex: string | null = null;
+    try {
+      const st = statSync(indexPath);
+      indexSizeMb = Math.round((st.size / (1024 * 1024)) * 100) / 100;
+      lastReindex = st.mtime.toISOString();
+    } catch {
+      // index file stat failed — keep defaults
+    }
+
+    return {
+      indexed_docs: indexedDocs,
+      vault_docs: totalNotes,
+      drift: totalNotes - indexedDocs,
+      embedding_coverage: embeddingCoverage,
+      index_size_mb: indexSizeMb,
+      last_reindex: lastReindex,
+    };
+  } catch (err) {
+    console.warn("[vault-stats] index query failed:", err);
+    return defaults;
+  } finally {
+    db?.close();
+  }
+}
+
+// ── Lifecycle Section ────────────────────────────────────────────────
+
+async function computeLifecycleSection(
+  vaultPath: string,
+): Promise<VaultStats["lifecycle"]> {
+  try {
+    const digest = await computeDigest(vaultPath);
+    return {
+      seeds: digest.seeds.count,
+      sprouts: digest.sprouts.count,
+      growing: digest.growing.count,
+      mature: digest.mature.count,
+      dormant: digest.dormant.count,
+      withering: digest.withering.count,
+    };
+  } catch (err) {
+    console.warn("[vault-stats] lifecycle computation failed:", err);
+    return {
+      seeds: 0,
+      sprouts: 0,
+      growing: 0,
+      mature: 0,
+      dormant: 0,
+      withering: 0,
+    };
+  }
+}
+
+// ── Main Computation ─────────────────────────────────────────────────
+
+export async function computeVaultStats(
+  vaultPath: string,
+): Promise<VaultStats> {
+  const files = walkMd(vaultPath);
+  const { section: vault, fileInfos } = computeVaultSection(vaultPath, files);
+  const freshness = computeFreshness(fileInfos);
+  const index = computeIndexSection(vault.total_notes);
+
+  // Graph and lifecycle both do their own vault walks — run in parallel
+  const [graph, lifecycle] = await Promise.all([
+    computeGraphSection(vaultPath),
+    computeLifecycleSection(vaultPath),
+  ]);
+
+  return {
+    vault,
+    freshness,
+    graph,
+    index,
+    lifecycle,
+    computed_at: new Date().toISOString(),
+  };
+}
+
+// ── Cache Layer ──────────────────────────────────────────────────────
+
+let cachedStats: VaultStats | null = null;
+let timer: ReturnType<typeof setInterval> | null = null;
+
+export function getStats(_vaultPath: string): VaultStats | null {
+  return cachedStats;
+}
+
+export async function refreshStats(vaultPath: string): Promise<VaultStats> {
+  cachedStats = await computeVaultStats(vaultPath);
+  return cachedStats;
+}
+
+export function startStatsTimer(
+  vaultPath: string,
+  intervalMs: number = 300_000,
+): void {
+  // Avoid duplicate timers
+  stopStatsTimer();
+
+  // Initial compute (fire-and-forget, logs on error)
+  refreshStats(vaultPath).catch((err) =>
+    console.warn("[vault-stats] initial computation failed:", err),
+  );
+
+  timer = setInterval(() => {
+    refreshStats(vaultPath).catch((err) =>
+      console.warn("[vault-stats] periodic refresh failed:", err),
+    );
+  }, intervalMs);
+}
+
+export function stopStatsTimer(): void {
+  if (timer !== null) {
+    clearInterval(timer);
+    timer = null;
+  }
+}
