@@ -65,12 +65,10 @@ function bm25Search(query: string, n: number): SearchResult[] {
   const sanitized = query.replace(/['"]/g, "").trim();
   if (!sanitized) return [];
 
-  // Build FTS5 query: try exact phrase first via implicit AND,
-  // then also try individual terms with OR for broader recall
-  const terms = sanitized.split(/\s+/).filter(t => t.length > 2);
-  const orQuery = terms.join(" OR ");
-  // Use OR query to maximize recall — FTS5 rank still orders by relevance
-  const ftsQuery = terms.length > 1 ? orQuery : sanitized;
+  // Build FTS5 query with OR for broader recall — keep short terms like "AI"
+  const stopwords = new Set(["the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by", "from", "is", "it", "that", "this", "was", "are", "be", "has", "had", "not", "you", "how", "what", "who", "why", "when", "do", "does", "can"]);
+  const terms = sanitized.split(/\s+/).filter(t => t.length >= 2 && !stopwords.has(t.toLowerCase()));
+  const ftsQuery = terms.length > 1 ? terms.join(" OR ") : sanitized;
 
   const rows = db
     .prepare(
@@ -124,8 +122,9 @@ function titleSearch(query: string, n: number): SearchResult[] {
   const sanitized = query.replace(/['"]/g, "").trim();
   if (!sanitized) return [];
 
-  // Build title-scoped FTS5 query with OR for broad recall
-  const terms = sanitized.split(/\s+/).filter(t => t.length > 2);
+  // Build title-scoped FTS5 query — keep short terms like "AI", "UX"
+  const stopwords = new Set(["the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by", "from", "is", "it", "that", "this", "was", "are", "be", "has", "had", "not", "you", "how", "what", "who", "why", "when", "do", "does", "can"]);
+  const terms = sanitized.split(/\s+/).filter(t => t.length >= 2 && !stopwords.has(t.toLowerCase()));
   if (terms.length === 0) return [];
   const titleQuery = terms.map(t => `title:${t}`).join(" OR ");
 
