@@ -351,7 +351,7 @@ export async function hybridSearch(
   const lists: { results: SearchResult[]; weight: number; label: string }[] = [
     { results: bm25, weight: BM25_WEIGHT, label: "bm25" },
     { results: vec, weight: VEC_WEIGHT, label: "vector" },
-    { results: titles, weight: 1.5, label: "title" },
+    { results: titles, weight: 3.0, label: "title" },
   ];
 
   return rrfFuse(lists, limit);
