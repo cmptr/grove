@@ -293,6 +293,12 @@ function rrfFuse(
     }
   }
 
+  // Multi-source boost: results found by 2+ backends are more trustworthy
+  for (const key of Object.keys(scores)) {
+    const nSources = sources[key]?.size ?? 0;
+    if (nSources >= 2) scores[key] *= 1.0 + (nSources - 1) * 0.3;
+  }
+
   return Object.keys(scores)
     .sort((a, b) => scores[b] - scores[a])
     .slice(0, n)
