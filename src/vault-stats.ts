@@ -335,16 +335,33 @@ async function computeLifecycleSection(
 export async function computeVaultStats(
   vaultPath: string,
 ): Promise<VaultStats> {
+  const t0 = Date.now();
   const files = walkMd(vaultPath);
   const { section: vault, fileInfos } = computeVaultSection(vaultPath, files);
   const freshness = computeFreshness(fileInfos);
   const index = computeIndexSection(vault.total_notes);
+  console.log(`[vault-stats] vault/freshness/index computed in ${Date.now() - t0}ms (${files.length} files)`);
 
   // Graph and lifecycle both do their own vault walks — run in parallel
+  // Use a timeout so a slow Brandes' doesn't block everything
+  const TIMEOUT_MS = 120_000;
+  const timeout = <T>(p: Promise<T>, fallback: T, label: string): Promise<T> =>
+    Promise.race([
+      p.then((v) => { console.log(`[vault-stats] ${label} completed in ${Date.now() - t0}ms`); return v; }),
+      new Promise<T>((resolve) =>
+        setTimeout(() => { console.warn(`[vault-stats] ${label} timed out after ${TIMEOUT_MS}ms`); resolve(fallback); }, TIMEOUT_MS),
+      ),
+    ]);
+
+  const emptyGraph: VaultStats["graph"] = { nodes: 0, edges: 0, avg_links_per_note: 0, orphan_count: 0, cluster_count: 0, most_connected: [] };
+  const emptyLifecycle: VaultStats["lifecycle"] = { seeds: 0, sprouts: 0, growing: 0, mature: 0, dormant: 0, withering: 0 };
+
   const [graph, lifecycle] = await Promise.all([
-    computeGraphSection(vaultPath),
-    computeLifecycleSection(vaultPath),
+    timeout(computeGraphSection(vaultPath), emptyGraph, "graph"),
+    timeout(computeLifecycleSection(vaultPath), emptyLifecycle, "lifecycle"),
   ]);
+
+  console.log(`[vault-stats] full computation completed in ${Date.now() - t0}ms`);
 
   return {
     vault,
