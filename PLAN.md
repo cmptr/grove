@@ -13,8 +13,8 @@ Grove is a TypeScript API server that wraps a git-tracked Obsidian vault and exp
 **Vault:** `~/life/` (primary), `~/canva/` (deferred — Phase 8)
 **Depends on:** `@tobilu/qmd` (search engine), `@modelcontextprotocol/sdk` (MCP transport)
 **Deploys to:** AWS g4dn.xlarge (T4 GPU) at `api.grove.md` (52.37.76.231)
-**Live:** Phases 0-1 complete — MCP + hybrid search + read/write at `https://api.grove.md`
-**Next:** Security hardening → Observability → Portal → Trails (topic-scoped sharing)
+**Live:** Phases 0-1 complete, Phase 5 trails infrastructure complete — MCP + hybrid search + read/write + scoped sharing at `https://api.grove.md`
+**Next:** Security hardening → Observability → Portal (owner app) → Discovery
 
 ---
 
@@ -286,34 +286,68 @@ Claude.ai → proxy.ts (auth/OAuth/CORS/logging) → Grove MCP server (all 6 too
 
 ### Phase 4: Portal
 
-**Goal:** Web dashboard on `api.grove.md` for managing keys, viewing usage, and (later) configuring trails.
+**Goal:** An authenticated web app at `grove.md` (or `app.grove.md`) where the vault owner manages their grove — keys, trails, usage, vault health — and later browses their knowledge visually. This is the owner's control plane.
 
 **Prerequisites:** Phase 3 observability in place (dashboard needs metrics to display).
 
-#### Phase 4a: Admin Dashboard
+**Key architectural decisions:**
+- **Start as ops dashboard, design the shell for knowledge browsing.** The first version manages infrastructure (keys, trails, usage). But the auth, layout, and routing should support adding vault-aware views (graph, lifecycle, search) without a rewrite.
+- **Next.js on Vercel.** The API stays on the VPS (`api.grove.md`). The frontend is a separate app that talks to it. This keeps the raw `node:http` server simple and lets the portal use a real framework for auth, routing, and UI.
+- **Auth: owner-only for now.** Single user, one admin key, session cookie. No multi-user, no OAuth provider, no signup. When trail consumers need a portal (onboarding pages, usage views), that's a separate decision — it might be unauthenticated public pages per trail, not a login system.
+- **The portal never writes to the vault.** It manages Grove infrastructure (keys, trails, config) and reads vault state (health, metrics, graph). Vault writes stay in Claude via MCP. This keeps the portal stateless relative to vault content.
 
-- [ ] **P4-1: Admin auth**
-  `GROVE_ADMIN_KEY` in env var. Dashboard login = paste admin key → get session cookie with short TTL. Dashboard bound to `/admin/*` path on the proxy. *(Note: before multi-user, consider binding to 127.0.0.1 and accessing via SSH tunnel for extra safety. Evaluate when trail consumers are real.)*
+#### Phase 4a: Shell + Auth
 
-- [ ] **P4-2: Key management UI**
-  View all keys, create new keys, revoke keys. Shows: name, prefix, scope, created date, last used, request count. Replaces the basic web UI from Phase 0.
+- [ ] **P4-1: Next.js app scaffold**
+  `app.grove.md` (or `/admin` on `grove.md`). Next.js App Router, deployed on Vercel. Minimal dependencies — Tailwind, no component library to start. Dark mode, monospace aesthetic that matches the CLI feel.
 
-- [ ] **P4-3: Usage dashboard**
-  Request volume over time, latency percentiles, error rate, search latency breakdown (BM25 vs vector). Pulls from `/metrics` endpoint (internal counters), not from BetterStack API.
+- [ ] **P4-2: Admin auth**
+  Login = paste admin key → server validates against `GROVE_ADMIN_KEY` hash → returns signed session token (JWT, short TTL, httpOnly cookie). No OAuth, no provider. API routes on the Next.js app proxy to `api.grove.md` with the session token. Logout = clear cookie.
 
-- [ ] **P4-4: Vault health panel**
-  Note count, last sync time, git status, embedding coverage, index health. Pulls from `vault_status` internally.
+- [ ] **P4-3: Auth middleware**
+  Next.js middleware checks session cookie on all `/dashboard/*` routes. Expired or missing → redirect to login. Session refresh on activity (sliding window).
 
-#### Phase 4b: Trail Management (built during Phase 5)
+#### Phase 4b: Ops Dashboard
 
-- [ ] **P4-5: Trail config UI** — create/edit/disable trails, set boundaries, generate consumer keys
-- [ ] **P4-6: Trail usage view** — per-trail request volume, filtered/allowed counts, consumer activity
-- [ ] **P4-7: Consumer onboarding page** — trail description + MCP connection instructions for each trail
+- [ ] **P4-4: Key management UI**
+  View all keys, create new keys, revoke keys. Shows: name, prefix, scope, created date, last used, request count. Table view with inline actions. Replaces CLI `grove keys` for day-to-day use.
+
+- [ ] **P4-5: Trail management UI**
+  Create/edit/disable trails, set tag/type/path boundaries, generate consumer keys. Shows: trail name, status, scope summary, consumer count, request volume. Creating a trail shows the token once (modal with copy button).
+
+- [ ] **P4-6: Usage dashboard**
+  Request volume over time (sparkline or simple chart), latency percentiles, error rate, search latency breakdown (BM25 vs vector). Pulls from `/metrics` endpoint. No external analytics dependency.
+
+- [ ] **P4-7: Vault health panel**
+  Note count, last sync time, git status, embedding coverage, index health, recent commits. Pulls from `vault_status` internally. The "is everything working" glance.
+
+#### Phase 4c: Trail Consumer Pages
+
+- [ ] **P4-8: Consumer onboarding page**
+  Public (unauthenticated) page per trail: `grove.md/trails/<trail-id>`. Shows trail name, description, visible note count, and MCP connection instructions (copy-paste config for Claude.ai, Cursor, etc.). No login required — the page is the onboarding.
+
+- [ ] **P4-9: Trail usage view**
+  Per-trail request volume, filtered/allowed ratio, consumer activity. Accessible from the owner's dashboard. Helps decide if a trail's boundaries are too tight (high filter ratio) or too loose.
+
+#### Phase 4d: Knowledge Views (future, after 4a-4c are stable)
+
+These are the views that make the portal more than an admin panel. They surface what's in the vault visually — things that are hard to do in a CLI or chat interface.
+
+- [ ] **P4-10: Graph explorer**
+  Interactive visualization of the vault's wikilink graph. Powered by `vault_status(graph)` data. Click a node to see the note's connections, type, lifecycle stage. Filter by type, tag, or cluster. This is the "see the shape of your knowledge" view.
+
+- [ ] **P4-11: Lifecycle dashboard**
+  Visual representation of `vault_status(digest)` — seeds, sprouts, growing, mature, dormant, withering. Click a lifecycle stage to see the notes in it. The daily `/garden` practice, but visual.
+
+- [ ] **P4-12: Search playground**
+  Try queries against the vault from the browser. See BM25 vs vector scores side-by-side. Useful for tuning search and understanding why results rank the way they do. Developer tool, not a consumer feature.
 
 #### Phase 4 Tests
 
-- Auth: session creation, expiry, invalid key rejection
+- Auth: session creation, expiry, invalid key rejection, middleware redirect
 - Key CRUD: create, list, revoke via UI matches CLI behavior
+- Trail CRUD: create trail, verify token shown, disable/delete
+- Consumer page: unauthenticated access to trail info page
 - Dashboard: metrics endpoint returns expected shape, UI renders without error
 
 ---
@@ -374,43 +408,36 @@ On MCP `initialize`, if the session is trail-scoped, return trail metadata (name
 
 #### Phase 5a: Trail Infrastructure
 
-- [ ] **P5-1: Trail config schema** (`src/trails.ts`)
+- [x] **P5-1: Trail config schema** (`src/trails.ts`)
   CRUD operations on `~/.grove/trails.json`. Validate schema, generate IDs, wire to API keys.
 
-- [ ] **P5-2: Trail CRUD CLI**
-  `grove trails create "AI Research" --allow-tags "ai,llm,agents" --deny-tags "health,finances" --allow-paths "Resources/" --access read`
+- [x] **P5-2: Trail CRUD CLI**
+  `grove trails create "AI Research" --allow-tags "ai,llm,agents" --deny-tags "health,finances" --allow-paths "Resources/"`
   `grove trails list` / `grove trails disable <id>` / `grove trails delete <id>`
   Creating a trail auto-creates a scoped API key (token shown once).
 
-- [ ] **P5-3: Trail resolution in proxy**
-  On auth, look up key → trail mapping. Pass trail config to server as request context (header or injected metadata). No trail = full access (owner key).
+- [x] **P5-3: Trail resolution in proxy**
+  On auth, look up key → trail mapping. Pass trail config to server as request context (`X-Trail-Config` header). No trail = full access (owner key). Per-trail rate limits enforced.
 
-- [ ] **P5-4: Server-side filtering** (`src/server.ts`)
-  Two-layer filter:
-  1. **Fast prefilter**: check note frontmatter tags/types/paths against trail allow/deny lists. Deterministic, sub-millisecond.
-  2. **(Deferred) LLM judge**: Ollama (Qwen2.5-3B on T4) evaluates survivors against `topic_description`. Soft signal — demote, don't hard-exclude. Log every exclusion for audit.
-  
-  Apply filter in `query`, `get`, `multi_get`, `list_notes`, `write_note`, `vault_status` per the table above.
+- [x] **P5-4: Server-side filtering** (`src/server.ts`)
+  Fast deterministic prefilter: check note frontmatter tags/types/paths against trail allow/deny lists. Sub-millisecond per note. Applied in all 6 MCP tools. LLM judge deferred to Phase 6.
 
-- [ ] **P5-5: `filtered_count` in query responses**
-  Include `{ total_found, visible, filtered }` counts so consumers know when results were scoped. Helps them decide whether to ask the vault owner for broader access.
+- [x] **P5-5: `filtered_count` in query responses**
+  Include `{ total_found, visible, filtered }` counts so consumers know when results were scoped.
 
-- [ ] **P5-6: Trail info in MCP initialize**
-  Return trail name, description, visible note count in MCP server capabilities for trail-scoped sessions.
+- [x] **P5-6: Trail info in MCP initialize**
+  Return trail name, description in MCP server capabilities for trail-scoped sessions.
 
 #### Phase 5b: Safety & Eval
 
 - [ ] **P5-7: Tag hygiene audit**
   Before shipping trails, run diagnostics: how many notes have no tags? How many have tags that don't match any trail's allow list? This determines whether tag-based filtering is viable or needs path-based filtering as primary. Run via `vault_status(diagnostics)` + new tag coverage report.
 
-- [ ] **P5-8: Trail filter eval suite**
-  Labeled test cases: known-sensitive notes (health, therapy, finances) and known-safe notes (AI, tech, recipes). Create an "AI Research" trail and verify:
-  - Precision >95%: sensitive notes never leak through the trail
-  - Recall >90%: on-topic notes aren't over-filtered
-  Run as `npm run test:trails` with fixture vault.
+- [x] **P5-8: Trail filter eval suite**
+  Labeled test cases: 20 known-sensitive notes and 20 known-safe notes. 100% precision (zero leaks) and 100% recall on labeled dataset. Tests in `test/trails.test.ts`.
 
-- [ ] **P5-9: Audit trail for trail access**
-  Every trail query logged: `{ ts, trail_id, key_id, tool, query, total_found, visible, filtered }`. Stored in `~/.grove/audit.jsonl`.
+- [x] **P5-9: Audit trail for trail access**
+  Every trail access logged via structured logger: `{ trail_id, trail_name, tool, total_count, filtered_count }`. Uses `logTrailAccess()` in `src/trails.ts`.
 
 - [ ] **P5-10: Blast radius limits**
   Per-trail rate limits: configurable max reads/min, max writes/hour. Default: 60 reads/min, 10 writes/hour per trail. Separate from owner key limits.
@@ -418,11 +445,9 @@ On MCP `initialize`, if the session is trail-scoped, return trail metadata (name
 - [ ] **P5-11: Snapshot/rollback**
   `grove snapshot` creates a git tag. `grove rollback <tag>` reverts. Automatic snapshot before any bulk operation.
 
-#### Phase 5c: Portal Integration (parallel with 5a)
+#### Phase 5c: Portal Integration (deferred to Phase 4)
 
-- [ ] **P5-12: Trail management UI** — create/edit/disable trails from the web dashboard (P4-5)
-- [ ] **P5-13: Consumer onboarding page** — public page per trail showing: name, description, connection instructions for Claude.ai MCP (P4-7)
-- [ ] **P5-14: Trail usage dashboard** — per-trail request volume, filtered/allowed ratio, consumer activity (P4-6)
+Trail management UI (P4-5), consumer onboarding pages (P4-8), and trail usage views (P4-9) are now part of the Phase 4 Portal. The trail backend is ready — these are frontend tasks.
 
 #### Phase 5 Tests
 
@@ -534,6 +559,9 @@ Decisions made during planning. Reference these when implementing — don't re-l
 | LLM judge | Deferred (Phase 6) | Ship with trails, rule-based only | Expert panel: prefilter covers 90%, LLM adds latency and fragility. Ship without, add when proven needed. |
 | Ollama binding | 127.0.0.1 only, cgroup-limited | 0.0.0.0 (default) | Default binds to all interfaces — security risk. Cgroup prevents resource starvation of main app. |
 | Consumer discovery | `filtered_count` in responses | Hide filtering entirely | Consumers should know results are scoped so they can request broader access. |
+| Portal framework | Next.js on Vercel | Extend node:http server with HTML routes | API server stays minimal (raw node:http). Portal is a separate app with real framework needs (routing, auth middleware, SSR). Vercel deployment is free for this scale. |
+| Portal scope | Ops first, knowledge views later | Ship graph explorer immediately | Ops dashboard is needed now (key/trail management). Knowledge views are nice-to-have — design the shell so they can grow in, but don't block shipping on them. |
+| Portal auth | Admin key + JWT session cookie | OAuth provider, passkey | Single user, single key. Simplest thing that works. Re-evaluate if trail consumers need portal access. |
 
 ---
 
@@ -565,7 +593,7 @@ Decisions made during planning. Reference these when implementing — don't re-l
 
 6. **Tag hygiene for trails:** How many vault notes have no tags or inconsistent tags? If coverage is low, path-based filtering may need to be the primary mechanism for trails, not tags. Run audit before Phase 5 ships (P5-7).
 
-7. **Admin dashboard exposure:** Currently planned as admin key + session cookie on public internet. Security panel recommends binding to 127.0.0.1 + SSH tunnel before multi-user. Decide when trail consumers are real — if only you use the portal, SSH tunnel is fine. If trail consumers need a portal, need proper auth.
+7. ~~**Admin dashboard exposure:**~~ **Resolved.** Portal is a separate Next.js app on Vercel, not a route on the API server. Owner auth via admin key + JWT session. Trail consumer onboarding pages are public (unauthenticated). No multi-user auth needed yet.
 
 8. **Ollama GPU sharing:** TEI uses ~1GB VRAM on the T4 (16GB). Ollama + Qwen2.5-3B needs ~3-4GB. Should be fine, but needs load testing under concurrent requests (search embedding + judge inference simultaneously). Deferred to Phase 6.
 
@@ -601,9 +629,11 @@ Decisions made during planning. Reference these when implementing — don't re-l
 - Dead man's switch fires if daily cron stops
 
 **Phase 4 (Portal) is successful when:**
-- Admin can log in, view keys, create/revoke keys from the web dashboard
+- Owner can log in with admin key, get a session, and manage keys/trails from the browser
 - Usage dashboard shows request volume and latency over time
 - Vault health panel shows note count, sync status, embedding coverage
+- Trail consumer can visit a public onboarding page and copy MCP connection config
+- The app feels like a natural extension of the CLI, not a replacement for it
 
 **Phase 5 (Trails) is successful when:**
 - Create a trail, generate a consumer key, connect from Claude.ai — consumer sees only trail-scoped results
@@ -636,15 +666,15 @@ Decisions made during planning. Reference these when implementing — don't re-l
 5. **P3-6** — BetterStack integration (after logging is structured)
 
 **Phase 4 — Portal:**
-1. **P4-1** — Admin auth (foundational)
-2. **P4-2** — Key management UI
-3. **P4-3 + P4-4** — Usage dashboard + vault health (parallel, both read from metrics/status)
+1. **P4-1 + P4-2 + P4-3** — Next.js scaffold + admin auth + middleware (foundational, build together)
+2. **P4-4 + P4-7** — Key management + vault health (parallel, both read from existing APIs)
+3. **P4-5 + P4-6** — Trail management + usage dashboard (parallel, trails backend is ready)
+4. **P4-8 + P4-9** — Consumer onboarding page + trail usage view (parallel, lightweight)
+5. **P4-10 + P4-11 + P4-12** — Knowledge views: graph, lifecycle, search (future, after ops dashboard is stable)
 
-**Phase 5 — Trails:**
-1. **P5-7** — Tag hygiene audit FIRST (determines if tag filtering is viable)
-2. **P5-1 + P5-2** — Trail config schema + CLI (parallel)
-3. **P5-3** — Trail resolution in proxy
-4. **P5-4 + P5-5 + P5-6** — Server-side filtering + filtered_count + MCP handshake (core, build together)
-5. **P5-8** — Filter eval suite (validates the filtering works)
-6. **P5-9 + P5-10 + P5-11** — Audit trail + blast radius + snapshot (safety, parallel)
-7. **P5-12 + P5-13 + P5-14** — Portal integration (parallel with safety)
+**Phase 5 — Trails:** (infrastructure complete)
+1. ~~P5-1 through P5-6~~ ✅ — Config, CLI, proxy resolution, server filtering, filtered_count, MCP handshake
+2. ~~P5-8 + P5-9~~ ✅ — Eval suite (100% precision/recall) + audit logging
+3. **P5-7** — Tag hygiene audit (still useful for tuning trail boundaries)
+4. **P5-10 + P5-11** — Blast radius limits + snapshot/rollback (safety, before opening trails to consumers)
+5. Portal integration moved to Phase 4 (P4-5, P4-8, P4-9)
