@@ -75,7 +75,7 @@ function bm25Search(query: string, n: number): SearchResult[] {
       `SELECT f.filepath, f.title, rank,
               substr(f.body, 1, 200) as snippet
        FROM documents_fts f
-       JOIN documents d ON d.path = f.filepath AND d.active = 1
+       JOIN documents d ON d.path = SUBSTR(f.filepath, 6) AND d.active = 1
        WHERE documents_fts MATCH ?
        ORDER BY rank
        LIMIT ?`
@@ -133,7 +133,7 @@ function titleSearch(query: string, n: number): SearchResult[] {
       `SELECT f.filepath, f.title, rank,
               substr(f.body, 1, 200) as snippet
        FROM documents_fts f
-       JOIN documents d ON d.path = f.filepath AND d.active = 1
+       JOIN documents d ON d.path = SUBSTR(f.filepath, 6) AND d.active = 1
        WHERE documents_fts MATCH ?
        ORDER BY rank
        LIMIT ?`
