@@ -112,10 +112,9 @@ async function resolveNote(file: string): Promise<ResolvedNote | null> {
   try {
     const results = await bm25Search(searchTerm, 3);
     if (results.length > 0) {
-      const resolved = results[0].file.replace(/^qmd:\/\/life\//, "");
-      const resolvedLower = resolved.toLowerCase();
+      const resolvedLower = results[0].vault_path.toLowerCase();
       const realNote = allNotes.find((n) => n.path.toLowerCase() === resolvedLower);
-      const realPath = realNote?.path ?? resolved;
+      const realPath = realNote?.path ?? results[0].vault_path;
       const resolvedAbs = join(VAULT_PATH, realPath);
       if (existsSync(resolvedAbs)) return readNote(resolvedAbs, realPath, file);
     }

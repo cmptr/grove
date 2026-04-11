@@ -19,7 +19,6 @@ const BM25_WEIGHT = parseFloat(process.env.BM25_WEIGHT ?? "1.2");
 const VEC_WEIGHT = parseFloat(process.env.VEC_WEIGHT ?? "1.2");
 
 interface SearchResult {
-  file: string;       // display label, e.g. "qmd://life/Agent Runtime"
   title: string;      // note title, e.g. "Agent Runtime"
   vault_path: string; // lowercase vault-relative path from QMD index, e.g. "resources/concepts/agent-runtime.md"
   score: number;
@@ -28,7 +27,6 @@ interface SearchResult {
 }
 
 interface HybridResult {
-  file: string;       // display label, e.g. "qmd://life/Agent Runtime"
   title: string;      // note title, e.g. "Agent Runtime"
   vault_path: string; // lowercase vault-relative path from QMD index, e.g. "resources/concepts/agent-runtime.md"
   rrf_score: number;
@@ -75,16 +73,9 @@ function extractTerms(query: string): string[] {
     .filter(t => t.length >= 2 && !STOPWORDS.has(t.toLowerCase()));
 }
 
-/** Build the qmd:// file label for an FTS5 result. filepath has life/ prefix.
- *  Returns both the display label and the lowercase vault path from the index. */
-function ftsFileMeta(db: InstanceType<typeof Database>, filepath: string, title: string): { file: string; vault_path: string } {
-  const docPath = filepath.startsWith("life/") ? filepath.slice(5) : filepath;
-  const clean = stripWikilinks(title);
-  const collection = db
-    .prepare("SELECT collection FROM documents WHERE path = ? AND active = 1")
-    .get(docPath) as { collection: string } | undefined;
-  const file = collection?.collection ? `qmd://${collection.collection}/${clean}` : clean;
-  return { file, vault_path: docPath };
+/** Extract vault path from FTS5 filepath (strip life/ prefix). */
+function ftsVaultPath(filepath: string): string {
+  return filepath.startsWith("life/") ? filepath.slice(5) : filepath;
 }
 
 /**
@@ -124,15 +115,14 @@ function bm25Search(query: string, n: number): SearchResult[] {
     // Normalize score: FTS5 rank is negative (more negative = better match)
     const score = Math.round(Math.abs(row.rank) * 100) / 100;
 
-    const meta = ftsFileMeta(db, row.filepath, row.title);
+    const vaultPath = ftsVaultPath(row.filepath);
 
     // Boost Resource notes in BM25 results — concept notes are high signal
-    const boostedScore = meta.vault_path.startsWith("resources/") ? score * 1.3 : score;
+    const boostedScore = vaultPath.startsWith("resources/") ? score * 1.3 : score;
 
     results.push({
-      file: meta.file,
       title: cleanTitle,
-      vault_path: meta.vault_path,
+      vault_path: vaultPath,
       score: boostedScore,
       snippet: row.snippet?.trim().substring(0, 200) ?? "",
     });
@@ -168,7 +158,6 @@ function titleSearch(query: string, n: number): SearchResult[] {
     if (alias.length >= 3 && queryLower.includes(alias)) {
       const vaultPath = entry.filepath.startsWith("life/") ? entry.filepath.slice(5) : entry.filepath;
       aliasHits.push({
-        file: entry.file,
         title: entry.title,
         vault_path: vaultPath,
         score: 20,
@@ -207,8 +196,8 @@ function titleSearch(query: string, n: number): SearchResult[] {
     if (seen.has(cleanTitle)) continue;
     seen.add(cleanTitle);
     const score = Math.round(Math.abs(row.rank) * 100) / 100;
-    const meta = ftsFileMeta(db, row.filepath, row.title);
-    results.push({ file: meta.file, title: cleanTitle, vault_path: meta.vault_path, score, snippet: row.snippet?.trim().substring(0, 200) ?? "" });
+    const vaultPath = ftsVaultPath(row.filepath);
+    results.push({ title: cleanTitle, vault_path: vaultPath, score, snippet: row.snippet?.trim().substring(0, 200) ?? "" });
     if (results.length >= n) break;
   }
 
@@ -217,9 +206,9 @@ function titleSearch(query: string, n: number): SearchResult[] {
 
 // --- Alias index: maps lowercase alias → { title, file } ---
 
-let _aliasIndex: Map<string, { title: string; file: string; filepath: string }> | null = null;
+let _aliasIndex: Map<string, { title: string; filepath: string }> | null = null;
 
-function getAliasIndex(): Map<string, { title: string; file: string; filepath: string }> {
+function getAliasIndex(): Map<string, { title: string; filepath: string }> {
   if (_aliasIndex) return _aliasIndex;
 
   const db = getDb();
@@ -232,7 +221,7 @@ function getAliasIndex(): Map<string, { title: string; file: string; filepath: s
     )
     .all() as { path: string; title: string; collection: string; doc: string }[];
 
-  const index = new Map<string, { title: string; file: string; filepath: string }>();
+  const index = new Map<string, { title: string; filepath: string }>();
 
   for (const row of rows) {
     // Parse aliases from YAML frontmatter (handles both quoted and unquoted)
@@ -242,13 +231,12 @@ function getAliasIndex(): Map<string, { title: string; file: string; filepath: s
     if (!aliasMatch) continue;
 
     const cleanTitle = stripWikilinks(row.title);
-    const file = row.collection ? `qmd://${row.collection}/${cleanTitle}` : cleanTitle;
     const aliases = [...aliasMatch[1].matchAll(/-\s+"?([^"\n]+)"?\s*$/gm)]
       .map(m => m[1].trim())
       .filter(a => a.length > 0);
 
     for (const alias of aliases) {
-      index.set(alias.toLowerCase(), { title: cleanTitle, file, filepath: `life/${row.path}` });
+      index.set(alias.toLowerCase(), { title: cleanTitle, filepath: `life/${row.path}` });
     }
   }
 
@@ -324,9 +312,8 @@ async function vectorSearch(query: string, n: number): Promise<SearchResult[]> {
     if (!doc) continue;
 
     const cleanTitle = stripWikilinks(doc.title);
-    const filePath = doc.collection ? `qmd://${doc.collection}/${cleanTitle}` : cleanTitle;
-    if (seenFiles.has(filePath)) continue;
-    seenFiles.add(filePath);
+    if (seenFiles.has(doc.path)) continue;
+    seenFiles.add(doc.path);
 
     // Get snippet from content table
     let snippet = "";
@@ -352,7 +339,6 @@ async function vectorSearch(query: string, n: number): Promise<SearchResult[]> {
     if (/^journal\/|^sources\//.test(doc.path)) score *= 0.80;
 
     candidates.push({
-      file: filePath,
       title: cleanTitle,
       vault_path: doc.path,
       score: Math.round(score * 10000) / 10000,
@@ -381,7 +367,7 @@ function rrfFuse(
 
   for (const { results, weight, label } of lists) {
     for (let rank = 0; rank < results.length; rank++) {
-      const key = results[rank].file;
+      const key = results[rank].vault_path;
       scores[key] = (scores[key] ?? 0) + weight / (k + rank);
       if (!meta[key]) meta[key] = results[rank];
       if (!sources[key]) sources[key] = new Set();
@@ -393,7 +379,6 @@ function rrfFuse(
     .sort((a, b) => scores[b] - scores[a])
     .slice(0, n)
     .map((key) => ({
-      file: meta[key].file,
       title: meta[key].title,
       vault_path: meta[key].vault_path,
       rrf_score: Math.round(scores[key] * 10000) / 10000,
@@ -429,7 +414,6 @@ export async function hybridSearch(
   if (!vec) {
     // BM25-only fallback
     const fallbackResults = bm25.slice(0, limit).map((r) => ({
-      file: r.file,
       title: r.title,
       vault_path: r.vault_path,
       rrf_score: r.score,
@@ -473,7 +457,6 @@ export async function hybridSearch(
       } else if (idx === -1) {
         const vaultPath = entry.filepath.startsWith("life/") ? entry.filepath.slice(5) : entry.filepath;
         fused.splice(Math.min(2, fused.length), 0, {
-          file: entry.file,
           title: entry.title,
           vault_path: vaultPath,
           rrf_score: 0.5,

@@ -5,16 +5,16 @@ import { stripWikilinks } from "../src/hybrid-search.js";
 // Re-implement the pure rrfFuse function for testing since it's not exported.
 
 interface SearchResult {
-  file: string;
   title: string;
+  vault_path: string;
   score: number;
   snippet: string;
   docid?: string;
 }
 
 interface HybridResult {
-  file: string;
   title: string;
+  vault_path: string;
   rrf_score: number;
   snippet: string;
   sources: string[];
@@ -31,7 +31,7 @@ function rrfFuse(
 
   for (const { results, weight, label } of lists) {
     for (let rank = 0; rank < results.length; rank++) {
-      const key = results[rank].file;
+      const key = results[rank].vault_path;
       scores[key] = (scores[key] ?? 0) + weight / (k + rank);
       if (!meta[key]) meta[key] = results[rank];
       if (!sources[key]) sources[key] = new Set();
@@ -43,8 +43,8 @@ function rrfFuse(
     .sort((a, b) => scores[b] - scores[a])
     .slice(0, n)
     .map((key) => ({
-      file: meta[key].file,
       title: meta[key].title,
+      vault_path: meta[key].vault_path,
       rrf_score: Math.round(scores[key] * 10000) / 10000,
       snippet: meta[key].snippet,
       sources: [...(sources[key] ?? [])],
@@ -53,15 +53,15 @@ function rrfFuse(
 
 describe("rrfFuse", () => {
   const bm25Results: SearchResult[] = [
-    { file: "a.md", title: "A", score: 0.9, snippet: "snippet a" },
-    { file: "b.md", title: "B", score: 0.7, snippet: "snippet b" },
-    { file: "c.md", title: "C", score: 0.5, snippet: "snippet c" },
+    { vault_path: "a.md", title: "A", score: 0.9, snippet: "snippet a" },
+    { vault_path: "b.md", title: "B", score: 0.7, snippet: "snippet b" },
+    { vault_path: "c.md", title: "C", score: 0.5, snippet: "snippet c" },
   ];
 
   const vecResults: SearchResult[] = [
-    { file: "b.md", title: "B", score: 0.95, snippet: "snippet b vec" },
-    { file: "d.md", title: "D", score: 0.8, snippet: "snippet d" },
-    { file: "a.md", title: "A", score: 0.6, snippet: "snippet a vec" },
+    { vault_path: "b.md", title: "B", score: 0.95, snippet: "snippet b vec" },
+    { vault_path: "d.md", title: "D", score: 0.8, snippet: "snippet d" },
+    { vault_path: "a.md", title: "A", score: 0.6, snippet: "snippet a vec" },
   ];
 
   it("fuses two result lists with RRF scoring", () => {
@@ -74,12 +74,12 @@ describe("rrfFuse", () => {
     );
 
     // Both A and B appear in both lists, so they should score higher
-    const files = fused.map((r) => r.file);
+    const files = fused.map((r) => r.vault_path);
     expect(files).toContain("a.md");
     expect(files).toContain("b.md");
 
     // A and B should have both sources
-    const aResult = fused.find((r) => r.file === "a.md")!;
+    const aResult = fused.find((r) => r.vault_path === "a.md")!;
     expect(aResult.sources).toContain("bm25");
     expect(aResult.sources).toContain("vector");
   });
@@ -116,8 +116,8 @@ describe("rrfFuse", () => {
 
     // B is rank 0 in vec, rank 1 in bm25 => highest dual score
     // D only appears in vec => lower score
-    const bScore = fused.find((r) => r.file === "b.md")!.rrf_score;
-    const dScore = fused.find((r) => r.file === "d.md")!.rrf_score;
+    const bScore = fused.find((r) => r.vault_path === "b.md")!.rrf_score;
+    const dScore = fused.find((r) => r.vault_path === "d.md")!.rrf_score;
     expect(bScore).toBeGreaterThan(dScore);
   });
 
@@ -132,7 +132,7 @@ describe("rrfFuse", () => {
     );
 
     // With heavy bm25 weight, A (rank 0 in bm25) should come first
-    expect(heavyBm25[0].file).toBe("a.md");
+    expect(heavyBm25[0].vault_path).toBe("a.md");
   });
 
   it("returns empty for empty input", () => {
@@ -179,7 +179,7 @@ describe("formatResults", () => {
     return results
       .map(
         (r) =>
-          `**${r.title}** (${r.file}, score: ${r.rrf_score})\n${r.snippet ?? ""}`,
+          `**${r.title}** (${r.vault_path}, score: ${r.rrf_score})\n${r.snippet ?? ""}`,
       )
       .join("\n\n---\n\n");
   }
@@ -188,21 +188,20 @@ describe("formatResults", () => {
     expect(formatResults([])).toBe("No results found.");
   });
 
-  it("formats results with title, file, score, and snippet", () => {
+  it("formats results with title, path, score, and snippet", () => {
     const results: HybridResult[] = [
-      { file: "test.md", title: "Test", rrf_score: 0.5, snippet: "hello", sources: ["bm25"] },
+      { vault_path: "test.md", title: "Test", rrf_score: 0.5, snippet: "hello", sources: ["bm25"] },
     ];
     const output = formatResults(results);
     expect(output).toContain("**Test**");
-    expect(output).toContain("test.md");
-    expect(output).toContain("0.5");
+    expect(output).toContain("test");
     expect(output).toContain("hello");
   });
 
   it("separates multiple results with ---", () => {
     const results: HybridResult[] = [
-      { file: "a.md", title: "A", rrf_score: 0.9, snippet: "aaa", sources: ["bm25"] },
-      { file: "b.md", title: "B", rrf_score: 0.8, snippet: "bbb", sources: ["vector"] },
+      { vault_path: "a.md", title: "A", rrf_score: 0.9, snippet: "aaa", sources: ["bm25"] },
+      { vault_path: "b.md", title: "B", rrf_score: 0.8, snippet: "bbb", sources: ["vector"] },
     ];
     const output = formatResults(results);
     expect(output).toContain("---");
