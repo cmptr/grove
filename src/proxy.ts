@@ -307,12 +307,58 @@ function handleOAuth(req: IncomingMessage, res: ServerResponse, url: URL): boole
 
       console.log(`OAuth code issued for key: ${key.name}`);
 
-      // Redirect back to Claude
       const redirect = new URL(redirectUri);
       redirect.searchParams.set("code", codeStr);
       if (state) redirect.searchParams.set("state", state);
-      res.writeHead(302, { Location: redirect.toString() });
-      res.end();
+      const callbackUrl = redirect.toString();
+
+      // Non-localhost (e.g. claude.ai) — standard 302
+      if (redirect.hostname !== "localhost" && redirect.hostname !== "127.0.0.1") {
+        res.writeHead(302, { Location: callbackUrl });
+        res.end();
+        return;
+      }
+
+      // Localhost — the MCP client should have a callback server running.
+      // Serve a success page that redirects via JS. If the client is listening,
+      // the redirect completes and the client shows its own close-tab page.
+      // If not, the user sees "Authorized" instead of "site can't be reached"
+      // and can copy the callback URL to paste into Claude Code manually.
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end(`<!DOCTYPE html>
+<html><head><title>Grove — Authorized</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, system-ui, sans-serif; min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #FAF7F2; color: #2C2416; padding: 20px; }
+  .card { width: 100%; max-width: 400px; text-align: center; }
+  .check { color: #7A8B5C; font-size: 48px; margin-bottom: 16px; }
+  h1 { font-family: 'Lora', Georgia, serif; font-size: 28px; font-weight: 500; margin-bottom: 8px; letter-spacing: -0.01em; }
+  p { color: #2C2416aa; font-size: 14px; line-height: 1.6; margin-bottom: 20px; }
+  .url { display: none; padding: 12px 16px; font-size: 12px; font-family: 'SF Mono', 'Fira Code', monospace; background: white; border: 1px solid #2C241620; border-radius: 4px; word-break: break-all; text-align: left; margin: 16px 0; cursor: pointer; user-select: all; }
+  .url:hover { border-color: #7A8B5C; }
+  .hint { display: none; font-size: 12px; color: #2C241660; }
+</style></head>
+<body>
+  <div class="card">
+    <div class="check">&#10003;</div>
+    <h1>Authorized</h1>
+    <p id="status">Connecting to your client&hellip;</p>
+    <div class="url" id="url">${callbackUrl}</div>
+    <p class="hint" id="hint">Copy this URL and paste it into Claude Code to complete setup.</p>
+  </div>
+  <script>
+    setTimeout(() => { window.location.href = ${JSON.stringify(callbackUrl)}; }, 600);
+    setTimeout(() => {
+      // If we're still here after 3s, the redirect didn't work
+      document.getElementById("status").textContent = "You can close this tab.";
+      document.getElementById("url").style.display = "block";
+      document.getElementById("hint").style.display = "block";
+    }, 3000);
+  </script>
+</body></html>`);
     }).catch(() => sendJson(res, 400, { error: "invalid_request" }));
     return true;
   }
