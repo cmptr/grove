@@ -129,6 +129,15 @@ CREATE TABLE IF NOT EXISTS oauth_codes (
   code_challenge_method TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS auth_codes (
+  id TEXT PRIMARY KEY,
+  code_hash TEXT NOT NULL UNIQUE,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  expires_at TEXT NOT NULL,
+  used_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 `;
 
 export function createSchema(): void {

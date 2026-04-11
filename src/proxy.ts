@@ -30,6 +30,8 @@ import {
   validateSession,
   destroySession,
   createSession as createAuthSession,
+  createAuthCode,
+  exchangeAuthCode,
   generateCsrfToken,
   validateCsrfToken,
   setSessionCookie,
@@ -427,7 +429,7 @@ function proxyToQmd(req: IncomingMessage, res: ServerResponse) {
   req.pipe(proxyReq);
 }
 
-function verifyPage(token: string, email: string, csrf: string): string {
+function verifyPage(token: string, email: string, csrf: string, redirect: string = ""): string {
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Grove — Confirm Sign In</title>
@@ -449,6 +451,7 @@ function verifyPage(token: string, email: string, csrf: string): string {
     <input type="hidden" name="token" value="${token}">
     <input type="hidden" name="email" value="${email}">
     <input type="hidden" name="csrf" value="${csrf}">
+    <input type="hidden" name="redirect" value="${redirect}">
     <button type="submit">Confirm Sign In</button>
   </form>
 </div>
@@ -752,9 +755,10 @@ const server = createServer(async (req, res) => {
     let parsed: any;
     try { parsed = JSON.parse(body); } catch { sendJson(res, 400, { error: "invalid json" }); return; }
     const email = parsed.email;
+    const redirect = parsed.redirect;
     if (!email || typeof email !== "string") { sendJson(res, 400, { error: "email required" }); return; }
     try {
-      await requestMagicLink(email, GROVE_URL);
+      await requestMagicLink(email, GROVE_URL, redirect);
     } catch (err) {
       console.error("[auth] magic link error:", err);
     }
@@ -766,6 +770,7 @@ const server = createServer(async (req, res) => {
   if (url.pathname === "/auth/verify" && req.method === "GET") {
     const token = url.searchParams.get("token") ?? "";
     const email = url.searchParams.get("email") ?? "";
+    const redirect = url.searchParams.get("redirect") ?? "";
     if (!token || !email) {
       res.writeHead(400, { "Content-Type": "text/html" });
       res.end("<!DOCTYPE html><html><body><p>Invalid link.</p></body></html>");
@@ -773,7 +778,7 @@ const server = createServer(async (req, res) => {
     }
     const csrf = generateCsrfToken();
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-    res.end(verifyPage(token, email, csrf));
+    res.end(verifyPage(token, email, csrf, redirect));
     return;
   }
 
@@ -784,6 +789,7 @@ const server = createServer(async (req, res) => {
     const token = params.get("token") ?? "";
     const email = params.get("email") ?? "";
     const csrf = params.get("csrf") ?? "";
+    const redirect = params.get("redirect") ?? "";
 
     if (!validateCsrfToken(csrf)) {
       res.writeHead(403, { "Content-Type": "text/html; charset=utf-8" });
@@ -798,9 +804,28 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // If redirect to grove.md, use auth code flow
+    if (redirect && redirect.startsWith("https://grove.md")) {
+      const code = createAuthCode(result.user.id);
+      res.writeHead(302, { "Location": `${redirect}?code=${code}` });
+      res.end();
+      return;
+    }
+
     setSessionCookie(res, result.sessionToken);
     res.writeHead(302, { "Location": "/" });
     res.end();
+    return;
+  }
+
+  if (url.pathname === "/auth/exchange" && req.method === "GET") {
+    const code = url.searchParams.get("code") ?? "";
+    if (!code) { sendJson(res, 400, { error: "code required" }); return; }
+    const result = exchangeAuthCode(code);
+    if (!result) { sendJson(res, 401, { error: "invalid or expired code" }); return; }
+    // Set session cookie so the caller can make authenticated requests (e.g. create keys)
+    setSessionCookie(res, result.sessionToken);
+    sendJson(res, 200, { session_token: result.sessionToken, user: result.user });
     return;
   }
 
