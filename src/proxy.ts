@@ -307,65 +307,12 @@ function handleOAuth(req: IncomingMessage, res: ServerResponse, url: URL): boole
 
       console.log(`OAuth code issued for key: ${key.name}`);
 
-      // Build the callback URL
+      // Redirect back to Claude
       const redirect = new URL(redirectUri);
       redirect.searchParams.set("code", codeStr);
       if (state) redirect.searchParams.set("state", state);
-      const callbackUrl = redirect.toString();
-
-      // If redirect is localhost, show a page that attempts the redirect
-      // but falls back to displaying the code if the local server isn't running
-      if (redirect.hostname === "localhost" || redirect.hostname === "127.0.0.1") {
-        res.writeHead(200, { "Content-Type": "text/html" });
-        res.end(`<!DOCTYPE html>
-<html><head><title>Grove — Connected</title>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;500;600&display=swap" rel="stylesheet">
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: -apple-system, system-ui, sans-serif; min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #FAF7F2; color: #2C2416; padding: 20px; }
-  .card { width: 100%; max-width: 440px; text-align: center; }
-  h1 { font-family: 'Lora', Georgia, serif; font-size: 28px; font-weight: 500; margin-bottom: 8px; letter-spacing: -0.01em; }
-  p { color: #2C2416aa; font-size: 14px; line-height: 1.6; margin-bottom: 20px; }
-  .spinner { display: inline-block; width: 20px; height: 20px; border: 2px solid #2C241620; border-top-color: #7A8B5C; border-radius: 50%; animation: spin 0.6s linear infinite; margin-right: 8px; vertical-align: middle; }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  #redirecting { display: block; }
-  #fallback { display: none; }
-  code { display: block; padding: 14px 16px; font-size: 13px; font-family: 'SF Mono', 'Fira Code', monospace; background: white; border: 1px solid #2C241620; border-radius: 4px; word-break: break-all; text-align: left; margin: 12px 0; user-select: all; cursor: text; }
-  button { padding: 10px 20px; font-size: 14px; font-weight: 600; background: #2C2416; color: #FAF7F2; border: none; border-radius: 4px; cursor: pointer; letter-spacing: 0.02em; transition: background 0.15s; }
-  button:hover { background: #3D3524; }
-  .check { color: #7A8B5C; font-size: 32px; margin-bottom: 12px; }
-</style></head>
-<body>
-  <div class="card">
-    <div id="redirecting">
-      <h1>Grove</h1>
-      <p><span class="spinner"></span> Connecting to your client&hellip;</p>
-    </div>
-    <div id="fallback">
-      <div class="check">&#10003;</div>
-      <h1>Authorized</h1>
-      <p>Your client's callback server isn't reachable. Copy this code and paste it into your client:</p>
-      <code>${codeStr}</code>
-      <button onclick="navigator.clipboard.writeText('${codeStr}')">Copy code</button>
-    </div>
-  </div>
-  <script>
-    // Try the redirect — if it fails (no local server), show the code
-    fetch("${callbackUrl}", { mode: "no-cors" })
-      .then(() => { window.location.href = "${callbackUrl}"; })
-      .catch(() => {
-        document.getElementById("redirecting").style.display = "none";
-        document.getElementById("fallback").style.display = "block";
-      });
-  </script>
-</body></html>`);
-      } else {
-        // Non-localhost redirect (e.g. claude.ai) — direct 302
-        res.writeHead(302, { Location: callbackUrl });
-        res.end();
-      }
+      res.writeHead(302, { Location: redirect.toString() });
+      res.end();
     }).catch(() => sendJson(res, 400, { error: "invalid_request" }));
     return true;
   }
