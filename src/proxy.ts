@@ -24,6 +24,20 @@ import { homedir } from "node:os";
 import { createKey, revokeKey, isExpired, hashToken, updateLastUsed, type StoredKey } from "./keys.js";
 import { getDb } from "./db.js";
 import { runMigration } from "./db.js";
+import {
+  requestMagicLink,
+  verifyMagicLink,
+  validateSession,
+  destroySession,
+  createSession as createAuthSession,
+  generateCsrfToken,
+  validateCsrfToken,
+  setSessionCookie,
+  clearSessionCookie,
+  getSessionFromCookie,
+  cleanupExpiredAuth,
+  seedAdminEmail,
+} from "./auth.js";
 import { generateRequestId, log as structuredLog, auditRead, auditWrite } from "./logger.js";
 import { metrics } from "./metrics.js";
 import { resolveTrail, type TrailConfig } from "./trails.js";
@@ -40,31 +54,17 @@ const GROVE_URL = process.env.GROVE_URL ?? "https://api.grove.md";
 
 const rateLimiter = new RateLimiter({ reads: 120, writes: 20, windowMs: 60_000 });
 
-// ── Admin auth: session cookie with TTL ─────────────────────────────
+// ── Admin auth: persistent session cookie (SQLite) + Bearer fallback ──
 const GROVE_ADMIN_KEY = process.env.GROVE_ADMIN_KEY; // optional: restrict admin to a specific key name
-const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
-const adminSessions = new Map<string, { keyId: string; keyName: string; expiresAt: number }>();
-
-function createAdminSession(key: StoredKey): string {
-  const sessionId = randomBytes(32).toString("hex");
-  adminSessions.set(sessionId, {
-    keyId: key.id,
-    keyName: key.name,
-    expiresAt: Date.now() + SESSION_TTL_MS,
-  });
-  return sessionId;
-}
 
 function adminAuth(req: IncomingMessage): { keyId: string; keyName: string } | null {
-  // Check session cookie first
-  const cookies = req.headers.cookie ?? "";
-  const sessionMatch = cookies.match(/grove_session=([a-f0-9]+)/);
-  if (sessionMatch) {
-    const session = adminSessions.get(sessionMatch[1]!);
-    if (session && session.expiresAt > Date.now()) {
-      return { keyId: session.keyId, keyName: session.keyName };
+  // Check session cookie first (persistent in SQLite)
+  const sessionToken = getSessionFromCookie(req);
+  if (sessionToken) {
+    const user = validateSession(sessionToken);
+    if (user) {
+      return { keyId: user.id, keyName: user.username ?? user.email };
     }
-    if (session) adminSessions.delete(sessionMatch[1]!); // expired
   }
   // Fall back to Bearer token
   const authHeader = req.headers.authorization;
@@ -429,6 +429,34 @@ function proxyToQmd(req: IncomingMessage, res: ServerResponse) {
   req.pipe(proxyReq);
 }
 
+function verifyPage(token: string, email: string, csrf: string): string {
+  return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Grove — Confirm Sign In</title>
+<link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:-apple-system,system-ui,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#FAF7F2;color:#2C2416;padding:20px}
+  .card{width:100%;max-width:400px}
+  h1{font-family:'Lora',Georgia,serif;font-size:28px;font-weight:500;margin-bottom:8px;letter-spacing:-0.01em}
+  p{color:#2C2416aa;font-size:14px;line-height:1.6;margin-bottom:24px}
+  .email{font-weight:600;color:#2C2416}
+  button{width:100%;padding:14px;font-size:14px;font-weight:600;background:#2C2416;color:#FAF7F2;border:none;border-radius:4px;cursor:pointer;letter-spacing:0.02em;transition:background 0.15s}
+  button:hover{background:#3D3524}
+</style></head><body>
+<div class="card">
+  <h1>Grove</h1>
+  <p>Sign in as <span class="email">${email}</span></p>
+  <form method="POST" action="/auth/verify">
+    <input type="hidden" name="token" value="${token}">
+    <input type="hidden" name="email" value="${email}">
+    <input type="hidden" name="csrf" value="${csrf}">
+    <button type="submit">Confirm Sign In</button>
+  </form>
+</div>
+</body></html>`;
+}
+
 function setupPage(keyName: string | null): string {
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -466,7 +494,13 @@ function setupPage(keyName: string | null): string {
 
 <div id="auth-section">
   <div class="section">
-    <h2>Authenticate</h2>
+    <h2>Sign in with Email</h2>
+    <input type="email" id="email-input" placeholder="you@example.com" />
+    <button onclick="magicLink()">Send magic link</button>
+    <div id="magic-link-msg" style="display:none" class="note"></div>
+  </div>
+  <div class="section">
+    <h2>Or use an API key</h2>
     <input type="password" id="token-input" placeholder="Paste your API key (grove_live_...)" />
     <button onclick="auth()">Sign in</button>
     <p class="note">Need a key? Run <code>grove keys create my-key</code> from any device with an existing key.</p>
@@ -491,20 +525,51 @@ function setupPage(keyName: string | null): string {
 
 <script>
 let bearerToken = null;
+// Check for existing session on page load
+fetch('/auth/session').then(r => r.ok ? r.json() : null).then(d => {
+  if (d && d.user) {
+    document.getElementById('auth-section').style.display = 'none';
+    document.getElementById('authed').style.display = 'block';
+    loadKeys();
+  }
+});
+function magicLink() {
+  const email = document.getElementById('email-input').value.trim();
+  if (!email) return;
+  const msg = document.getElementById('magic-link-msg');
+  fetch('/auth/magic-link', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email }),
+  }).then(r => r.json()).then(() => {
+    msg.textContent = 'Check your email for a sign-in link.';
+    msg.style.display = 'block';
+  });
+}
 function auth() {
   bearerToken = document.getElementById('token-input').value.trim();
   if (!bearerToken) return;
-  fetch('/health', { headers: { 'Authorization': 'Bearer ' + bearerToken } })
-    .then(() => {
+  fetch('/admin/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ api_key: bearerToken }),
+  }).then(r => {
+    if (r.ok) {
       document.getElementById('auth-section').style.display = 'none';
       document.getElementById('authed').style.display = 'block';
       loadKeys();
-    });
+    }
+  });
+}
+function authHeaders() {
+  var h = { 'Content-Type': 'application/json' };
+  if (bearerToken) h['Authorization'] = 'Bearer ' + bearerToken;
+  return h;
 }
 function loadKeys() {
   fetch('/keys', {
     method: 'POST',
-    headers: { 'Authorization': 'Bearer ' + bearerToken, 'Content-Type': 'application/json' },
+    headers: authHeaders(),
     body: JSON.stringify({ action: 'list' }),
   }).then(r => r.json()).then(d => {
     const keys = d.keys || [];
@@ -522,7 +587,7 @@ function revokeKey(id) {
   if (!confirm('Revoke key ' + id + '?')) return;
   fetch('/keys', {
     method: 'POST',
-    headers: { 'Authorization': 'Bearer ' + bearerToken, 'Content-Type': 'application/json' },
+    headers: authHeaders(),
     body: JSON.stringify({ action: 'revoke', id }),
   }).then(() => loadKeys());
 }
@@ -531,7 +596,7 @@ function createKey() {
   if (!name) return;
   fetch('/keys', {
     method: 'POST',
-    headers: { 'Authorization': 'Bearer ' + bearerToken, 'Content-Type': 'application/json' },
+    headers: authHeaders(),
     body: JSON.stringify({ action: 'create', name }),
   }).then(r => r.json()).then(d => {
     if (d.token) {
@@ -658,7 +723,7 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  // ── Admin login (POST /admin/login — creates session cookie) ──
+  // ── Admin login (POST /admin/login — creates persistent session cookie) ──
   if (url.pathname === "/admin/login" && req.method === "POST") {
     let body: string;
     try { body = await readBody(req); } catch { sendJson(res, 400, { error: "read error" }); return; }
@@ -667,12 +732,87 @@ const server = createServer(async (req, res) => {
     const apiKey = parsed.api_key ?? "";
     const key = validateToken(apiKey);
     if (!key) { sendJson(res, 401, { error: "invalid key" }); return; }
-    const sessionId = createAdminSession(key);
-    res.writeHead(200, {
-      "Content-Type": "application/json",
-      "Set-Cookie": `grove_session=${sessionId}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`,
-    });
-    res.end(JSON.stringify({ ok: true, name: key.name }));
+    // Find the user who owns this key and create a persistent session
+    const keyOwner = getDb().prepare("SELECT id FROM users WHERE id = ?").get(key.user_id) as { id: string } | undefined;
+    const sessionToken = createAuthSession(keyOwner?.id ?? key.user_id);
+    setSessionCookie(res, sessionToken);
+    sendJson(res, 200, { ok: true, name: key.name });
+    return;
+  }
+
+  // ── Magic link auth routes ──────────────────────────────────────
+  if (url.pathname === "/auth/magic-link" && req.method === "POST") {
+    let body: string;
+    try { body = await readBody(req); } catch { sendJson(res, 400, { error: "read error" }); return; }
+    let parsed: any;
+    try { parsed = JSON.parse(body); } catch { sendJson(res, 400, { error: "invalid json" }); return; }
+    const email = parsed.email;
+    if (!email || typeof email !== "string") { sendJson(res, 400, { error: "email required" }); return; }
+    try {
+      await requestMagicLink(email, GROVE_URL);
+    } catch (err) {
+      console.error("[auth] magic link error:", err);
+    }
+    // Always return success to prevent email enumeration
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  if (url.pathname === "/auth/verify" && req.method === "GET") {
+    const token = url.searchParams.get("token") ?? "";
+    const email = url.searchParams.get("email") ?? "";
+    if (!token || !email) {
+      res.writeHead(400, { "Content-Type": "text/html" });
+      res.end("<!DOCTYPE html><html><body><p>Invalid link.</p></body></html>");
+      return;
+    }
+    const csrf = generateCsrfToken();
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(verifyPage(token, email, csrf));
+    return;
+  }
+
+  if (url.pathname === "/auth/verify" && req.method === "POST") {
+    let body: string;
+    try { body = await readBody(req); } catch { sendJson(res, 400, { error: "read error" }); return; }
+    const params = new URLSearchParams(body);
+    const token = params.get("token") ?? "";
+    const email = params.get("email") ?? "";
+    const csrf = params.get("csrf") ?? "";
+
+    if (!validateCsrfToken(csrf)) {
+      res.writeHead(403, { "Content-Type": "text/html; charset=utf-8" });
+      res.end("<!DOCTYPE html><html><body><p>Invalid or expired request. <a href=\"/\">Try again</a></p></body></html>");
+      return;
+    }
+
+    const result = verifyMagicLink(token, email);
+    if (!result) {
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end("<!DOCTYPE html><html><body><p>This link is invalid or has expired. <a href=\"/\">Request a new one</a></p></body></html>");
+      return;
+    }
+
+    setSessionCookie(res, result.sessionToken);
+    res.writeHead(302, { "Location": "/" });
+    res.end();
+    return;
+  }
+
+  if (url.pathname === "/auth/session" && req.method === "GET") {
+    const sessionToken = getSessionFromCookie(req);
+    if (!sessionToken) { sendJson(res, 401, { error: "not authenticated" }); return; }
+    const user = validateSession(sessionToken);
+    if (!user) { sendJson(res, 401, { error: "session expired" }); return; }
+    sendJson(res, 200, { user: { id: user.id, username: user.username, email: user.email } });
+    return;
+  }
+
+  if (url.pathname === "/auth/logout" && req.method === "POST") {
+    const sessionToken = getSessionFromCookie(req);
+    if (sessionToken) destroySession(sessionToken);
+    clearSessionCookie(res);
+    sendJson(res, 200, { ok: true });
     return;
   }
 
@@ -1103,6 +1243,8 @@ const server = createServer(async (req, res) => {
 });
 
 runMigration();
+seedAdminEmail();
+cleanupExpiredAuth();
 
 const VAULT_PATH_PROXY = process.env.GROVE_VAULT ?? join(homedir(), "life");
 startStatsTimer(VAULT_PATH_PROXY);
