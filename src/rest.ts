@@ -367,17 +367,23 @@ export async function handleSearch(query: string, limit: number = 10, trail?: Tr
   const fetchLimit = trail ? limit * 3 : limit; // over-fetch for trail filtering
   const results = await hybridSearch(query, fetchLimit);
 
+  // Map to response shape — vault_path is the canonical lowercase path from QMD index
   let filtered = results.map((r) => ({
     path: r.file.replace(/^qmd:\/\/life\//, ""),
     title: r.title.replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_m, _target, display) => display ?? _target),
     snippet: r.snippet ?? "",
     score: r.rrf_score,
+    vault_path: r.vault_path, // lowercase path, e.g. "resources/concepts/agent-runtime.md"
   }));
 
   if (trail) {
+    // Resolve search results to listNotes entries for trail filtering.
+    // vault_path is lowercase-kebab from QMD index; filesystem uses Title Case with spaces.
+    // Match by: (1) case-insensitive vault_path, (2) title/name fallback.
     const allNotes = listNotes(VAULT_PATH, "*");
     filtered = filtered.filter((r) => {
-      const note = allNotes.find((n) => n.path === r.path || n.path === r.path + ".md" || n.name === r.title);
+      const vp = r.vault_path.toLowerCase();
+      const note = allNotes.find((n) => n.path.toLowerCase() === vp || n.name === r.title);
       if (!note) return false;
       const meta: NoteMetadata = {
         path: note.path,
@@ -389,7 +395,8 @@ export async function handleSearch(query: string, limit: number = 10, trail?: Tr
     });
   }
 
-  return filtered.slice(0, limit);
+  // Strip vault_path from response — it's internal
+  return filtered.slice(0, limit).map(({ vault_path: _, ...rest }) => rest);
 }
 
 const VALID_STATS_SECTIONS = new Set(["vault", "freshness", "graph", "index", "lifecycle", "search", "server"]);

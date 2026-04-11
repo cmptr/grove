@@ -120,14 +120,15 @@ Example: searches=[{type:'lex', query:'salary'}, {type:'vec', query:'how much do
       const results = await hybridSearch(queryText, fetchLimit);
       const totalFound = results.length;
 
-      // Trail prefilter: filter results by trail scope
+      // Trail prefilter: use vault_path (lowercase, from QMD index) for reliable matching
       let filtered = results;
       if (activeTrail) {
         const allNotes = listNotes(VAULT_PATH, "*");
         filtered = results.filter((r) => {
-          const filePath = r.file.replace(/^qmd:\/\/life\//, "");
-          // Resolve to actual vault path — filePath after qmd:// strip is often just the title
-          const note = allNotes.find((n) => n.path === filePath || n.path === filePath + ".md" || n.name === r.title);
+          // vault_path is lowercase-kebab from QMD index; filesystem uses Title Case with spaces.
+          // Match by: (1) case-insensitive vault_path, (2) title/name fallback.
+          const vp = r.vault_path.toLowerCase();
+          const note = allNotes.find((n) => n.path.toLowerCase() === vp || n.name === r.title);
           if (!note) return false;
           const absPath = join(VAULT_PATH, note.path);
           try {

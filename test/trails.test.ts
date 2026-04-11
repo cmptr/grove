@@ -248,12 +248,13 @@ describe("trail CRUD", () => {
   });
 });
 
-// ── Search result → note resolution (regression: qmd:// title format) ──
+// ── Search result → note resolution via vault_path ──────────────────
 
-describe("trail filter with search result paths", () => {
-  // Search results come back as qmd://life/<Title> — after stripping the
-  // prefix, we get just the title (e.g., "Multi-Agent Architecture"), NOT a
-  // filesystem path. Trail filtering must resolve by title/name, not just path.
+describe("trail filter with search result vault_path", () => {
+  // HybridResult.vault_path is the lowercase path from QMD's index
+  // (e.g., "resources/concepts/multi-agent-architecture.md").
+  // Trail filtering matches it case-insensitively against listNotes paths.
+  // This tests the full contract: search result → vault_path → note → trail filter.
 
   const trail = makeTrail({
     allow_tags: ["ai"],
@@ -267,15 +268,14 @@ describe("trail filter with search result paths", () => {
     { path: "Journal/2026/2026-04-01.md", name: "2026-04-01", type: "journal", tags: ["journal"], private: false },
   ];
 
-  // Simulates what handleSearch does after hybridSearch returns results
+  // Simulates the handleSearch trail filter logic (uses vault_path + title fallback)
   function filterSearchResults(
-    results: { path: string; title: string }[],
+    results: { vault_path: string; title: string }[],
   ) {
     return results.filter((r) => {
-      // This is the exact matching logic from rest.ts handleSearch
-      const note = allNotes.find(
-        (n) => n.path === r.path || n.path === r.path + ".md" || n.name === r.title,
-      );
+      // Exact logic from rest.ts/server.ts — vault_path match OR title/name fallback
+      const vp = r.vault_path.toLowerCase();
+      const note = allNotes.find((n) => n.path.toLowerCase() === vp || n.name === r.title);
       if (!note) return false;
       const meta: NoteMetadata = {
         path: note.path,
@@ -287,32 +287,40 @@ describe("trail filter with search result paths", () => {
     });
   }
 
-  it("resolves qmd:// title-only paths via name matching", () => {
-    // After stripping qmd://life/, search results have just the title
+  it("resolves lowercase vault_path to title-case listNotes path", () => {
+    // vault_path from QMD index is lowercase kebab-case
     const searchResults = [
-      { path: "Multi-Agent Architecture", title: "Multi-Agent Architecture" },
-      { path: "Agent Runtime", title: "Agent Runtime" },
+      { vault_path: "resources/concepts/multi-agent-architecture.md", title: "Multi-Agent Architecture" },
+      { vault_path: "resources/concepts/agent-runtime.md", title: "Agent Runtime" },
     ];
     const filtered = filterSearchResults(searchResults);
     expect(filtered).toHaveLength(2);
   });
 
-  it("FAILS if matching only by path (the old bug)", () => {
+  it("FAILS if matching vault_path case-sensitively (documents the risk)", () => {
     const searchResults = [
-      { path: "Multi-Agent Architecture", title: "Multi-Agent Architecture" },
+      { vault_path: "resources/concepts/multi-agent-architecture.md", title: "Multi-Agent Architecture" },
     ];
-    // Old code: only matched n.path === r.path — this would find nothing
-    const oldBugFilter = searchResults.filter((r) => {
-      const note = allNotes.find((n) => n.path === r.path || n.path === r.path + ".md");
+    // Exact match without lowercasing both sides would fail
+    const caseSensitiveFilter = searchResults.filter((r) => {
+      const note = allNotes.find((n) => n.path === r.vault_path);
       return !!note;
     });
-    expect(oldBugFilter).toHaveLength(0); // confirms the old bug
+    expect(caseSensitiveFilter).toHaveLength(0); // lowercase != title-case
   });
 
-  it("still applies trail filters after resolving by name", () => {
+  it("still applies trail filters after resolving vault_path", () => {
     // Journal entry should be filtered out by allow_paths + allow_types
     const searchResults = [
-      { path: "2026-04-01", title: "2026-04-01" },
+      { vault_path: "journal/2026/2026-04-01.md", title: "2026-04-01" },
+    ];
+    const filtered = filterSearchResults(searchResults);
+    expect(filtered).toHaveLength(0);
+  });
+
+  it("returns empty when vault_path doesn't match any note", () => {
+    const searchResults = [
+      { vault_path: "resources/concepts/nonexistent.md", title: "Nonexistent" },
     ];
     const filtered = filterSearchResults(searchResults);
     expect(filtered).toHaveLength(0);
