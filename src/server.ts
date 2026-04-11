@@ -76,7 +76,9 @@ Red links (to notes that don't exist yet) are fine — they're a backlog.
 
 Searching: Use query with lex (keyword) and vec (semantic) sub-queries. Provide intent for better snippets.
 
-Writing: Use write_note with proper frontmatter (type + tags required). Use if_hash for safe updates to existing notes.`;
+Writing: Use write_note with proper frontmatter (type + tags required). Use if_hash for safe updates to existing notes.
+
+URLs: Every note is viewable at https://grove.md/<path-without-.md>. Tool responses include a url field — always present that to the user. Never invent or guess URLs.`;
 
 // ── Create MCP server with all 6 tools ────────────────────────────
 
@@ -183,7 +185,8 @@ Use the content_hash as if_hash when updating the note.`,
         }
 
         const hash = contentHash(raw);
-        const result: Record<string, unknown> = { path: rel, frontmatter, content, content_hash: hash };
+        const url = `https://grove.md/${rel.replace(/\.md$/, "")}`;
+        const result: Record<string, unknown> = { path: rel, url, frontmatter, content, content_hash: hash };
         if (resolvedFrom) result.resolved_from = resolvedFrom;
         return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
       };
@@ -293,7 +296,8 @@ Examples: "Resources/People/*.md", "Journal/2026/*.md", "path1.md,path2.md"`,
             continue;
           }
         }
-        results.push({ path: entry.path, frontmatter, content: content.slice(0, 2000), content_hash: contentHash(raw) });
+        const url = `https://grove.md/${entry.path.replace(/\.md$/, "")}`;
+        results.push({ path: entry.path, url, frontmatter, content: content.slice(0, 2000), content_hash: contentHash(raw) });
       }
       return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
     },
@@ -331,7 +335,9 @@ RESOURCE NOTES should include a dataview backlink query:
   LIST FROM "Journal" WHERE contains(file.outlinks, this.file.link) SORT date DESC
   \`\`\`
 
-SAFE UPDATES — pass if_hash (from a prior get) to prevent overwriting concurrent changes. Omit for new notes.`,
+SAFE UPDATES — pass if_hash (from a prior get) to prevent overwriting concurrent changes. Omit for new notes.
+
+After writing, present the url field from the response to the user.`,
       inputSchema: {
         path: z.string().describe("File path relative to vault root (e.g., 'Resources/Concepts/Context Engineering.md')"),
         frontmatter: z.string().describe("YAML frontmatter as JSON string (e.g., '{\"type\":\"concept\",\"tags\":[\"concept\"]}')"),
@@ -398,7 +404,13 @@ SAFE UPDATES — pass if_hash (from a prior get) to prevent overwriting concurre
         // Refresh stats cache after write (fire-and-forget)
         refreshStats(VAULT_PATH).catch(() => {});
 
-        return { path: relPath, action, content_hash: contentHash(serialized), commit: sha };
+        return {
+          path: relPath,
+          action,
+          content_hash: contentHash(serialized),
+          commit: sha,
+          url: `https://grove.md/${relPath.replace(/\.md$/, "")}`,
+        };
       });
 
       // Fire-and-forget: re-embed the changed file

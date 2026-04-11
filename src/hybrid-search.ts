@@ -486,8 +486,10 @@ export function formatResults(results: HybridResult[]): string {
   if (results.length === 0) return "No results found.";
   return results
     .map(
-      (r) =>
-        `**${r.title}** (${r.file}, score: ${r.rrf_score})\n${r.snippet ?? ""}`
+      (r) => {
+        const url = `https://grove.md/${r.file.replace(/\.md$/, "")}`;
+        return `**${r.title}** (${url})\n${r.snippet ?? ""}`;
+      }
     )
     .join("\n\n---\n\n");
 }
