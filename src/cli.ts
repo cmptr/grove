@@ -17,8 +17,12 @@ import { request as httpRequest } from "node:http";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { execSync } from "node:child_process";
 import { readArchiveSources, planSync, normalizeDir } from "./sync-sources.js";
 import { loadTrails, createTrail, disableTrail, deleteTrail } from "./trails.js";
+
+// ── Vault path (local git operations) ────────────────────────────
+const VAULT_PATH = process.env.GROVE_VAULT ?? join(homedir(), "life");
 
 // ── Config ───────────────────────────────────────────────────────
 
@@ -545,6 +549,60 @@ function cmdTrailDelete(id: string) {
   else { console.error(`Trail not found: ${id}`); process.exit(1); }
 }
 
+// ── Snapshot / Rollback (local vault git operations) ─────────
+
+function cmdSnapshot(args: string[]) {
+  const subcommand = args[1];
+
+  if (subcommand === "list") {
+    const result = execSync("git tag -l 'grove-snapshot-*' --sort=-creatordate", { cwd: VAULT_PATH, encoding: "utf-8" });
+    const tags = result.trim().split("\n").filter(Boolean).slice(0, 10);
+    if (tags.length === 0) {
+      console.log("No snapshots found.");
+    } else {
+      console.log("Snapshots (most recent first):");
+      for (const tag of tags) {
+        console.log(`  ${tag}`);
+      }
+    }
+  } else {
+    const name = subcommand ?? "";
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const tagName = `grove-snapshot-${timestamp}`;
+    const msgArgs = name ? ["-m", name] : [];
+    execSync(`git tag ${tagName} ${msgArgs.map(a => `"${a}"`).join(" ")}`.trim(), { cwd: VAULT_PATH });
+    console.log(`Snapshot created: ${tagName}`);
+    if (name) console.log(`  Message: ${name}`);
+  }
+}
+
+function cmdRollback(tag: string) {
+  if (!tag) {
+    console.error("Usage: grove rollback <tag>");
+    console.error("  List snapshots: grove snapshot list");
+    process.exit(1);
+  }
+
+  // Verify tag exists
+  try {
+    execSync(`git rev-parse ${tag}`, { cwd: VAULT_PATH, stdio: "pipe" });
+  } catch {
+    console.error(`Tag not found: ${tag}`);
+    process.exit(1);
+  }
+
+  // Restore files to the tag's state
+  execSync(`git checkout ${tag} -- .`, { cwd: VAULT_PATH });
+
+  // Commit the rollback
+  execSync(`git add -A && git commit -m "grove (admin): rollback to ${tag}"`, {
+    cwd: VAULT_PATH,
+    shell: "/bin/sh",
+  });
+  console.log(`Rolled back to: ${tag}`);
+  console.log("Files restored and committed. Reindex may be needed.");
+}
+
 function printUsage() {
   console.log(`grove — CLI client for the Grove knowledge API
 
@@ -562,6 +620,9 @@ Usage:
   grove trails disable <trail-id>       Disable a trail
   grove trails delete <trail-id>        Delete a trail
   grove lint <dir> [--dry-run]          Normalize YAML frontmatter in .md files
+  grove snapshot [name]                 Create a vault snapshot (git tag)
+  grove snapshot list                   List recent snapshots
+  grove rollback <tag>                  Restore vault to a snapshot
   grove history [--since <date>]        Recent changes
   grove status                          Vault health
   grove diagnostics                     Run diagnostics
@@ -586,6 +647,8 @@ async function main() {
   }
 
   // Local-only commands (no server needed)
+  if (command === "snapshot") { cmdSnapshot(process.argv.slice(3)); return; }
+  if (command === "rollback") { cmdRollback(positional); return; }
   if (command === "lint") { cmdLint(positional, flags); return; }
   if (command === "trails") {
     const sub = positional || "list";
