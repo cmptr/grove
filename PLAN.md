@@ -14,7 +14,7 @@ Grove is a TypeScript API server that wraps a git-tracked Obsidian vault and exp
 **Depends on:** `@tobilu/qmd` (search engine), `@modelcontextprotocol/sdk` (MCP transport)
 **Deploys to:** AWS t3.medium at `api.grove.md` (52.37.76.231), frontend on Vercel at `grove.md`
 **Live:** Phases 0-5 complete, security hardened, observable, magic link auth, persistent sessions, S3 backups, cross-domain auth with grove.md
-**Next:** Portal knowledge views (P4-10+) → Discovery (Phase 7) → Multi-vault (Phase 8)
+**Next:** Ops dashboard (P4-4–P4-9) → Multi-user collaboration (Phase 9) → Knowledge views (P4-10+) → Discovery (Phase 7)
 
 ---
 
@@ -508,6 +508,68 @@ Trail management UI (P4-5), consumer onboarding pages (P4-8), and trail usage vi
 
 ---
 
+### Phase B: Magic Link Auth & Cross-Domain Sessions ✅ COMPLETE 2026-04-11
+
+**Goal:** Replace in-memory admin sessions with persistent SQLite-backed auth. Add magic link login as a path from "person with an email" to "authenticated user with an API key." Bridge auth between `api.grove.md` and `grove.md`.
+
+**What was built:**
+
+The auth system shifted from "single admin with a pasted API key" to "users with email-based identity and persistent sessions." This is the foundation that makes multi-user collaboration possible.
+
+**Auth architecture (new):**
+
+```
+grove.md/login                     api.grove.md
+┌──────────────┐                   ┌──────────────────────┐
+│ Email form   │───POST──────────→ │ /auth/magic-link     │
+│              │                   │ → store hashed token  │
+│              │                   │ → send email (Resend) │
+└──────────────┘                   └──────────────────────┘
+                                           │
+                                     email with link
+                                           │
+                                           ▼
+                                   ┌──────────────────────┐
+                                   │ /auth/verify (GET)    │
+                                   │ → confirm page + CSRF │
+                                   │ /auth/verify (POST)   │
+                                   │ → verify magic link   │
+                                   │ → create auth code    │
+                                   │ → redirect to grove.md│
+                                   └───────────┬──────────┘
+                                               │ 302 + ?code=
+                                               ▼
+grove.md/api/auth/callback         api.grove.md
+┌──────────────┐                   ┌──────────────────────┐
+│ Exchange code│───GET────────────→│ /auth/exchange       │
+│              │←── session_token ─│ → validate code      │
+│ Create key   │───POST───────────→│ /keys (create)       │
+│              │←── API key token ─│ → grove-www-<user>   │
+│ Set cookie   │                   └──────────────────────┘
+│ Redirect /   │
+└──────────────┘
+```
+
+**Key components:**
+- `src/auth.ts` — magic link requests (rate-limited 3/email/15min), verification (single-use, 15min TTL), session CRUD (30d sliding / 90d absolute), auth code exchange (60s TTL, single-use), CSRF tokens
+- `src/email.ts` — Resend API (prod) or console.log (dev)
+- `src/db.ts` — `users`, `sessions`, `magic_links`, `auth_codes` tables in `~/.grove/grove.db`
+- `src/proxy.ts` — 6 new routes (`/auth/magic-link`, `/auth/verify` GET+POST, `/auth/exchange`, `/auth/session`, `/auth/logout`)
+- `grove-www/src/app/login/page.tsx` — email + API key dual login form
+- `grove-www/src/app/api/auth/callback/route.ts` — code exchange + auto key provisioning
+- `grove-www/src/app/api/auth/magic-link/route.ts` — server-side proxy (avoids CORS)
+
+**Security properties:**
+- Raw tokens never stored — SHA-256 hashes only (magic links, sessions, auth codes)
+- Magic links: single-use, 15min TTL, 3/email/15min rate limit
+- Sessions: HttpOnly, Secure, SameSite=Lax cookies, sliding + absolute expiry
+- Auth codes: single-use, 60s TTL (just long enough for the redirect)
+- No email enumeration: requestMagicLink always returns 200
+
+**What this enables:** Users exist as first-class entities in the database. A person with only an email can get authenticated, get an API key, and access the vault. This is the primitive that multi-user collaboration (Phase 9) builds on.
+
+---
+
 ### Phase 8: Multi-Vault (deferred)
 
 **Goal:** Add additional vaults (e.g., work vault `~/canva/`) as separate queryable indexes.
@@ -521,6 +583,106 @@ This was originally Phase 2 but deferred — trails and discovery are higher imp
 - [ ] **P8-3: Read-only vaults** — config flag, 403 on writes
 - [ ] **P8-4: Cross-vault search** — merged RRF, tagged results
 - [ ] **P8-5: Graph isolation** — per-vault backlinks, opt-in cross-vault traversal
+
+---
+
+### Phase 9: Multi-User & Collaboration
+
+**Goal:** Move Grove from "one vault owner sharing read-only trails" to "multiple users with their own identities, permissions, and collaborative workflows."
+
+**Prerequisites:** Phase B (magic link auth) complete. Phase 4b (ops dashboard) in progress or complete.
+
+**Context:** Phase B established the foundation — users exist in the database, magic links create identity, sessions persist. But today there's exactly one user (`user_00000000`), everyone shares the same vault, and "collaboration" means handing someone a trail-scoped read-only key. This phase builds the layers that turn Grove into something multiple people can use together.
+
+#### The collaboration spectrum
+
+Not every user needs the same access. The phases below build progressively:
+
+1. **Invited readers** — owner shares a note or trail, recipient signs in with email, reads scoped content on `grove.md`
+2. **Commenters/annotators** — readers can leave notes/reactions on shared content (stored separately from the vault)
+3. **Contributors** — trusted users can write to specific paths in the vault (e.g., a shared project area)
+4. **Vault owners** — each user has their own vault, hosted on Grove (multi-tenant)
+
+Phase 9 covers (1) and (2). Steps (3) and (4) are Phase 10+ territory.
+
+#### Phase 9a: User Management
+
+- [ ] **P9-1: User roles**
+  Add `role` column to users table. Roles: `owner` (full access), `member` (trail-scoped access), `viewer` (read-only trail access). Owner is the vault admin. Members and viewers are invited by email.
+
+- [ ] **P9-2: Invite flow**
+  `grove invite <email> --trail <trail-id> --role viewer` CLI command. Creates user record if needed (email only, no password). Sends magic link email with a welcome message. On first login, user gets a scoped API key for their assigned trail.
+
+  API: `POST /admin/invite` — creates user + trail grant + sends magic link. Requires owner auth.
+
+- [ ] **P9-3: User-scoped keys**
+  Today all keys are owned by `user_00000000`. After P9-3, keys are scoped to their creating user. A viewer's auto-provisioned key only grants access to the trails they've been invited to. The `adminAuth()` function checks user role — only `owner` can manage keys and trails.
+
+- [ ] **P9-4: User management UI**
+  Page on `grove.md` (owner-only): list users, invite new users, assign trails, revoke access. Shows: email, role, last login, assigned trails, key count.
+
+#### Phase 9b: Trail Sharing UX
+
+- [ ] **P9-5: Shareable trail links**
+  Public onboarding page per trail: `grove.md/trails/<trail-slug>`. Shows trail name, description, note count, and a "Sign in to access" button. No login required to see the page — but reading notes requires auth.
+
+  For MCP users: the page shows copy-paste connection config for Claude.ai, Cursor, etc.
+
+  For web users: "Sign in with email" → magic link → lands on `grove.md` with trail-scoped access.
+
+- [ ] **P9-6: Trail-scoped grove.md experience**
+  When a viewer/member signs in via a trail link, their `grove.md` session is scoped to that trail. They see the trail name in the header, search only returns trail-visible notes, and navigation is limited to trail-allowed paths. The sidebar/breadcrumbs only show what they can access.
+
+  Implementation: the auto-provisioned API key has trail-scoped access. The existing server-side filtering handles the rest — no frontend logic needed beyond showing the trail context.
+
+- [ ] **P9-7: Share-a-note links**
+  Owner can generate a shareable link to a specific note: `grove.md/s/<short-id>`. The link creates a temporary trail scoped to that single note (and its immediate backlinks). Recipient signs in with email, sees the note. Link expires after a configurable TTL (default 7 days).
+
+  Implementation: a `shared_links` table with `note_path`, `created_by`, `expires_at`, `max_views`. The share creates a micro-trail at access time.
+
+#### Phase 9c: Annotations & Reactions
+
+- [ ] **P9-8: Annotations layer**
+  Viewers and members can leave annotations on notes. Annotations are stored in Grove's SQLite database (not in the vault markdown). Schema:
+  ```sql
+  CREATE TABLE annotations (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    note_path TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT
+  );
+  ```
+  Annotations appear on `grove.md` below the note content. The vault owner sees all annotations; viewers see their own + the owner's replies.
+
+- [ ] **P9-9: Annotation API**
+  `POST /v1/notes/:path/annotations` — create annotation (requires auth, any role).
+  `GET /v1/notes/:path/annotations` — list annotations (filtered by visibility rules).
+  `DELETE /v1/notes/:path/annotations/:id` — delete own annotation or any (owner only).
+
+- [ ] **P9-10: Annotation notifications**
+  When someone annotates a note, the vault owner gets an email summary (batched daily, not per-annotation). Configurable: per-trail notification settings.
+
+#### Phase 9 Design Decisions
+
+| Decision | Chosen | Why |
+|----------|--------|-----|
+| User creation | Invite-only (owner sends magic link) | No public signup. Grove is private-first. Access is granted, not requested. |
+| Annotation storage | Grove SQLite, not vault markdown | Annotations are social metadata, not knowledge. They shouldn't pollute the vault's git history or show up in Claude's MCP tools. |
+| Viewer experience | Trail-scoped grove.md, same codebase | No separate app for viewers. The existing grove-www handles it — the API key's trail scope does the filtering. |
+| Share links | Micro-trails, not public URLs | Even shared notes require email auth. No anonymous access. This is a deliberate privacy choice. |
+| Roles | owner/member/viewer | Minimal. Don't add "editor", "admin", "moderator" until there's a real need. Three roles cover the collaboration spectrum for now. |
+
+#### Phase 9 Success Criteria
+
+- Owner invites a collaborator by email → they receive a magic link → click it → land on grove.md seeing only their trail's notes
+- Viewer searches and only gets trail-scoped results (no leaks)
+- Viewer leaves an annotation on a note → owner sees it on grove.md and in a daily email
+- Share-a-note link works: recipient opens it, signs in, sees the note + backlinks
+- Share link expires after TTL — accessing it returns "link expired"
+- Owner can see all users, their roles, last login, and assigned trails in the management UI
+- Revoking a user's access immediately invalidates their keys and sessions
 
 ---
 
@@ -556,7 +718,11 @@ Decisions made during planning. Reference these when implementing — don't re-l
 | Monitoring | BetterStack | Grafana Cloud, custom-built | Free tier covers this scale. Uptime + logs + alerting in one product. |
 | Metrics format | JSON `/metrics` endpoint | Prometheus exposition | No scraper needed at this scale. Internal counters serve the dashboard directly. |
 | Dashboard data source | Internal counters | BetterStack API | Avoids external dependency for own dashboard. Counters reset on restart (fine). Daily rollups to SQLite for history. |
-| Admin auth | Admin key in env var + session cookie | GitHub OAuth, passkey | Simple for single-user. Evaluate hardening when trail consumers are real. |
+| Admin auth | Magic link + API key + persistent SQLite sessions | GitHub OAuth, passkey, JWT | Magic links are frictionless and establish email identity. Sessions survive restarts. Foundation for multi-user. |
+| Cross-domain auth | Auth code exchange (one-time code redirect) | Shared cookie domain, iframe, proxy all requests | Auth codes are single-use, 60s TTL, don't require same domain. Frontend keeps working with Bearer auth unchanged. |
+| Email delivery | Resend API (one fetch call) | SES, Mailgun, custom SMTP | Minimal integration — one fetch, no SDK. Dev mode falls back to console.log. |
+| Annotation storage | Grove SQLite (not vault markdown) | Inline in notes, separate annotation files | Social metadata shouldn't pollute vault git history or appear in MCP tools. |
+| User creation | Invite-only (owner sends magic link) | Public signup, OAuth providers | Grove is private-first. Access is granted, not requested. |
 | LLM judge | Deferred (Phase 6) | Ship with trails, rule-based only | Expert panel: prefilter covers 90%, LLM adds latency and fragility. Ship without, add when proven needed. |
 | Ollama binding | 127.0.0.1 only, cgroup-limited | 0.0.0.0 (default) | Default binds to all interfaces — security risk. Cgroup prevents resource starvation of main app. |
 | Consumer discovery | `filtered_count` in responses | Hide filtering entirely | Consumers should know results are scoped so they can request broader access. |
@@ -592,9 +758,9 @@ Decisions made during planning. Reference these when implementing — don't re-l
 
 5. ~~**Auto-embed on vault change:**~~ **Resolved.** Phase 1b (P1-10) added fire-and-forget `embedFile()` after write_note.
 
-6. **Tag hygiene for trails:** How many vault notes have no tags or inconsistent tags? If coverage is low, path-based filtering may need to be the primary mechanism for trails, not tags. Run audit before Phase 5 ships (P5-7).
+6. ~~**Tag hygiene for trails:**~~ **Resolved.** 15% tag coverage (160/1083 notes). Path-based filtering is the primary mechanism. Tags supplement but don't carry trails alone. Current trail config uses both — working correctly.
 
-7. ~~**Admin dashboard exposure:**~~ **Resolved.** Portal is a separate Next.js app on Vercel, not a route on the API server. Owner auth via admin key + JWT session. Trail consumer onboarding pages are public (unauthenticated). No multi-user auth needed yet.
+7. ~~**Admin dashboard exposure:**~~ **Resolved.** Portal is grove-www on Vercel. Auth via magic link + API key with persistent sessions. Cross-domain auth code exchange bridges api.grove.md and grove.md.
 
 8. **Ollama GPU sharing:** TEI uses ~1GB VRAM on the T4 (16GB). Ollama + Qwen2.5-3B needs ~3-4GB. Should be fine, but needs load testing under concurrent requests (search embedding + judge inference simultaneously). Deferred to Phase 6.
 
@@ -667,3 +833,11 @@ Decisions made during planning. Reference these when implementing — don't re-l
 **Phase 6** — LLM judge (deferred until trail edge cases prove the need)
 **Phase 7** — Discovery & onboarding (background discovery loop, concept extraction, bookmark integration)
 **Phase 8** — Multi-vault (work vault, cross-vault search)
+
+**Phase 9 — Multi-User & Collaboration (after Phase 4b):**
+1. **P9-1 + P9-2 + P9-3** — User roles, invite flow, user-scoped keys (foundational, build together)
+2. **P9-4** — User management UI on grove.md (depends on P9-1-3)
+3. **P9-5 + P9-6** — Shareable trail links + trail-scoped grove.md experience (parallel)
+4. **P9-7** — Share-a-note links with micro-trails
+5. **P9-8 + P9-9** — Annotations layer + API (parallel)
+6. **P9-10** — Annotation notifications (after annotations work)
