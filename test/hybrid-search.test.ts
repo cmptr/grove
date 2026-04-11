@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { stripWikilinks } from "../src/hybrid-search.js";
 
 // ── RRF Fusion logic ────────────────────────────────────────────────
 // Re-implement the pure rrfFuse function for testing since it's not exported.
@@ -137,6 +138,35 @@ describe("rrfFuse", () => {
   it("returns empty for empty input", () => {
     const fused = rrfFuse([], 10);
     expect(fused).toEqual([]);
+  });
+});
+
+// ── stripWikilinks ──────────────────────────────────────────────────
+
+describe("stripWikilinks", () => {
+  it("strips simple wikilinks", () => {
+    expect(stripWikilinks("about [[Anxiety]]")).toBe("about Anxiety");
+  });
+
+  it("strips piped wikilinks using display text", () => {
+    expect(stripWikilinks("[[Anxiety & Fear Management|Anxiety]]")).toBe("Anxiety");
+  });
+
+  it("strips multiple wikilinks in one string", () => {
+    expect(stripWikilinks("[[Mila]] and [[Nina]]")).toBe("Mila and Nina");
+  });
+
+  it("handles mixed piped and simple wikilinks", () => {
+    expect(stripWikilinks("Organizational Changes and [[Anxiety & Fear Management|Anxiety]]"))
+      .toBe("Organizational Changes and Anxiety");
+  });
+
+  it("returns string unchanged when no wikilinks", () => {
+    expect(stripWikilinks("plain text")).toBe("plain text");
+  });
+
+  it("handles empty string", () => {
+    expect(stripWikilinks("")).toBe("");
   });
 });
 
