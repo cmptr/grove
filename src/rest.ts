@@ -377,7 +377,7 @@ export async function handleSearch(query: string, limit: number = 10, trail?: Tr
   if (trail) {
     const allNotes = listNotes(VAULT_PATH, "*");
     filtered = filtered.filter((r) => {
-      const note = allNotes.find((n) => n.path === r.path || n.path === r.path + ".md");
+      const note = allNotes.find((n) => n.path === r.path || n.path === r.path + ".md" || n.name === r.title);
       if (!note) return false;
       const meta: NoteMetadata = {
         path: note.path,

@@ -248,6 +248,77 @@ describe("trail CRUD", () => {
   });
 });
 
+// ── Search result → note resolution (regression: qmd:// title format) ──
+
+describe("trail filter with search result paths", () => {
+  // Search results come back as qmd://life/<Title> — after stripping the
+  // prefix, we get just the title (e.g., "Multi-Agent Architecture"), NOT a
+  // filesystem path. Trail filtering must resolve by title/name, not just path.
+
+  const trail = makeTrail({
+    allow_tags: ["ai"],
+    allow_types: ["concept"],
+    allow_paths: ["Resources/"],
+  });
+
+  const allNotes = [
+    { path: "Resources/Concepts/Multi-Agent Architecture.md", name: "Multi-Agent Architecture", type: "concept", tags: ["ai", "concept"], private: false },
+    { path: "Resources/Concepts/Agent Runtime.md", name: "Agent Runtime", type: "concept", tags: ["ai", "concept"], private: false },
+    { path: "Journal/2026/2026-04-01.md", name: "2026-04-01", type: "journal", tags: ["journal"], private: false },
+  ];
+
+  // Simulates what handleSearch does after hybridSearch returns results
+  function filterSearchResults(
+    results: { path: string; title: string }[],
+  ) {
+    return results.filter((r) => {
+      // This is the exact matching logic from rest.ts handleSearch
+      const note = allNotes.find(
+        (n) => n.path === r.path || n.path === r.path + ".md" || n.name === r.title,
+      );
+      if (!note) return false;
+      const meta: NoteMetadata = {
+        path: note.path,
+        type: note.type ?? undefined,
+        tags: note.tags ?? [],
+        private: note.private,
+      };
+      return filterByTrail(trail, meta);
+    });
+  }
+
+  it("resolves qmd:// title-only paths via name matching", () => {
+    // After stripping qmd://life/, search results have just the title
+    const searchResults = [
+      { path: "Multi-Agent Architecture", title: "Multi-Agent Architecture" },
+      { path: "Agent Runtime", title: "Agent Runtime" },
+    ];
+    const filtered = filterSearchResults(searchResults);
+    expect(filtered).toHaveLength(2);
+  });
+
+  it("FAILS if matching only by path (the old bug)", () => {
+    const searchResults = [
+      { path: "Multi-Agent Architecture", title: "Multi-Agent Architecture" },
+    ];
+    // Old code: only matched n.path === r.path — this would find nothing
+    const oldBugFilter = searchResults.filter((r) => {
+      const note = allNotes.find((n) => n.path === r.path || n.path === r.path + ".md");
+      return !!note;
+    });
+    expect(oldBugFilter).toHaveLength(0); // confirms the old bug
+  });
+
+  it("still applies trail filters after resolving by name", () => {
+    // Journal entry should be filtered out by allow_paths + allow_types
+    const searchResults = [
+      { path: "2026-04-01", title: "2026-04-01" },
+    ];
+    const filtered = filterSearchResults(searchResults);
+    expect(filtered).toHaveLength(0);
+  });
+});
+
 // ── Trail filter eval — precision ──
 
 describe("trail filter eval — precision", () => {

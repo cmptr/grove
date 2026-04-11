@@ -123,20 +123,23 @@ Example: searches=[{type:'lex', query:'salary'}, {type:'vec', query:'how much do
       // Trail prefilter: filter results by trail scope
       let filtered = results;
       if (activeTrail) {
+        const allNotes = listNotes(VAULT_PATH, "*");
         filtered = results.filter((r) => {
-          const filePath = ((r as Record<string, unknown>).file as string ?? "").replace(/^qmd:\/\/life\//, "");
-          // Read note frontmatter for precise filtering
-          const absPath = join(VAULT_PATH, filePath);
+          const filePath = r.file.replace(/^qmd:\/\/life\//, "");
+          // Resolve to actual vault path — filePath after qmd:// strip is often just the title
+          const note = allNotes.find((n) => n.path === filePath || n.path === filePath + ".md" || n.name === r.title);
+          if (!note) return false;
+          const absPath = join(VAULT_PATH, note.path);
           try {
             const raw = readFileSync(absPath, "utf-8");
             const { frontmatter } = parseNote(raw);
             const tags = Array.isArray(frontmatter.tags) ? frontmatter.tags as string[] :
               typeof frontmatter.tags === "string" ? [frontmatter.tags] : [];
-            const meta: NoteMetadata = { path: filePath, type: frontmatter.type as string, tags, private: frontmatter.private === true };
+            const meta: NoteMetadata = { path: note.path, type: frontmatter.type as string, tags, private: frontmatter.private === true };
             return filterByTrail(activeTrail!, meta);
           } catch {
             // Can't read note — filter by path only
-            return filterByTrail(activeTrail!, { path: filePath });
+            return filterByTrail(activeTrail!, { path: note.path });
           }
         }).slice(0, limit ?? 10);
         logTrailAccess("query", activeTrail.id, activeTrail.name, "query", totalFound, filtered.length);
