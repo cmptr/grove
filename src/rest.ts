@@ -369,7 +369,7 @@ export async function handleSearch(query: string, limit: number = 10, trail?: Tr
 
   let filtered = results.map((r) => ({
     path: r.file.replace(/^qmd:\/\/life\//, ""),
-    title: r.title,
+    title: r.title.replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_m, _target, display) => display ?? _target),
     snippet: r.snippet ?? "",
     score: r.rrf_score,
   }));
