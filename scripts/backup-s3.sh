@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-BUCKET="grove-backups"
+BUCKET="grove-backups-jm"
 PREFIX="daily"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 BACKUP_FILE="/tmp/grove-backup-${TIMESTAMP}.tar.gz"
