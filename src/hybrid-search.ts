@@ -62,6 +62,11 @@ async function embedQuery(text: string): Promise<number[]> {
 
 const STOPWORDS = new Set(["the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by", "from", "is", "it", "that", "this", "was", "are", "be", "has", "had", "not", "you", "how", "what", "who", "why", "when", "do", "does", "can"]);
 
+/** Strip [[wikilink]] syntax from a string: [[Target|Display]] → Display, [[Target]] → Target */
+function stripWikilinks(s: string): string {
+  return s.replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_m, target, display) => display ?? target);
+}
+
 /** Extract search terms from a query, removing stopwords but keeping short terms like "AI". */
 function extractTerms(query: string): string[] {
   return query
@@ -74,10 +79,11 @@ function extractTerms(query: string): string[] {
  *  Returns both the display label and the lowercase vault path from the index. */
 function ftsFileMeta(db: InstanceType<typeof Database>, filepath: string, title: string): { file: string; vault_path: string } {
   const docPath = filepath.startsWith("life/") ? filepath.slice(5) : filepath;
+  const clean = stripWikilinks(title);
   const collection = db
     .prepare("SELECT collection FROM documents WHERE path = ? AND active = 1")
     .get(docPath) as { collection: string } | undefined;
-  const file = collection?.collection ? `qmd://${collection.collection}/${title}` : title;
+  const file = collection?.collection ? `qmd://${collection.collection}/${clean}` : clean;
   return { file, vault_path: docPath };
 }
 
@@ -111,8 +117,9 @@ function bm25Search(query: string, n: number): SearchResult[] {
   const seen = new Set<string>();
 
   for (const row of rows) {
-    if (seen.has(row.title)) continue;
-    seen.add(row.title);
+    const cleanTitle = stripWikilinks(row.title);
+    if (seen.has(cleanTitle)) continue;
+    seen.add(cleanTitle);
 
     // Normalize score: FTS5 rank is negative (more negative = better match)
     const score = Math.round(Math.abs(row.rank) * 100) / 100;
@@ -124,7 +131,7 @@ function bm25Search(query: string, n: number): SearchResult[] {
 
     results.push({
       file: meta.file,
-      title: row.title,
+      title: cleanTitle,
       vault_path: meta.vault_path,
       score: boostedScore,
       snippet: row.snippet?.trim().substring(0, 200) ?? "",
@@ -196,11 +203,12 @@ function titleSearch(query: string, n: number): SearchResult[] {
 
   // Then FTS5 title hits
   for (const row of rows) {
-    if (seen.has(row.title)) continue;
-    seen.add(row.title);
+    const cleanTitle = stripWikilinks(row.title);
+    if (seen.has(cleanTitle)) continue;
+    seen.add(cleanTitle);
     const score = Math.round(Math.abs(row.rank) * 100) / 100;
     const meta = ftsFileMeta(db, row.filepath, row.title);
-    results.push({ file: meta.file, title: row.title, vault_path: meta.vault_path, score, snippet: row.snippet?.trim().substring(0, 200) ?? "" });
+    results.push({ file: meta.file, title: cleanTitle, vault_path: meta.vault_path, score, snippet: row.snippet?.trim().substring(0, 200) ?? "" });
     if (results.length >= n) break;
   }
 
@@ -233,13 +241,14 @@ function getAliasIndex(): Map<string, { title: string; file: string; filepath: s
     const aliasMatch = fm[1].match(/aliases:\s*\n((?:\s+-\s+.*\n?)*)/);
     if (!aliasMatch) continue;
 
-    const file = row.collection ? `qmd://${row.collection}/${row.title}` : row.title;
+    const cleanTitle = stripWikilinks(row.title);
+    const file = row.collection ? `qmd://${row.collection}/${cleanTitle}` : cleanTitle;
     const aliases = [...aliasMatch[1].matchAll(/-\s+"?([^"\n]+)"?\s*$/gm)]
       .map(m => m[1].trim())
       .filter(a => a.length > 0);
 
     for (const alias of aliases) {
-      index.set(alias.toLowerCase(), { title: row.title, file, filepath: `life/${row.path}` });
+      index.set(alias.toLowerCase(), { title: cleanTitle, file, filepath: `life/${row.path}` });
     }
   }
 
@@ -314,7 +323,8 @@ async function vectorSearch(query: string, n: number): Promise<SearchResult[]> {
       .get(docHash) as { path: string; title: string; collection: string } | undefined;
     if (!doc) continue;
 
-    const filePath = doc.collection ? `qmd://${doc.collection}/${doc.title}` : doc.title;
+    const cleanTitle = stripWikilinks(doc.title);
+    const filePath = doc.collection ? `qmd://${doc.collection}/${cleanTitle}` : cleanTitle;
     if (seenFiles.has(filePath)) continue;
     seenFiles.add(filePath);
 
@@ -343,7 +353,7 @@ async function vectorSearch(query: string, n: number): Promise<SearchResult[]> {
 
     candidates.push({
       file: filePath,
-      title: doc.title,
+      title: cleanTitle,
       vault_path: doc.path,
       score: Math.round(score * 10000) / 10000,
       snippet,
@@ -482,18 +492,16 @@ export async function hybridSearch(
 /**
  * Format hybrid results as text for MCP response
  */
-const stripWikilinks = (s: string) => s.replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_m, target, display) => display ?? target);
-
 export function formatResults(results: HybridResult[]): string {
   if (results.length === 0) return "No results found.";
   return results
     .map(
       (r) => {
         const url = "https://grove.md/" + r.vault_path.replace(/\.md$/, "").split("/").map(encodeURIComponent).join("/");
-        return `**${stripWikilinks(r.title)}** (${url})\n${r.snippet ?? ""}`;
+        return `**${r.title}** (${url})\n${r.snippet ?? ""}`;
       }
     )
     .join("\n\n---\n\n");
 }
 
-export { embedQuery, bm25Search, vectorSearch, titleSearch };
+export { embedQuery, bm25Search, vectorSearch, titleSearch, stripWikilinks };
