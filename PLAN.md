@@ -13,8 +13,8 @@ Grove is a TypeScript API server that wraps a git-tracked Obsidian vault and exp
 **Vault:** `~/life/` (primary), `~/canva/` (deferred — Phase 8)
 **Depends on:** `@tobilu/qmd` (search engine), `@modelcontextprotocol/sdk` (MCP transport)
 **Deploys to:** AWS g4dn.xlarge (T4 GPU) at `api.grove.md` (52.37.76.231)
-**Live:** Phases 0-1 complete, Phase 5 trails infrastructure complete — MCP + hybrid search + read/write + scoped sharing at `https://api.grove.md`
-**Next:** Security hardening → Observability → Portal (owner app) → Discovery
+**Live:** Phases 0-3 complete, Phase 5 trails complete, Phase B magic link auth complete — MCP + hybrid search + read/write + scoped sharing + magic link auth + persistent sessions at `https://api.grove.md`
+**Next:** Portal knowledge views (P4-10+) → Discovery (Phase 7)
 
 ---
 
@@ -197,30 +197,30 @@ Claude.ai → proxy.ts (auth/OAuth/CORS/logging) → Grove MCP server (all 6 too
 
 #### Phase 2a: Critical Fixes (ship immediately)
 
-- [ ] **P2-1: Path traversal guard** (`src/server.ts`)
+- [x] **P2-1: Path traversal guard** (`src/server.ts`)
   Resolve all file paths to absolute, reject anything outside vault root. No `..`, no symlinks escaping the vault. Test with `../../etc/passwd` and `../../.grove/keys.json`. This is exploitable today — top priority.
 
-- [ ] **P2-2: CORS lockdown** (`src/proxy.ts`, `src/server.ts`)
-  Replace `*` with explicit allowed origins: `https://claude.ai`, `https://api.grove.md`. CORS `*` with Bearer auth allows any website to make credentialed requests.
+- [x] **P2-2: CORS lockdown** (`src/proxy.ts`, `src/server.ts`)
+  Cookie-auth routes (`/auth/*`, `/admin/*`, `/keys`, `/`) locked to `GROVE_URL`. Bearer-only routes (`/mcp`, `/search`) keep `*` (required for MCP clients). `/v1/*` locked to `grove.md`.
 
-- [ ] **P2-3: Request body size limit** (`src/proxy.ts`)
+- [x] **P2-3: Request body size limit** (`src/proxy.ts`)
   Hard cap at 1MB on `node:http` layer. Prevents memory/disk exhaustion from malicious or buggy clients.
 
-- [ ] **P2-4: Enforce key scopes** (`src/proxy.ts`)
-  Key scopes (read, write) are defined but not checked. Wire up enforcement — read-only keys get 403 on write operations.
+- [x] **P2-4: Enforce key scopes** (`src/proxy.ts`)
+  `write_note` tool calls check key scopes — read-only keys get 403 `scope_denied`. Logged via structured logger.
 
 #### Phase 2b: Infrastructure Security
 
 - [ ] **P2-5: EBS encryption**
   Enable EBS encryption (AES-256, AWS-managed CMK) on the volume. Free, zero app changes, protects snapshots and S3 backups automatically. Migrate by creating encrypted volume from snapshot. *(Expert correction: LUKS is wrong for AWS — the volume is mounted and decrypted at runtime, so LUKS only protects against physical disk theft, which AWS already handles.)*
 
-- [ ] **P2-6: Daily S3 backups**
+- [x] **P2-6: Daily S3 backups**
   Cron job tars `~/.grove/` (keys, trails, configs) + QMD index and ships to S3 with server-side encryption. Vault itself is in git (GitHub private). QMD index and embeddings are derived and rebuildable, but backing up saves hours of re-embedding.
 
-- [ ] **P2-7: Move secrets out of plaintext JSON**
-  OAuth client secrets → environment variables (minimum) or AWS SSM Parameter Store (SecureString). No more plaintext secrets in JSON files.
+- [x] **P2-7: Move secrets out of plaintext JSON**
+  OAuth clients and codes migrated from JSON to SQLite. Client secrets stored as SHA-256 hashes. API keys encrypted (AES-256-GCM) during OAuth code flow. JSON files renamed to `.migrated`.
 
-- [ ] **P2-8: Key TTLs and rotation**
+- [x] **P2-8: Key TTLs and rotation**
   Add `expires_at` to key schema. CLI: `grove keys create foo --ttl 90d`. Expired keys fail auth. No forced rotation yet — TTLs are the first step.
 
 #### Phase 2 Tests
@@ -242,25 +242,25 @@ Claude.ai → proxy.ts (auth/OAuth/CORS/logging) → Grove MCP server (all 6 too
 
 #### Phase 3a: Structured Logging
 
-- [ ] **P3-1: JSON structured logs** (`src/logger.ts`)
+- [x] **P3-1: JSON structured logs** (`src/logger.ts`)
   One JSON line per request to stdout (PM2 captures). Format:
   ```json
   {"ts":"ISO8601","rid":"ulid","method":"POST","path":"/mcp","tool":"query","key_id":"abc123","status":200,"duration_ms":142,"error":null,"bytes_out":2847}
   ```
   Essential fields: timestamp, request ID (`rid`), tool name, key identity (not the raw token), status, duration, error. Add `vault_path` on writes.
 
-- [ ] **P3-2: Request correlation IDs**
+- [x] **P3-2: Request correlation IDs**
   Generate ULID at proxy entry. Pass as `X-Request-Id` header to Grove server. Both layers log the same `rid`. Enables tracing a request through proxy → server → vault op.
 
-- [ ] **P3-3: Audit log for reads**
+- [x] **P3-3: Audit log for reads**
   Today writes are traced via git commits, but reads are invisible. Log every read with key identity for trail consumers. Store in `~/.grove/audit.jsonl`, rotate daily.
 
 #### Phase 3b: Health & Metrics
 
-- [ ] **P3-4: Deep health check** (`/health`)
+- [x] **P3-4: Deep health check** (`/health`)
   Proxy health must verify downstream: QMD index accessible, embed server responding, vault git status clean. A proxy that says "I'm fine" while QMD is dead is worse than no health check.
 
-- [ ] **P3-5: `/metrics` endpoint** (JSON, not Prometheus)
+- [x] **P3-5: `/metrics` endpoint** (JSON, not Prometheus)
   Internal counters (reset on restart, fine for dashboard). Persist daily rollups to SQLite for history.
   - `requests_total` by tool name and status code
   - `latency_p50`, `p95`, `p99` (1000-sample rolling reservoir)
@@ -439,10 +439,10 @@ On MCP `initialize`, if the session is trail-scoped, return trail metadata (name
 - [x] **P5-9: Audit trail for trail access**
   Every trail access logged via structured logger: `{ trail_id, trail_name, tool, total_count, filtered_count }`. Uses `logTrailAccess()` in `src/trails.ts`.
 
-- [ ] **P5-10: Blast radius limits**
+- [x] **P5-10: Blast radius limits**
   Per-trail rate limits: configurable max reads/min, max writes/hour. Default: 60 reads/min, 10 writes/hour per trail. Separate from owner key limits.
 
-- [ ] **P5-11: Snapshot/rollback**
+- [x] **P5-11: Snapshot/rollback**
   `grove snapshot` creates a git tag. `grove rollback <tag>` reverts. Automatic snapshot before any bulk operation.
 
 #### Phase 5c: Portal Integration (deferred to Phase 4)
