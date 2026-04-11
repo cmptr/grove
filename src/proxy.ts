@@ -234,29 +234,43 @@ function handleOAuth(req: IncomingMessage, res: ServerResponse, url: URL): boole
     const codeChallengeMethod = url.searchParams.get("code_challenge_method") ?? "";
 
     const html = `<!DOCTYPE html>
-<html><head><title>Grove — Authorize</title>
+<html><head><title>Grove &mdash; Authorize</title>
+<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
-  body { font-family: -apple-system, system-ui, sans-serif; max-width: 420px; margin: 60px auto; padding: 0 20px; background: #0a0a0a; color: #e0e0e0; }
-  h1 { font-size: 24px; margin-bottom: 8px; }
-  p { color: #888; font-size: 14px; line-height: 1.5; }
-  input[type=password] { width: 100%; padding: 12px; font-size: 14px; font-family: monospace; border: 1px solid #333; border-radius: 8px; background: #1a1a1a; color: #e0e0e0; box-sizing: border-box; margin: 8px 0; }
-  button { width: 100%; padding: 12px; font-size: 16px; background: #2d5a27; color: white; border: none; border-radius: 8px; cursor: pointer; margin-top: 8px; }
-  button:hover { background: #3a7233; }
-  .grove { color: #4a9; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, system-ui, sans-serif; min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #FAF7F2; color: #2C2416; padding: 20px; }
+  .card { width: 100%; max-width: 400px; }
+  h1 { font-family: 'Lora', Georgia, serif; font-size: 28px; font-weight: 500; margin-bottom: 8px; letter-spacing: -0.01em; }
+  p { color: #2C2416aa; font-size: 14px; line-height: 1.6; margin-bottom: 24px; }
+  label { display: block; font-size: 12px; text-transform: uppercase; letter-spacing: 0.1em; color: #2C2416aa; margin-bottom: 8px; }
+  input[type=password] { width: 100%; padding: 14px 16px; font-size: 14px; font-family: 'SF Mono', 'Fira Code', monospace; border: 1px solid #2C241620; border-radius: 4px; background: white; color: #2C2416; }
+  input[type=password]:focus { outline: none; border-color: #7A8B5C; box-shadow: 0 0 0 3px #7A8B5C20; }
+  input[type=password]::placeholder { color: #2C241640; }
+  button { width: 100%; padding: 14px; font-size: 14px; font-weight: 600; background: #2C2416; color: #FAF7F2; border: none; border-radius: 4px; cursor: pointer; margin-top: 12px; letter-spacing: 0.02em; transition: background 0.15s; }
+  button:hover { background: #3D3524; }
+  button:active { transform: scale(0.98); }
+  .subtle { font-size: 12px; color: #2C241650; margin-top: 16px; text-align: center; }
+  .subtle a { color: #7A8B5C; text-decoration: none; }
+  .subtle a:hover { text-decoration: underline; }
 </style></head>
 <body>
-  <h1><span class="grove">Grove</span> — Authorize</h1>
-  <p>Paste your Grove API key to connect Claude to your vault.</p>
-  <form method="POST" action="/oauth/authorize">
-    <input type="hidden" name="client_id" value="${clientId}">
-    <input type="hidden" name="redirect_uri" value="${redirectUri}">
-    <input type="hidden" name="state" value="${state}">
-    <input type="hidden" name="code_challenge" value="${codeChallenge}">
-    <input type="hidden" name="code_challenge_method" value="${codeChallengeMethod}">
-    <input type="password" name="api_key" placeholder="grove_live_..." required autofocus>
-    <button type="submit">Connect</button>
-  </form>
+  <div class="card">
+    <h1>Grove</h1>
+    <p>Paste your API key to connect Claude to your vault.</p>
+    <form method="POST" action="/oauth/authorize">
+      <input type="hidden" name="client_id" value="${clientId}">
+      <input type="hidden" name="redirect_uri" value="${redirectUri}">
+      <input type="hidden" name="state" value="${state}">
+      <input type="hidden" name="code_challenge" value="${codeChallenge}">
+      <input type="hidden" name="code_challenge_method" value="${codeChallengeMethod}">
+      <label for="api_key">API key</label>
+      <input type="password" id="api_key" name="api_key" placeholder="grove_live_..." required autofocus>
+      <button type="submit">Connect</button>
+    </form>
+    <p class="subtle">Don't have a key? <a href="https://grove.md">Get early access</a></p>
+  </div>
 </body></html>`;
     res.writeHead(200, { "Content-Type": "text/html" });
     res.end(html);
