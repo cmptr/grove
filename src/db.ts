@@ -110,6 +110,15 @@ CREATE TABLE IF NOT EXISTS magic_links (
   expires_at TEXT NOT NULL,
   used_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS auth_codes (
+  id TEXT PRIMARY KEY,
+  code_hash TEXT NOT NULL UNIQUE,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  expires_at TEXT NOT NULL,
+  used_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 `;
 
 export function createSchema(): void {

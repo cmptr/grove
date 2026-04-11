@@ -31,7 +31,7 @@ export interface MagicLinkResult {
   ok: true;
 }
 
-export async function requestMagicLink(email: string, baseUrl: string): Promise<MagicLinkResult> {
+export async function requestMagicLink(email: string, baseUrl: string, redirect?: string): Promise<MagicLinkResult> {
   const db = getDb();
   const normalizedEmail = email.toLowerCase().trim();
 
@@ -63,7 +63,10 @@ export async function requestMagicLink(email: string, baseUrl: string): Promise<
 
   // Only send the email if the user actually exists
   if (user) {
-    const verifyUrl = `${baseUrl}/auth/verify?token=${token}&email=${encodeURIComponent(normalizedEmail)}`;
+    let verifyUrl = `${baseUrl}/auth/verify?token=${token}&email=${encodeURIComponent(normalizedEmail)}`;
+    if (redirect) {
+      verifyUrl += `&redirect=${encodeURIComponent(redirect)}`;
+    }
     await sendMagicLinkEmail(normalizedEmail, verifyUrl);
   }
 
@@ -257,6 +260,52 @@ export function getSessionFromCookie(req: IncomingMessage): string | null {
   return match ? match[1]! : null;
 }
 
+// ── Auth Codes (cross-domain exchange) ─────────────────────────────
+
+export function createAuthCode(userId: string): string {
+  const db = getDb();
+  const code = randomBytes(32).toString("hex");
+  const id = generateId("ac_");
+
+  db.prepare(
+    "INSERT INTO auth_codes (id, code_hash, user_id, expires_at) VALUES (?, ?, ?, ?)"
+  ).run(
+    id,
+    hashToken(code),
+    userId,
+    new Date(Date.now() + 60_000).toISOString(),  // 60 second TTL
+  );
+
+  return code;
+}
+
+export function exchangeAuthCode(code: string): { sessionToken: string; user: SessionUser } | null {
+  const db = getDb();
+  const codeHash = hashToken(code);
+
+  const row = db.prepare(
+    "SELECT ac.id, ac.user_id, ac.expires_at, ac.used_at, u.id as uid, u.username, u.email FROM auth_codes ac JOIN users u ON ac.user_id = u.id WHERE ac.code_hash = ?"
+  ).get(codeHash) as {
+    id: string; user_id: string; expires_at: string; used_at: string | null;
+    uid: string; username: string | null; email: string;
+  } | undefined;
+
+  if (!row) return null;
+  if (row.used_at) return null;
+  if (new Date() > new Date(row.expires_at)) return null;
+
+  // Mark as used
+  db.prepare("UPDATE auth_codes SET used_at = ? WHERE id = ?").run(new Date().toISOString(), row.id);
+
+  // Create a session for this user
+  const sessionToken = createSession(row.user_id);
+
+  return {
+    sessionToken,
+    user: { id: row.uid, username: row.username, email: row.email },
+  };
+}
+
 // ── Cleanup ─────────────────────────────────────────────────────────
 
 let cleanupInterval: ReturnType<typeof setInterval> | null = null;
@@ -266,6 +315,7 @@ export function cleanupExpiredAuth(): void {
   const now = new Date().toISOString();
   db.prepare("DELETE FROM magic_links WHERE expires_at < ?").run(now);
   db.prepare("DELETE FROM sessions WHERE expires_at < ? OR absolute_expires_at < ?").run(now, now);
+  db.prepare("DELETE FROM auth_codes WHERE expires_at < ?").run(now);
 
   // Start hourly cleanup if not already running
   if (!cleanupInterval) {
@@ -274,6 +324,7 @@ export function cleanupExpiredAuth(): void {
       const n = new Date().toISOString();
       d.prepare("DELETE FROM magic_links WHERE expires_at < ?").run(n);
       d.prepare("DELETE FROM sessions WHERE expires_at < ? OR absolute_expires_at < ?").run(n, n);
+      d.prepare("DELETE FROM auth_codes WHERE expires_at < ?").run(n);
     }, 60 * 60 * 1000);
   }
 }

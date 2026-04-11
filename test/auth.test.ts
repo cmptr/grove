@@ -22,6 +22,7 @@ const SCHEMA = `
   CREATE TABLE IF NOT EXISTS api_keys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), vault_id TEXT NOT NULL, name TEXT NOT NULL, hashed_token TEXT NOT NULL UNIQUE, scopes TEXT NOT NULL DEFAULT 'read,write', created_at TEXT NOT NULL DEFAULT (datetime('now')), last_used_at TEXT, expires_at TEXT);
   CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL DEFAULT (datetime('now')), expires_at TEXT NOT NULL, absolute_expires_at TEXT NOT NULL, last_used_at TEXT);
   CREATE TABLE IF NOT EXISTS magic_links (id TEXT PRIMARY KEY, email TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL DEFAULT (datetime('now')), expires_at TEXT NOT NULL, used_at TEXT);
+  CREATE TABLE IF NOT EXISTS auth_codes (id TEXT PRIMARY KEY, code_hash TEXT NOT NULL UNIQUE, user_id TEXT NOT NULL REFERENCES users(id), expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')));
 `;
 
 function hashToken(token: string): string {
@@ -42,6 +43,8 @@ import {
   createSession,
   validateSession,
   destroySession,
+  createAuthCode,
+  exchangeAuthCode,
   generateCsrfToken,
   validateCsrfToken,
   stopCleanup,
@@ -55,6 +58,7 @@ describe("auth", () => {
     db.exec(SCHEMA);
 
     // Truncate all auth-related tables
+    db.exec("DELETE FROM auth_codes");
     db.exec("DELETE FROM magic_links");
     db.exec("DELETE FROM sessions");
     db.exec("DELETE FROM api_keys");
@@ -295,6 +299,52 @@ describe("auth", () => {
       expect(validateSession(token)).not.toBeNull();
       destroySession(token);
       expect(validateSession(token)).toBeNull();
+    });
+  });
+
+  // ── Auth Codes ────────────────────────────────────────────────────
+
+  describe("auth codes", () => {
+    it("createAuthCode stores hashed code with 60s expiry", () => {
+      const code = createAuthCode("user_00000000");
+      expect(code).toMatch(/^[a-f0-9]{64}$/);
+
+      const db = getDb();
+      const row = db.prepare("SELECT * FROM auth_codes").get() as any;
+      expect(row.code_hash).toMatch(/^[a-f0-9]{64}$/);
+      expect(row.code_hash).not.toBe(code); // stored as hash
+      expect(row.user_id).toBe("user_00000000");
+      const expiresAt = new Date(row.expires_at).getTime();
+      expect(expiresAt - Date.now()).toBeLessThan(61_000);
+      expect(expiresAt - Date.now()).toBeGreaterThan(58_000);
+    });
+
+    it("exchangeAuthCode succeeds with valid code", () => {
+      const code = createAuthCode("user_00000000");
+      const result = exchangeAuthCode(code);
+      expect(result).not.toBeNull();
+      expect(result!.user.id).toBe("user_00000000");
+      expect(result!.user.email).toBe("admin@example.com");
+      expect(result!.sessionToken).toMatch(/^[a-f0-9]{64}$/);
+    });
+
+    it("exchangeAuthCode is single-use", () => {
+      const code = createAuthCode("user_00000000");
+      expect(exchangeAuthCode(code)).not.toBeNull();
+      expect(exchangeAuthCode(code)).toBeNull();
+    });
+
+    it("exchangeAuthCode rejects expired code", () => {
+      const db = getDb();
+      const code = randomBytes(32).toString("hex");
+      db.prepare(
+        "INSERT INTO auth_codes (id, code_hash, user_id, expires_at) VALUES (?, ?, ?, ?)"
+      ).run("ac_expired", hashToken(code), "user_00000000", new Date(Date.now() - 1000).toISOString());
+      expect(exchangeAuthCode(code)).toBeNull();
+    });
+
+    it("exchangeAuthCode rejects invalid code", () => {
+      expect(exchangeAuthCode("not-a-real-code")).toBeNull();
     });
   });
 
