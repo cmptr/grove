@@ -1067,20 +1067,6 @@ const server = createServer(async (req, res) => {
   // Trail resolution — look up if this key is associated with a trail
   const trail = resolveTrail(key.id);
 
-  // Per-trail rate limits
-  if (trail) {
-    const trailRateLimit = rateLimiter.check(
-      `trail:${trail.id}`,
-      "read", // default check
-    );
-    if (!trailRateLimit.allowed) {
-      structuredLog("warn", "trail.rate_limited", rid, { trail_id: trail.id, trail_name: trail.name });
-      sendJson(res, 429, { error: "trail rate limit exceeded", retry_after_ms: trailRateLimit.retryAfterMs });
-      return;
-    }
-    rateLimiter.record(`trail:${trail.id}`, "read");
-  }
-
   // Forward ALL MCP requests to the Grove server (which owns all 6 tools)
   if (url.pathname === "/mcp") {
     let body = "";
@@ -1098,6 +1084,25 @@ const server = createServer(async (req, res) => {
     const mcpMethod = parsed?.method ?? req.method;
     const toolName = parsed?.params?.name ?? null;
     structuredLog("info", "mcp.request", rid, { key_id: key.id, key_name: key.name, method: req.method, path: "/mcp", mcp_method: mcpMethod, tool: toolName });
+
+    // Per-trail rate limits
+    if (trail) {
+      const isTrailWrite = mcpMethod === "tools/call" && toolName === "write_note";
+      const trailLimit = isTrailWrite
+        ? (trail.rate_limit_writes ?? 20)
+        : (trail.rate_limit_reads ?? 60);
+      const trailRateResult = rateLimiter.checkWithLimit(
+        `trail:${trail.id}`,
+        isTrailWrite ? "write" : "read",
+        trailLimit,
+      );
+      if (!trailRateResult.allowed) {
+        structuredLog("warn", "trail.rate_limited", rid, { trail_id: trail.id, trail_name: trail.name, type: isTrailWrite ? "write" : "read" });
+        sendJson(res, 429, { error: "trail rate limit exceeded", retry_after_ms: trailRateResult.retryAfterMs });
+        return;
+      }
+      rateLimiter.record(`trail:${trail.id}`, isTrailWrite ? "write" : "read");
+    }
 
     // Audit read/write tool calls
     if (mcpMethod === "tools/call" && toolName) {
