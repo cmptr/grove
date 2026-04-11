@@ -131,15 +131,22 @@ Example: searches=[{type:'lex', query:'salary'}, {type:'vec', query:'how much do
       const results = await hybridSearch(queryText, fetchLimit);
       const totalFound = results.length;
 
-      // Trail prefilter: use vault_path (lowercase, from QMD index) for reliable matching
+      // Resolve QMD lowercase-kebab paths to real filesystem paths.
+      // QMD index stores e.g. "resources/concepts/meditation-mindfulness.md"
+      // but the filesystem has "Resources/Concepts/Meditation & Mindfulness.md".
+      const allNotes = listNotes(VAULT_PATH, "*");
+      const resolveRealPath = (vaultPath: string, title: string): string => {
+        const vp = vaultPath.toLowerCase();
+        const note = allNotes.find((n: { path: string; name: string }) => n.path.toLowerCase() === vp || n.name === title);
+        return note?.path ?? vaultPath;
+      };
+
+      // Trail prefilter
       let filtered = results;
       if (activeTrail) {
-        const allNotes = listNotes(VAULT_PATH, "*");
         filtered = results.filter((r) => {
-          // vault_path is lowercase-kebab from QMD index; filesystem uses Title Case with spaces.
-          // Match by: (1) case-insensitive vault_path, (2) title/name fallback.
           const vp = r.vault_path.toLowerCase();
-          const note = allNotes.find((n) => n.path.toLowerCase() === vp || n.name === r.title);
+          const note = allNotes.find((n: { path: string; name: string }) => n.path.toLowerCase() === vp || n.name === r.title);
           if (!note) return false;
           const absPath = join(VAULT_PATH, note.path);
           try {
@@ -150,14 +157,13 @@ Example: searches=[{type:'lex', query:'salary'}, {type:'vec', query:'how much do
             const meta: NoteMetadata = { path: note.path, type: frontmatter.type as string, tags, private: frontmatter.private === true };
             return filterByTrail(activeTrail!, meta);
           } catch {
-            // Can't read note — filter by path only
             return filterByTrail(activeTrail!, { path: note.path });
           }
         }).slice(0, limit ?? 10);
         logTrailAccess("query", activeTrail.id, activeTrail.name, "query", totalFound, filtered.length);
       }
 
-      const formatted = formatResults(filtered);
+      const formatted = formatResults(filtered, resolveRealPath);
       const filteredCount = activeTrail ? `\n\n[filtered_count: ${filtered.length}/${totalFound}]` : "";
       return { content: [{ type: "text" as const, text: (formatted || "No results found.") + filteredCount }] };
     },

@@ -473,14 +473,18 @@ export async function hybridSearch(
 }
 
 /**
- * Format hybrid results as text for MCP response
+ * Format hybrid results as text for MCP response.
+ * resolveRealPath maps QMD's lowercase-kebab vault_path to the real filesystem path
+ * (e.g. "resources/concepts/meditation-mindfulness.md" → "Resources/Concepts/Meditation & Mindfulness.md").
+ * Without it, URLs are built from the QMD index path which may not resolve on case-sensitive filesystems.
  */
-export function formatResults(results: HybridResult[]): string {
+export function formatResults(results: HybridResult[], resolveRealPath?: (vaultPath: string, title: string) => string): string {
   if (results.length === 0) return "No results found.";
   return results
     .map(
       (r) => {
-        const url = "https://grove.md/" + r.vault_path.replace(/\.md$/, "").split("/").map(encodeURIComponent).join("/");
+        const displayPath = resolveRealPath ? resolveRealPath(r.vault_path, r.title) : r.vault_path;
+        const url = "https://grove.md/" + displayPath.replace(/\.md$/, "").split("/").map(encodeURIComponent).join("/");
         return `**${r.title}** (${url})\n${r.snippet ?? ""}`;
       }
     )

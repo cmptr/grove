@@ -75,10 +75,19 @@ async function resolveNote(file: string): Promise<ResolvedNote | null> {
   if (!abs) return null;
   if (existsSync(abs)) return readNote(abs, filePath);
 
-  // 3. Extract basename for searching
+  // 3. Case-insensitive full path match (handles Resources/ vs resources/)
+  const allNotes = listNotes(VAULT_PATH, "*");
+  const filePathLower = filePath.toLowerCase();
+  const pathMatch = allNotes.find((n) => n.path.toLowerCase() === filePathLower);
+  if (pathMatch) {
+    const matchAbs = join(VAULT_PATH, pathMatch.path);
+    if (existsSync(matchAbs)) return readNote(matchAbs, pathMatch.path, file);
+  }
+
+  // 4. Extract basename for searching
   const searchTerm = filePath.replace(/\.md$/, "").split("/").pop() ?? file;
 
-  // 4. Journal date pattern
+  // 5. Journal date pattern
   const dateMatch = searchTerm.match(/^(\d{4})-\d{2}-\d{2}$/);
   if (dateMatch) {
     const year = dateMatch[1];
@@ -89,16 +98,24 @@ async function resolveNote(file: string): Promise<ResolvedNote | null> {
     }
   }
 
-  // 5. Case-insensitive basename search
+  // 6. Case-insensitive basename search
   const searchLower = searchTerm.toLowerCase();
-  const allNotes = listNotes(VAULT_PATH, "*");
   const nameMatch = allNotes.find((n) => n.name.toLowerCase() === searchLower);
   if (nameMatch) {
     const matchAbs = join(VAULT_PATH, nameMatch.path);
     if (existsSync(matchAbs)) return readNote(matchAbs, nameMatch.path, file);
   }
 
-  // 6. Alias search
+  // 6b. Kebab-case basename match (QMD index uses kebab-case, filesystem uses spaces/punctuation)
+  const toKebab = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  const searchKebab = toKebab(searchTerm);
+  const kebabMatch = allNotes.find((n) => toKebab(n.name) === searchKebab);
+  if (kebabMatch) {
+    const matchAbs = join(VAULT_PATH, kebabMatch.path);
+    if (existsSync(matchAbs)) return readNote(matchAbs, kebabMatch.path, file);
+  }
+
+  // 7. Alias search
   const aliasNotes = listNotes(VAULT_PATH, "*", { includeAliases: true });
   const aliasMatch = aliasNotes.find(
     (n) => n.aliases?.some((a: string) => a.toLowerCase() === searchLower),
@@ -108,7 +125,7 @@ async function resolveNote(file: string): Promise<ResolvedNote | null> {
     if (existsSync(matchAbs)) return readNote(matchAbs, aliasMatch.path, file);
   }
 
-  // 7. BM25 fallback
+  // 8. BM25 fallback
   try {
     const results = await bm25Search(searchTerm, 3);
     if (results.length > 0) {
@@ -366,24 +383,32 @@ export async function handleSearch(query: string, limit: number = 10, trail?: Tr
   const fetchLimit = trail ? limit * 3 : limit; // over-fetch for trail filtering
   const results = await hybridSearch(query, fetchLimit);
 
-  // Map to response shape — vault_path is the canonical lowercase path from QMD index
-  let filtered = results.map((r) => ({
-    path: r.vault_path,
-    title: r.title,
-    snippet: r.snippet ?? "",
-    score: r.rrf_score,
-    vault_path: r.vault_path,
-    url: "https://grove.md/" + r.vault_path.replace(/\.md$/, "").split("/").map(encodeURIComponent).join("/"),
-  }));
+  // Resolve QMD's lowercase-kebab paths to real filesystem paths.
+  // QMD index stores e.g. "resources/concepts/meditation-mindfulness.md"
+  // but the filesystem has "Resources/Concepts/Meditation & Mindfulness.md".
+  const allNotes = listNotes(VAULT_PATH, "*");
+  const resolveRealPath = (vaultPath: string, title: string): string => {
+    const vp = vaultPath.toLowerCase();
+    const note = allNotes.find((n) => n.path.toLowerCase() === vp || n.name === title);
+    return note?.path ?? vaultPath;
+  };
+
+  let filtered = results.map((r) => {
+    const realPath = resolveRealPath(r.vault_path, r.title);
+    return {
+      path: realPath,
+      title: r.title,
+      snippet: r.snippet ?? "",
+      score: r.rrf_score,
+      vault_path: r.vault_path,
+      real_path: realPath,
+      url: "https://grove.md/" + realPath.replace(/\.md$/, "").split("/").map(encodeURIComponent).join("/"),
+    };
+  });
 
   if (trail) {
-    // Resolve search results to listNotes entries for trail filtering.
-    // vault_path is lowercase-kebab from QMD index; filesystem uses Title Case with spaces.
-    // Match by: (1) case-insensitive vault_path, (2) title/name fallback.
-    const allNotes = listNotes(VAULT_PATH, "*");
     filtered = filtered.filter((r) => {
-      const vp = r.vault_path.toLowerCase();
-      const note = allNotes.find((n) => n.path.toLowerCase() === vp || n.name === r.title);
+      const note = allNotes.find((n) => n.path === r.real_path);
       if (!note) return false;
       const meta: NoteMetadata = {
         path: note.path,
@@ -395,8 +420,8 @@ export async function handleSearch(query: string, limit: number = 10, trail?: Tr
     });
   }
 
-  // Strip vault_path from response — it's internal
-  return filtered.slice(0, limit).map(({ vault_path: _, ...rest }) => rest);
+  // Strip internal fields from response
+  return filtered.slice(0, limit).map(({ vault_path: _, real_path: _rp, ...rest }) => rest);
 }
 
 const VALID_STATS_SECTIONS = new Set(["vault", "freshness", "graph", "index", "lifecycle", "search", "server"]);
