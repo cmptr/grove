@@ -16,8 +16,8 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
-import { createHash, randomBytes } from "node:crypto";
-import { appendFileSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { createHash, randomBytes, createCipheriv, createDecipheriv } from "node:crypto";
+import { appendFileSync } from "node:fs";
 import { RateLimiter } from "./rate-limit.js";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -148,36 +148,27 @@ function summarizeMcpResponse(response: unknown): unknown {
 // the bare minimum: authorization code flow with auto-approve.
 // The "authorization" just shows a page where you paste your API key.
 
-interface OAuthClient {
-  client_id: string;
-  client_secret: string;
-  redirect_uris: string[];
-  registered_at: string;
+// ── OAuth encryption helpers ──
+// Short-lived AES-256-GCM encryption for API keys stored in oauth_codes.
+// Keys are encrypted at code creation and decrypted at token exchange (5min window).
+const OAUTH_ENCRYPT_KEY = createHash("sha256").update(process.env.GROVE_CSRF_SECRET ?? "grove-oauth-default").digest();
+
+function encryptForOAuth(plaintext: string): string {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", OAUTH_ENCRYPT_KEY, iv);
+  const encrypted = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return Buffer.concat([iv, tag, encrypted]).toString("base64");
 }
 
-interface AuthCode {
-  code: string;
-  client_id: string;
-  redirect_uri: string;
-  api_key: string; // the grove API key the user entered
-  expires_at: number;
-  code_challenge?: string;
-  code_challenge_method?: string;
-}
-
-const CLIENTS_PATH = join(homedir(), ".grove", "oauth-clients.json");
-const CODES_PATH = join(homedir(), ".grove", "oauth-codes.json");
-
-function loadJson<T>(path: string): T[] {
-  if (!existsSync(path)) return [];
-  try { return JSON.parse(readFileSync(path, "utf-8")); } catch {
-    // File missing or corrupt JSON — start fresh with empty array
-    return [];
-  }
-}
-
-function saveJson(path: string, data: unknown) {
-  writeFileSync(path, JSON.stringify(data, null, 2), { mode: 0o600 });
+function decryptForOAuth(encoded: string): string {
+  const buf = Buffer.from(encoded, "base64");
+  const iv = buf.subarray(0, 12);
+  const tag = buf.subarray(12, 28);
+  const ciphertext = buf.subarray(28);
+  const decipher = createDecipheriv("aes-256-gcm", OAUTH_ENCRYPT_KEY, iv);
+  decipher.setAuthTag(tag);
+  return decipher.update(ciphertext) + decipher.final("utf8");
 }
 
 function handleOAuth(req: IncomingMessage, res: ServerResponse, url: URL): boolean {
@@ -202,20 +193,20 @@ function handleOAuth(req: IncomingMessage, res: ServerResponse, url: URL): boole
   if (path === "/oauth/register" && req.method === "POST") {
     readBody(req).then((body) => {
       const data = JSON.parse(body);
-      const client: OAuthClient = {
-        client_id: "grove_client_" + randomBytes(16).toString("hex"),
-        client_secret: "grove_secret_" + randomBytes(32).toString("hex"),
-        redirect_uris: data.redirect_uris || [],
-        registered_at: new Date().toISOString(),
-      };
-      const clients = loadJson<OAuthClient>(CLIENTS_PATH);
-      clients.push(client);
-      saveJson(CLIENTS_PATH, clients);
-      console.log(`OAuth client registered: ${client.client_id}`);
+      const clientId = "grove_client_" + randomBytes(16).toString("hex");
+      const clientSecret = "grove_secret_" + randomBytes(32).toString("hex");
+      const redirectUris = data.redirect_uris || [];
+
+      const db = getDb();
+      db.prepare(
+        "INSERT INTO oauth_clients (client_id, client_secret_hash, redirect_uris) VALUES (?, ?, ?)"
+      ).run(clientId, hashToken(clientSecret), JSON.stringify(redirectUris));
+
+      console.log(`OAuth client registered: ${clientId}`);
       sendJson(res, 201, {
-        client_id: client.client_id,
-        client_secret: client.client_secret,
-        redirect_uris: client.redirect_uris,
+        client_id: clientId,
+        client_secret: clientSecret,
+        redirect_uris: redirectUris,
         grant_types: ["authorization_code"],
         response_types: ["code"],
         token_endpoint_auth_method: "client_secret_post",
@@ -296,28 +287,27 @@ function handleOAuth(req: IncomingMessage, res: ServerResponse, url: URL): boole
         return;
       }
 
-      // Generate auth code
-      const code: AuthCode = {
-        code: randomBytes(32).toString("hex"),
-        client_id: clientId,
-        redirect_uri: redirectUri,
-        api_key: apiKey,
-        expires_at: Date.now() + 5 * 60 * 1000, // 5 min
-      };
-
-      // Store code_challenge for PKCE
-      code.code_challenge = codeChallenge;
-      code.code_challenge_method = codeChallengeMethod;
-
-      const codes = loadJson<AuthCode>(CODES_PATH);
-      codes.push(code);
-      saveJson(CODES_PATH, codes);
+      // Generate auth code and store in SQLite
+      const codeStr = randomBytes(32).toString("hex");
+      const db = getDb();
+      db.prepare(
+        "INSERT INTO oauth_codes (code_hash, client_id, redirect_uri, key_id, encrypted_key, expires_at, code_challenge, code_challenge_method) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+      ).run(
+        hashToken(codeStr),
+        clientId,
+        redirectUri,
+        key.id,
+        encryptForOAuth(apiKey),
+        new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+        codeChallenge || null,
+        codeChallengeMethod || null,
+      );
 
       console.log(`OAuth code issued for key: ${key.name}`);
 
       // Redirect back to Claude
       const redirect = new URL(redirectUri);
-      redirect.searchParams.set("code", code.code);
+      redirect.searchParams.set("code", codeStr);
       if (state) redirect.searchParams.set("state", state);
       res.writeHead(302, { Location: redirect.toString() });
       res.end();
@@ -338,19 +328,27 @@ function handleOAuth(req: IncomingMessage, res: ServerResponse, url: URL): boole
         return;
       }
 
-      const codes = loadJson<AuthCode>(CODES_PATH);
-      const idx = codes.findIndex((c) => c.code === code);
-      if (idx === -1) {
+      const db = getDb();
+      const codeHash = hashToken(code);
+      const authCode = db.prepare("SELECT * FROM oauth_codes WHERE code_hash = ?").get(codeHash) as {
+        code_hash: string;
+        client_id: string;
+        redirect_uri: string;
+        key_id: string;
+        encrypted_key: string;
+        expires_at: string;
+        code_challenge: string | null;
+        code_challenge_method: string | null;
+      } | undefined;
+
+      if (!authCode) {
         sendJson(res, 400, { error: "invalid_grant", error_description: "Code not found" });
         return;
       }
 
-      const authCode = codes[idx];
-
       // Check expiry
-      if (Date.now() > authCode.expires_at) {
-        codes.splice(idx, 1);
-        saveJson(CODES_PATH, codes);
+      if (new Date(authCode.expires_at).getTime() < Date.now()) {
+        db.prepare("DELETE FROM oauth_codes WHERE code_hash = ?").run(codeHash);
         sendJson(res, 400, { error: "invalid_grant", error_description: "Code expired" });
         return;
       }
@@ -366,15 +364,15 @@ function handleOAuth(req: IncomingMessage, res: ServerResponse, url: URL): boole
         }
       }
 
-      // Remove used code
-      codes.splice(idx, 1);
-      saveJson(CODES_PATH, codes);
+      // Remove used code and decrypt the API key
+      db.prepare("DELETE FROM oauth_codes WHERE code_hash = ?").run(codeHash);
+      const accessToken = decryptForOAuth(authCode.encrypted_key);
 
       console.log(`OAuth token issued for code`);
 
       // Return the original API key as the access token
       sendJson(res, 200, {
-        access_token: authCode.api_key,
+        access_token: accessToken,
         token_type: "Bearer",
         expires_in: 86400 * 365, // 1 year — effectively no expiry
       });
