@@ -19,6 +19,14 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 
 import { hybridSearch, formatResults, bm25Search } from "./hybrid-search.js";
+
+/** Encode a vault path as a valid URL (encode each segment, preserve slashes) */
+function noteUrl(vaultPath: string): string {
+  const stripped = vaultPath.replace(/\.md$/, "");
+  const encoded = stripped.split("/").map(encodeURIComponent).join("/");
+  return `https://grove.md/${encoded}`;
+}
+
 import { embedFile } from "./embed-single.js";
 import { WriteQueue } from "./write-queue.js";
 import { gitCommit, gitPush, gitLog, startupRecovery, qmdReindex, listNotes } from "./vault-ops.js";
@@ -78,7 +86,7 @@ Searching: Use query with lex (keyword) and vec (semantic) sub-queries. Provide 
 
 Writing: Use write_note with proper frontmatter (type + tags required). Use if_hash for safe updates to existing notes.
 
-URLs: Every note is viewable at https://grove.md/<path-without-.md>. Tool responses include a url field — always present that to the user. Never invent or guess URLs.`;
+URLs: Every tool response includes a url field. ALWAYS show it to the user as a clickable link — especially after writes. This is the primary way the user accesses their notes.`;
 
 // ── Create MCP server with all 6 tools ────────────────────────────
 
@@ -185,7 +193,7 @@ Use the content_hash as if_hash when updating the note.`,
         }
 
         const hash = contentHash(raw);
-        const url = `https://grove.md/${rel.replace(/\.md$/, "")}`;
+        const url = noteUrl(rel);
         const result: Record<string, unknown> = { path: rel, url, frontmatter, content, content_hash: hash };
         if (resolvedFrom) result.resolved_from = resolvedFrom;
         return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
@@ -296,7 +304,7 @@ Examples: "Resources/People/*.md", "Journal/2026/*.md", "path1.md,path2.md"`,
             continue;
           }
         }
-        const url = `https://grove.md/${entry.path.replace(/\.md$/, "")}`;
+        const url = noteUrl(entry.path);
         results.push({ path: entry.path, url, frontmatter, content: content.slice(0, 2000), content_hash: contentHash(raw) });
       }
       return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
@@ -409,7 +417,7 @@ After writing, present the url field from the response to the user.`,
           action,
           content_hash: contentHash(serialized),
           commit: sha,
-          url: `https://grove.md/${relPath.replace(/\.md$/, "")}`,
+          url: noteUrl(relPath),
         };
       });
 

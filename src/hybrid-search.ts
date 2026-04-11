@@ -487,7 +487,7 @@ export function formatResults(results: HybridResult[]): string {
   return results
     .map(
       (r) => {
-        const url = `https://grove.md/${r.file.replace(/\.md$/, "")}`;
+        const url = "https://grove.md/" + r.file.replace(/\.md$/, "").split("/").map(encodeURIComponent).join("/");
         return `**${r.title}** (${url})\n${r.snippet ?? ""}`;
       }
     )
