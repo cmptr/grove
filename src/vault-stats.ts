@@ -384,7 +384,32 @@ export function getStats(_vaultPath: string): VaultStats | null {
 
 export async function refreshStats(vaultPath: string): Promise<VaultStats> {
   cachedStats = await computeVaultStats(vaultPath);
+  pingHeartbeat(cachedStats);
   return cachedStats;
+}
+
+// ── Better Stack Heartbeat ──────────────────────────────────────────
+
+const HEARTBEAT_URL = process.env.GROVE_HEARTBEAT_URL ??
+  "https://uptime.betterstack.com/api/v1/heartbeat/yyvRTtMqKdSPp6ZMUXfYpHJb";
+
+function pingHeartbeat(stats: VaultStats): void {
+  const summary = [
+    `notes=${stats.vault.total_notes}`,
+    `orphans=${stats.graph.orphan_count}`,
+    `drift=${stats.index.drift}`,
+    `seeds=${stats.lifecycle.seeds}`,
+    `sprouts=${stats.lifecycle.sprouts}`,
+    `growing=${stats.lifecycle.growing}`,
+    `completeness=${Math.round(stats.vault.frontmatter_completeness * 100)}%`,
+    `tags=${stats.vault.tag_cardinality}`,
+    `nodes=${stats.graph.nodes}`,
+    `edges=${stats.graph.edges}`,
+  ].join(" | ");
+
+  fetch(HEARTBEAT_URL, { method: "POST", body: summary }).catch((err) =>
+    console.warn("[vault-stats] heartbeat ping failed:", (err as Error).message),
+  );
 }
 
 export function startStatsTimer(
