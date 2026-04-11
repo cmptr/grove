@@ -9,7 +9,7 @@ import Database from "better-sqlite3";
 import { existsSync, readFileSync, renameSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
 const GROVE_DIR = join(homedir(), ".grove");
 const DB_PATH = process.env.GROVE_DB_PATH ?? join(GROVE_DIR, "grove.db");
@@ -109,6 +109,25 @@ CREATE TABLE IF NOT EXISTS magic_links (
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   expires_at TEXT NOT NULL,
   used_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS oauth_clients (
+  client_id TEXT PRIMARY KEY,
+  client_secret_hash TEXT NOT NULL,
+  redirect_uris TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS oauth_codes (
+  code_hash TEXT PRIMARY KEY,
+  client_id TEXT NOT NULL,
+  redirect_uri TEXT NOT NULL,
+  key_id TEXT NOT NULL,
+  encrypted_key TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  code_challenge TEXT,
+  code_challenge_method TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 `;
 
@@ -261,4 +280,42 @@ export function runMigration(): void {
   if (hasTrails) renameSync(TRAILS_PATH, TRAILS_PATH + ".migrated");
 
   console.log("[db] Migration complete — JSON files renamed to .migrated");
+
+  // Migrate OAuth clients from JSON to SQLite
+  migrateOAuth(database);
+}
+
+function hashTokenForMigration(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+function migrateOAuth(database: Database.Database): void {
+  const OAUTH_CLIENTS_PATH = join(GROVE_DIR, "oauth-clients.json");
+  if (existsSync(OAUTH_CLIENTS_PATH)) {
+    const clients = JSON.parse(readFileSync(OAUTH_CLIENTS_PATH, "utf-8")) as Array<{
+      client_id: string;
+      client_secret: string;
+      redirect_uris: string[];
+      registered_at: string;
+    }>;
+    for (const c of clients) {
+      database.prepare(
+        "INSERT OR IGNORE INTO oauth_clients (client_id, client_secret_hash, redirect_uris, created_at) VALUES (?, ?, ?, ?)"
+      ).run(
+        c.client_id,
+        hashTokenForMigration(c.client_secret),
+        JSON.stringify(c.redirect_uris),
+        c.registered_at,
+      );
+    }
+    renameSync(OAUTH_CLIENTS_PATH, OAUTH_CLIENTS_PATH + ".migrated");
+    console.log("[db] OAuth clients migrated from JSON to SQLite");
+  }
+
+  // Don't migrate oauth-codes — they're short-lived (5min) and can be discarded
+  const OAUTH_CODES_PATH = join(GROVE_DIR, "oauth-codes.json");
+  if (existsSync(OAUTH_CODES_PATH)) {
+    renameSync(OAUTH_CODES_PATH, OAUTH_CODES_PATH + ".migrated");
+    console.log("[db] OAuth codes JSON file renamed to .migrated (short-lived, not migrated)");
+  }
 }
