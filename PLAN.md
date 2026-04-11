@@ -12,9 +12,9 @@ Grove is a TypeScript API server that wraps a git-tracked Obsidian vault and exp
 **Repo:** `~/src/grove`
 **Vault:** `~/life/` (primary), `~/canva/` (deferred — Phase 8)
 **Depends on:** `@tobilu/qmd` (search engine), `@modelcontextprotocol/sdk` (MCP transport)
-**Deploys to:** AWS g4dn.xlarge (T4 GPU) at `api.grove.md` (52.37.76.231)
-**Live:** Phases 0-3 complete, Phase 5 trails complete, Phase B magic link auth complete — MCP + hybrid search + read/write + scoped sharing + magic link auth + persistent sessions at `https://api.grove.md`
-**Next:** Portal knowledge views (P4-10+) → Discovery (Phase 7)
+**Deploys to:** AWS t3.medium at `api.grove.md` (52.37.76.231), frontend on Vercel at `grove.md`
+**Live:** Phases 0-5 complete, security hardened, observable, magic link auth, persistent sessions, S3 backups, cross-domain auth with grove.md
+**Next:** Portal knowledge views (P4-10+) → Discovery (Phase 7) → Multi-vault (Phase 8)
 
 ---
 
@@ -211,8 +211,8 @@ Claude.ai → proxy.ts (auth/OAuth/CORS/logging) → Grove MCP server (all 6 too
 
 #### Phase 2b: Infrastructure Security
 
-- [ ] **P2-5: EBS encryption**
-  Enable EBS encryption (AES-256, AWS-managed CMK) on the volume. Free, zero app changes, protects snapshots and S3 backups automatically. Migrate by creating encrypted volume from snapshot. *(Expert correction: LUKS is wrong for AWS — the volume is mounted and decrypted at runtime, so LUKS only protects against physical disk theft, which AWS already handles.)*
+- [x] **P2-5: EBS encryption**
+  Volume already encrypted (AES-256, AWS-managed CMK). Verified via `aws ec2 describe-volumes`.
 
 - [x] **P2-6: Daily S3 backups**
   Cron job tars `~/.grove/` (keys, trails, configs) + QMD index and ships to S3 with server-side encryption. Vault itself is in git (GitHub private). QMD index and embeddings are derived and rebuildable, but backing up saves hours of re-embedding.
@@ -270,11 +270,11 @@ Claude.ai → proxy.ts (auth/OAuth/CORS/logging) → Grove MCP server (all 6 too
   - `embedding_latency_ms`
   - `uptime_seconds`
 
-- [ ] **P3-6: BetterStack integration**
-  - Ship logs via BetterStack agent (structured JSON from stdout)
-  - Uptime monitor: ping `/health` on proxy (8420) every 60s, alert after 2 consecutive failures
-  - Error rate alert: >10% over 5-minute window (log-based)
-  - Daily dead man's switch: cron hits BetterStack heartbeat URL, alerts if it stops
+- [x] **P3-6: BetterStack integration**
+  - Uptime monitor on `https://api.grove.md/health` (3-min checks, 2-min confirmation, email alerts)
+  - Heartbeat ping every 5 min from vault-stats computation
+  - Vector log shipper (systemd service) forwarding PM2 stdout/stderr to BetterStack Logs
+  - grove.md uptime monitor also active
 
 #### Phase 3 Tests
 
@@ -290,22 +290,23 @@ Claude.ai → proxy.ts (auth/OAuth/CORS/logging) → Grove MCP server (all 6 too
 
 **Prerequisites:** Phase 3 observability in place (dashboard needs metrics to display).
 
+**What exists:** `grove-www` (Next.js 16 on Vercel at `grove.md`) — note viewer with markdown rendering, Cmd+K search, directory browsing, magic link + API key auth. Server-side API proxy to `api.grove.md`. No ops dashboard or key management UI yet.
+
 **Key architectural decisions:**
-- **Start as ops dashboard, design the shell for knowledge browsing.** The first version manages infrastructure (keys, trails, usage). But the auth, layout, and routing should support adding vault-aware views (graph, lifecycle, search) without a rewrite.
-- **Next.js on Vercel.** The API stays on the VPS (`api.grove.md`). The frontend is a separate app that talks to it. This keeps the raw `node:http` server simple and lets the portal use a real framework for auth, routing, and UI.
-- **Auth: owner-only for now.** Single user, one admin key, session cookie. No multi-user, no OAuth provider, no signup. When trail consumers need a portal (onboarding pages, usage views), that's a separate decision — it might be unauthenticated public pages per trail, not a login system.
-- **The portal never writes to the vault.** It manages Grove infrastructure (keys, trails, config) and reads vault state (health, metrics, graph). Vault writes stay in Claude via MCP. This keeps the portal stateless relative to vault content.
+- **Next.js on Vercel.** The API stays on the VPS (`api.grove.md`). The frontend is a separate app that talks to it.
+- **Auth: magic link + API key.** Magic link flow creates an auto-provisioned read-only API key via auth code exchange. API key paste still supported.
+- **The portal never writes to the vault.** It manages Grove infrastructure (keys, trails, config) and reads vault state (health, metrics, graph). Vault writes stay in Claude via MCP.
 
-#### Phase 4a: Shell + Auth
+#### Phase 4a: Shell + Auth ✅ COMPLETE
 
-- [ ] **P4-1: Next.js app scaffold**
-  `app.grove.md` (or `/admin` on `grove.md`). Next.js App Router, deployed on Vercel. Minimal dependencies — Tailwind, no component library to start. Dark mode, monospace aesthetic that matches the CLI feel.
+- [x] **P4-1: Next.js app scaffold**
+  `grove.md` — Next.js 16 App Router on Vercel. Tailwind CSS v4, Lora/Inter/Geist Mono fonts. Warm editorial design system (cream/ink/moss/harvest/earth).
 
-- [ ] **P4-2: Admin auth**
-  Login = paste admin key → server validates against `GROVE_ADMIN_KEY` hash → returns signed session token (JWT, short TTL, httpOnly cookie). No OAuth, no provider. API routes on the Next.js app proxy to `api.grove.md` with the session token. Logout = clear cookie.
+- [x] **P4-2: Admin auth**
+  Two auth paths: (1) API key paste → encrypted into `grove_token` cookie, (2) Magic link email → auth code exchange → auto-provisioned API key → same cookie. Both use AES-256-GCM encrypted cookie with 30-day expiry.
 
-- [ ] **P4-3: Auth middleware**
-  Next.js middleware checks session cookie on all `/dashboard/*` routes. Expired or missing → redirect to login. Session refresh on activity (sliding window).
+- [x] **P4-3: Auth middleware (proxy.ts)**
+  Next.js 16 proxy file checks `grove_token` cookie on all routes. Unauthenticated users redirect to `/login?redirect=<path>`. Public paths (`/`, `/login`, `/api/auth`) exempt.
 
 #### Phase 4b: Ops Dashboard
 
@@ -430,8 +431,8 @@ On MCP `initialize`, if the session is trail-scoped, return trail metadata (name
 
 #### Phase 5b: Safety & Eval
 
-- [ ] **P5-7: Tag hygiene audit**
-  Before shipping trails, run diagnostics: how many notes have no tags? How many have tags that don't match any trail's allow list? This determines whether tag-based filtering is viable or needs path-based filtering as primary. Run via `vault_status(diagnostics)` + new tag coverage report.
+- [x] **P5-7: Tag hygiene audit**
+  Audited 2026-04-11: 160/1083 notes (15%) have tags. Path-based filtering is the primary mechanism. The AI trail uses both `allow_paths` and `allow_tags` — paths do the heavy lifting. No action needed; tag coverage is low but trails work because they combine tag + path filters.
 
 - [x] **P5-8: Trail filter eval suite**
   Labeled test cases: 20 known-sensitive notes and 20 known-safe notes. 100% precision (zero leaks) and 100% recall on labeled dataset. Tests in `test/trails.test.ts`.
@@ -648,33 +649,21 @@ Decisions made during planning. Reference these when implementing — don't re-l
 
 ## Implementation Order
 
-**Phase 1** (complete):
-1. ~~P1-1 through P1-15~~ ✅
+**Phases 0-1** ✅ — MCP server, hybrid search, read/write, auth, CLI
+**Phase 2** ✅ — Path traversal, CORS, body limits, scope enforcement, EBS encryption, S3 backups, OAuth secrets to SQLite, key TTLs
+**Phase 3** ✅ — Structured logging, correlation IDs, audit logging, deep health check, metrics, BetterStack (uptime + logs)
+**Phase B** ✅ — Magic link auth, persistent SQLite sessions, cross-domain auth code exchange (grove.md ↔ api.grove.md)
+**Phase 5** ✅ — Trail config/CLI/filtering/eval/audit/blast-radius/tag-audit/snapshot-rollback
 
-**Phase 2 — Security Hardening:**
-1. **P2-1 + P2-2 + P2-3** — Path traversal, CORS, body size limit (critical, parallelize)
-2. **P2-4** — Scope enforcement (depends on nothing, can parallel with above)
-3. **P2-5** — EBS encryption (AWS console, independent)
-4. **P2-6** — S3 backups (after EBS, so backups are encrypted)
-5. **P2-7 + P2-8** — Secrets migration + key TTLs (parallel)
+**Phase 4a** ✅ — Next.js app scaffold, auth (magic link + API key), middleware
+**Phase 4b — Ops Dashboard (next):**
+1. **P4-4 + P4-7** — Key management + vault health (parallel, both read from existing APIs)
+2. **P4-5 + P4-6** — Trail management + usage dashboard (parallel, trails backend is ready)
+3. **P4-8 + P4-9** — Consumer onboarding page + trail usage view (parallel, lightweight)
 
-**Phase 3 — Observability:**
-1. **P3-1 + P3-2** — Structured logging + correlation IDs (build together)
-2. **P3-3** — Audit log for reads (uses the new logging infra)
-3. **P3-4** — Deep health check (independent)
-4. **P3-5** — Metrics endpoint (independent, uses internal counters)
-5. **P3-6** — BetterStack integration (after logging is structured)
+**Phase 4d — Knowledge Views (after ops dashboard):**
+4. **P4-10 + P4-11 + P4-12** — Graph explorer, lifecycle dashboard, search playground
 
-**Phase 4 — Portal:**
-1. **P4-1 + P4-2 + P4-3** — Next.js scaffold + admin auth + middleware (foundational, build together)
-2. **P4-4 + P4-7** — Key management + vault health (parallel, both read from existing APIs)
-3. **P4-5 + P4-6** — Trail management + usage dashboard (parallel, trails backend is ready)
-4. **P4-8 + P4-9** — Consumer onboarding page + trail usage view (parallel, lightweight)
-5. **P4-10 + P4-11 + P4-12** — Knowledge views: graph, lifecycle, search (future, after ops dashboard is stable)
-
-**Phase 5 — Trails:** (infrastructure complete)
-1. ~~P5-1 through P5-6~~ ✅ — Config, CLI, proxy resolution, server filtering, filtered_count, MCP handshake
-2. ~~P5-8 + P5-9~~ ✅ — Eval suite (100% precision/recall) + audit logging
-3. **P5-7** — Tag hygiene audit (still useful for tuning trail boundaries)
-4. **P5-10 + P5-11** — Blast radius limits + snapshot/rollback (safety, before opening trails to consumers)
-5. Portal integration moved to Phase 4 (P4-5, P4-8, P4-9)
+**Phase 6** — LLM judge (deferred until trail edge cases prove the need)
+**Phase 7** — Discovery & onboarding (background discovery loop, concept extraction, bookmark integration)
+**Phase 8** — Multi-vault (work vault, cross-vault search)
