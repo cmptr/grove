@@ -677,8 +677,14 @@ const server = createServer(async (req, res) => {
   // CORS preflight — /v1/* gets locked-down CORS (handled in the /v1/ block below),
   // everything else gets permissive CORS for MCP/Claude.ai compatibility
   if (req.method === "OPTIONS" && !url.pathname.startsWith("/v1/")) {
+    // Lock down cookie-auth routes; keep * for Bearer-only routes (MCP, search)
+    const isCookieRoute = url.pathname.startsWith("/auth") ||
+      url.pathname.startsWith("/admin") ||
+      url.pathname === "/keys" ||
+      url.pathname === "/";
+    const corsOrigin = isCookieRoute ? GROVE_URL : "*";
     res.writeHead(204, {
-      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Origin": corsOrigin,
       "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type, Authorization, mcp-session-id",
       "Access-Control-Expose-Headers": "mcp-session-id",
@@ -719,6 +725,7 @@ const server = createServer(async (req, res) => {
 
   // Metrics endpoint — request counts, latency percentiles, error rates
   if (url.pathname === "/metrics") {
+    res.setHeader("Access-Control-Allow-Origin", GROVE_URL);
     sendJson(res, 200, metrics.getMetrics());
     return;
   }
@@ -801,6 +808,7 @@ const server = createServer(async (req, res) => {
 
   if (url.pathname === "/auth/session" && req.method === "GET") {
     const sessionToken = getSessionFromCookie(req);
+    res.setHeader("Access-Control-Allow-Origin", GROVE_URL);
     if (!sessionToken) { sendJson(res, 401, { error: "not authenticated" }); return; }
     const user = validateSession(sessionToken);
     if (!user) { sendJson(res, 401, { error: "session expired" }); return; }
@@ -1106,6 +1114,16 @@ const server = createServer(async (req, res) => {
         auditWrite(rid, key.id, key.name, toolName, toolArgs, null);
       } else {
         auditRead(rid, key.id, key.name, toolName, toolArgs);
+      }
+    }
+
+    // Scope enforcement — reject write tools if key lacks 'write' scope
+    if (mcpMethod === "tools/call" && toolName === "write_note") {
+      const keyScopes = key.scopes.split(",");
+      if (!keyScopes.includes("write")) {
+        structuredLog("warn", "auth.scope_denied", rid, { key_id: key.id, key_name: key.name, tool: toolName });
+        sendJson(res, 403, { error: "scope_denied", detail: "key lacks 'write' scope" });
+        return;
       }
     }
 
