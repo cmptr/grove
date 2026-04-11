@@ -62,6 +62,26 @@ describe("RateLimiter", () => {
     expect(limiter.check("key1", "read").allowed).toBe(false);
     expect(limiter.check("key2", "read").allowed).toBe(true);
   });
+
+  describe("checkWithLimit", () => {
+    it("uses custom limit instead of default", () => {
+      limiter = new RateLimiter({ reads: 100, writes: 100, windowMs: 60_000 });
+      // Custom limit of 3
+      for (let i = 0; i < 3; i++) {
+        expect(limiter.checkWithLimit("key1", "read", 3).allowed).toBe(true);
+        limiter.record("key1", "read");
+      }
+      expect(limiter.checkWithLimit("key1", "read", 3).allowed).toBe(false);
+    });
+
+    it("independent buckets per key", () => {
+      limiter = new RateLimiter({ reads: 100, writes: 100, windowMs: 60_000 });
+      limiter.record("trail:a", "read");
+      limiter.record("trail:a", "read");
+      expect(limiter.checkWithLimit("trail:a", "read", 2).allowed).toBe(false);
+      expect(limiter.checkWithLimit("trail:b", "read", 2).allowed).toBe(true);
+    });
+  });
 });
 
 // ── IdempotencyCache ────────────────────────────────────────────────

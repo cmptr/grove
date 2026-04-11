@@ -41,6 +41,17 @@ export class RateLimiter {
     return { allowed: true };
   }
 
+  checkWithLimit(keyId: string, type: "read" | "write", maxAllowed: number): RateLimitResult {
+    const key = `${keyId}:${type}`;
+    const now = Date.now();
+    const timestamps = (this.buckets.get(key) ?? []).filter((t) => t > now - this.limits.windowMs);
+    if (timestamps.length >= maxAllowed) {
+      const oldest = timestamps[0]!;
+      return { allowed: false, retryAfterMs: oldest + this.limits.windowMs - now };
+    }
+    return { allowed: true };
+  }
+
   record(keyId: string, type: "read" | "write"): void {
     const key = `${keyId}:${type}`;
     const now = Date.now();
