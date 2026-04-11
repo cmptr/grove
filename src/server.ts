@@ -325,13 +325,19 @@ STRUCTURE — common paths (but any path works):
   Areas/Name.md                Inbox/Name.md
   Notes/Name.md
 
+FILENAMES — use kebab-case (hyphens, lowercase) for clean URLs:
+  Resources/Concepts/gentle-oxiclean-alternatives.md  ✓
+  Resources/Concepts/Gentle OxiClean Alternatives.md  ✗
+  Resources/People/John-Milinovich.md                 ✓
+Use aliases in frontmatter for the human-readable title.
+
 Only constraint: don't put a type in another type's designated folder
 (e.g., don't put type: person in Resources/Concepts/).
 
 FRONTMATTER — needs type (any string) + at least one tag:
   type: concept          — any string works, not just known types
   tags: [ai, research]   — at least one tag, your choice what
-  aliases: ["alt name"]  — optional
+  aliases: ["Display Name"] — the human-readable title (required since filenames are kebab-case)
 
 Special requirements:
   journal needs: date    recipe needs: meal_type
@@ -347,7 +353,7 @@ SAFE UPDATES — pass if_hash (from a prior get) to prevent overwriting concurre
 
 After writing, present the url field from the response to the user.`,
       inputSchema: {
-        path: z.string().describe("File path relative to vault root (e.g., 'Resources/Concepts/Context Engineering.md')"),
+        path: z.string().describe("File path relative to vault root, kebab-case (e.g., 'Resources/Concepts/context-engineering.md')"),
         frontmatter: z.string().describe("YAML frontmatter as JSON string (e.g., '{\"type\":\"concept\",\"tags\":[\"concept\"]}')"),
         content: z.string().describe("Note body (markdown)"),
         if_hash: z.string().optional().describe("Content hash from prior read — rejects if file changed since"),
