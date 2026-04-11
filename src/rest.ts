@@ -368,12 +368,14 @@ export async function handleSearch(query: string, limit: number = 10, trail?: Tr
   const results = await hybridSearch(query, fetchLimit);
 
   // Map to response shape — vault_path is the canonical lowercase path from QMD index
+  const stripWikilinks = (s: string) => s.replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_m, target, display) => display ?? target);
   let filtered = results.map((r) => ({
-    path: r.file.replace(/^qmd:\/\/life\//, ""),
-    title: r.title.replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_m, _target, display) => display ?? _target),
+    path: r.vault_path, // canonical vault path, not the qmd:// display label
+    title: stripWikilinks(r.title),
     snippet: r.snippet ?? "",
     score: r.rrf_score,
-    vault_path: r.vault_path, // lowercase path, e.g. "resources/concepts/agent-runtime.md"
+    vault_path: r.vault_path,
+    url: "https://grove.md/" + r.vault_path.replace(/\.md$/, "").split("/").map(encodeURIComponent).join("/"),
   }));
 
   if (trail) {

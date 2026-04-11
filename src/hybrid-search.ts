@@ -482,13 +482,15 @@ export async function hybridSearch(
 /**
  * Format hybrid results as text for MCP response
  */
+const stripWikilinks = (s: string) => s.replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_m, target, display) => display ?? target);
+
 export function formatResults(results: HybridResult[]): string {
   if (results.length === 0) return "No results found.";
   return results
     .map(
       (r) => {
         const url = "https://grove.md/" + r.vault_path.replace(/\.md$/, "").split("/").map(encodeURIComponent).join("/");
-        return `**${r.title}** (${url})\n${r.snippet ?? ""}`;
+        return `**${stripWikilinks(r.title)}** (${url})\n${r.snippet ?? ""}`;
       }
     )
     .join("\n\n---\n\n");
