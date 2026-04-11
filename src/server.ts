@@ -36,6 +36,7 @@ import { getStats, startStatsTimer, refreshStats } from "./vault-stats.js";
 import { RateLimiter, IdempotencyCache } from "./rate-limit.js";
 import { log as structuredLog, auditRead } from "./logger.js";
 import { filterByTrail, trailAllowsWrite, logTrailAccess, type TrailConfig, type NoteMetadata } from "./trails.js";
+import { runMigration } from "./db.js";
 
 // ── Path traversal guard ─────────────────────────────────────────
 // Resolves a relative path against the vault and rejects any attempt
@@ -792,6 +793,10 @@ const httpServer = createServer(async (req, res) => {
 
 async function start() {
   console.log(`[grove] vault: ${VAULT_PATH}`);
+
+  // Initialize SQLite database and migrate from JSON if needed
+  runMigration();
+
   try {
     await startupRecovery(VAULT_PATH);
   } catch (err) {

@@ -4,16 +4,12 @@
  * A trail is: a name + topic boundaries (tags, types, paths) + permission level + API key.
  * Consumers connect via MCP and see only what the trail allows.
  *
- * Config stored in ~/.grove/trails.json.
+ * Config stored in SQLite (grove.db).
  */
 
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
 import { randomBytes } from "node:crypto";
 import { createKey } from "./keys.js";
-
-const TRAILS_PATH = join(homedir(), ".grove", "trails.json");
+import { getDb } from "./db.js";
 
 // ── Trail config schema ───────────────────────────────────────────
 
@@ -36,15 +32,49 @@ export interface TrailConfig {
   rate_limit_writes: number;  // per minute (0 = no writes)
 }
 
+// ── Internal helpers ─────────────────────────────────────────────
+
+interface TrailRow {
+  id: string;
+  vault_id: string;
+  name: string;
+  description: string;
+  enabled: number;
+  config_json: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface TrailGrantRow {
+  grantee_id: string;
+}
+
+function rowToConfig(row: TrailRow, keyId: string): TrailConfig {
+  const config = JSON.parse(row.config_json);
+  return {
+    id: row.id,
+    name: row.name,
+    description: row.description,
+    key_id: keyId,
+    enabled: row.enabled === 1,
+    created_at: row.created_at,
+    allow_tags: config.allow_tags ?? [],
+    deny_tags: config.deny_tags ?? [],
+    allow_types: config.allow_types ?? [],
+    deny_types: config.deny_types ?? [],
+    allow_paths: config.allow_paths ?? [],
+    deny_paths: config.deny_paths ?? [],
+    rate_limit_reads: config.rate_limit_reads ?? 60,
+    rate_limit_writes: config.rate_limit_writes ?? 0,
+  };
+}
+
 // ── CRUD operations ───────────────────────────────────────────────
 
 export function loadTrails(): TrailConfig[] {
-  if (!existsSync(TRAILS_PATH)) return [];
-  try { return JSON.parse(readFileSync(TRAILS_PATH, "utf-8")); } catch { return []; }
-}
-
-export function saveTrails(trails: TrailConfig[]): void {
-  writeFileSync(TRAILS_PATH, JSON.stringify(trails, null, 2), { mode: 0o600 });
+  const db = getDb();
+  const rows = db.prepare("SELECT t.*, tg.grantee_id FROM trails t LEFT JOIN trail_grants tg ON t.id = tg.trail_id AND tg.grantee_type = 'token'").all() as (TrailRow & { grantee_id: string | null })[];
+  return rows.map((r) => rowToConfig(r, r.grantee_id ?? ""));
 }
 
 export function generateTrailId(): string {
@@ -63,18 +93,39 @@ export function createTrail(opts: {
   rate_limit_reads?: number;
   rate_limit_writes?: number;
 }): { trail: TrailConfig; token: string } {
-  const trails = loadTrails();
+  const db = getDb();
 
   // Create a read-only API key for this trail
   const keyResult = createKey(`trail:${opts.name}`, ["read"], "life");
 
+  const trailId = generateTrailId();
+  const now = new Date().toISOString();
+  const configJson = JSON.stringify({
+    allow_tags: opts.allow_tags ?? [],
+    deny_tags: opts.deny_tags ?? [],
+    allow_types: opts.allow_types ?? [],
+    deny_types: opts.deny_types ?? [],
+    allow_paths: opts.allow_paths ?? [],
+    deny_paths: opts.deny_paths ?? [],
+    rate_limit_reads: opts.rate_limit_reads ?? 60,
+    rate_limit_writes: opts.rate_limit_writes ?? 0,
+  });
+
+  db.prepare(
+    "INSERT INTO trails (id, vault_id, name, description, enabled, config_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+  ).run(trailId, "life", opts.name, opts.description ?? "", 1, configJson, now, now);
+
+  db.prepare(
+    "INSERT INTO trail_grants (id, trail_id, grantee_type, grantee_id, created_at) VALUES (?, ?, ?, ?, ?)"
+  ).run("grant_" + randomBytes(4).toString("hex"), trailId, "token", keyResult.id, now);
+
   const trail: TrailConfig = {
-    id: generateTrailId(),
+    id: trailId,
     name: opts.name,
     description: opts.description ?? "",
     key_id: keyResult.id,
     enabled: true,
-    created_at: new Date().toISOString(),
+    created_at: now,
     allow_tags: opts.allow_tags ?? [],
     deny_tags: opts.deny_tags ?? [],
     allow_types: opts.allow_types ?? [],
@@ -85,32 +136,28 @@ export function createTrail(opts: {
     rate_limit_writes: opts.rate_limit_writes ?? 0,
   };
 
-  trails.push(trail);
-  saveTrails(trails);
   return { trail, token: keyResult.token };
 }
 
 export function disableTrail(id: string): boolean {
-  const trails = loadTrails();
-  const trail = trails.find((t) => t.id === id);
-  if (!trail) return false;
-  trail.enabled = false;
-  saveTrails(trails);
-  return true;
+  const db = getDb();
+  const result = db.prepare("UPDATE trails SET enabled = 0, updated_at = ? WHERE id = ?").run(new Date().toISOString(), id);
+  return result.changes > 0;
 }
 
 export function deleteTrail(id: string): boolean {
-  const trails = loadTrails();
-  const idx = trails.findIndex((t) => t.id === id);
-  if (idx === -1) return false;
-  trails.splice(idx, 1);
-  saveTrails(trails);
-  return true;
+  const db = getDb();
+  const result = db.prepare("DELETE FROM trails WHERE id = ?").run(id);
+  return result.changes > 0;
 }
 
 export function resolveTrail(keyId: string): TrailConfig | null {
-  const trails = loadTrails();
-  return trails.find((t) => t.key_id === keyId && t.enabled) ?? null;
+  const db = getDb();
+  const row = db.prepare(
+    "SELECT t.* FROM trails t JOIN trail_grants tg ON t.id = tg.trail_id WHERE tg.grantee_type = 'token' AND tg.grantee_id = ? AND t.enabled = 1"
+  ).get(keyId) as TrailRow | undefined;
+  if (!row) return null;
+  return rowToConfig(row, keyId);
 }
 
 // ── Trail filtering ───────────────────────────────────────────────

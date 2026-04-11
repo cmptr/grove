@@ -21,7 +21,9 @@ import { appendFileSync, readFileSync, writeFileSync, existsSync } from "node:fs
 import { RateLimiter } from "./rate-limit.js";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { loadKeys, createKey, revokeKey, isExpired, type StoredKey } from "./keys.js";
+import { createKey, revokeKey, isExpired, hashToken, updateLastUsed, type StoredKey } from "./keys.js";
+import { getDb } from "./db.js";
+import { runMigration } from "./db.js";
 import { generateRequestId, log as structuredLog, auditRead, auditWrite } from "./logger.js";
 import { metrics } from "./metrics.js";
 import { resolveTrail, type TrailConfig } from "./trails.js";
@@ -36,7 +38,6 @@ const LOG_PATH = join(LOG_DIR, "proxy.log");
 const MCP_LOG_PATH = join(LOG_DIR, "mcp.jsonl");
 const GROVE_URL = process.env.GROVE_URL ?? "https://api.grove.md";
 
-let keys: StoredKey[] = [];
 const rateLimiter = new RateLimiter({ reads: 120, writes: 20, windowMs: 60_000 });
 
 // ── Admin auth: session cookie with TTL ─────────────────────────────
@@ -76,14 +77,12 @@ function adminAuth(req: IncomingMessage): { keyId: string; keyName: string } | n
   return { keyId: key.id, keyName: key.name };
 }
 
-function reloadKeys() {
-  keys = loadKeys();
-}
-
 function validateToken(token: string): StoredKey | null {
-  const hash = createHash("sha256").update(token).digest("hex");
-  const key = keys.find((k) => k.hashed_token === hash) ?? null;
-  if (key && isExpired(key)) return null; // expired keys are rejected
+  const hash = hashToken(token);
+  const db = getDb();
+  const key = db.prepare("SELECT * FROM api_keys WHERE hashed_token = ?").get(hash) as StoredKey | null;
+  if (!key) return null;
+  if (isExpired(key)) return null;
   return key;
 }
 
@@ -703,7 +702,8 @@ const server = createServer(async (req, res) => {
     try { parsed = JSON.parse(body); } catch { sendJson(res, 400, { error: "invalid json" }); return; }
 
     if (parsed.action === "list") {
-      const allKeys = loadKeys().map((k) => ({
+      const db = getDb();
+      const allKeys = (db.prepare("SELECT id, name, scopes, vault_id, created_at, last_used_at FROM api_keys").all() as StoredKey[]).map((k) => ({
         id: k.id,
         name: k.name,
         scopes: k.scopes,
@@ -716,13 +716,11 @@ const server = createServer(async (req, res) => {
     }
     if (parsed.action === "create" && parsed.name) {
       const result = createKey(parsed.name, parsed.scopes ?? ["read", "write"], parsed.vault ?? "life");
-      reloadKeys();
       sendJson(res, 200, { id: result.id, name: result.name, token: result.token });
       return;
     }
     if (parsed.action === "revoke" && parsed.id) {
       revokeKey(parsed.id);
-      reloadKeys();
       sendJson(res, 200, { revoked: parsed.id });
       return;
     }
@@ -1104,15 +1102,16 @@ const server = createServer(async (req, res) => {
   proxyToQmd(req, res);
 });
 
-reloadKeys();
-setInterval(reloadKeys, 30_000);
+runMigration();
 
 const VAULT_PATH_PROXY = process.env.GROVE_VAULT ?? join(homedir(), "life");
 startStatsTimer(VAULT_PATH_PROXY);
+
+const keyCount = getDb().prepare("SELECT COUNT(*) as count FROM api_keys").get() as { count: number };
 
 server.listen(PROXY_PORT, "0.0.0.0", () => {
   console.log(`Grove proxy listening on http://0.0.0.0:${PROXY_PORT}`);
   console.log(`Proxying authenticated requests to QMD at http://[::1]:${QMD_PORT}`);
   console.log(`OAuth authorize: ${GROVE_URL}/oauth/authorize`);
-  console.log(`Loaded ${keys.length} API key(s)`);
+  console.log(`Loaded ${keyCount.count} API key(s) from SQLite`);
 });

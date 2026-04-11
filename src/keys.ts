@@ -9,35 +9,29 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
+import { getDb } from "./db.js";
 
-const KEYS_PATH = join(homedir(), ".grove", "keys.json");
 const PREFIX = "grove_live_";
 
-interface StoredKey {
+export interface StoredKey {
   id: string;
+  user_id: string;
   name: string;
   hashed_token: string;
-  scopes: string[];
+  scopes: string;         // comma-separated in DB
   vault_id: string;
   created_at: string;
   last_used_at: string | null;
-  expires_at: string | null; // ISO date string, null = never expires
+  expires_at: string | null;
 }
 
-function hashToken(token: string): string {
+export function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
-function loadKeys(): StoredKey[] {
-  if (!existsSync(KEYS_PATH)) return [];
-  return JSON.parse(readFileSync(KEYS_PATH, "utf-8"));
-}
-
-function saveKeys(keys: StoredKey[]): void {
-  writeFileSync(KEYS_PATH, JSON.stringify(keys, null, 2), { mode: 0o600 });
+export function loadKeys(): StoredKey[] {
+  const db = getDb();
+  return db.prepare("SELECT * FROM api_keys").all() as StoredKey[];
 }
 
 function generateId(): string {
@@ -45,26 +39,33 @@ function generateId(): string {
 }
 
 function create(name: string, scopes = "read,write", vaultId = "life", ttlDays?: number) {
-  const keys = loadKeys();
   const raw = randomBytes(32).toString("hex");
   const token = PREFIX + raw;
-  const key: StoredKey = {
-    id: generateId(),
-    name,
-    hashed_token: hashToken(token),
-    scopes: scopes.split(","),
-    vault_id: vaultId,
-    created_at: new Date().toISOString(),
-    last_used_at: null,
-    expires_at: ttlDays ? new Date(Date.now() + ttlDays * 86400_000).toISOString() : null,
-  };
-  keys.push(key);
-  saveKeys(keys);
+  const db = getDb();
 
-  console.log(`\nKey created: ${key.id}`);
-  console.log(`Name:        ${key.name}`);
-  console.log(`Scopes:      ${key.scopes.join(", ")}`);
-  console.log(`Vault:       ${key.vault_id}`);
+  // Use admin user as default owner
+  const adminUser = db.prepare("SELECT id FROM users LIMIT 1").get() as { id: string } | undefined;
+  const userId = adminUser?.id ?? "user_00000000";
+
+  const id = generateId();
+  db.prepare(
+    "INSERT INTO api_keys (id, user_id, vault_id, name, hashed_token, scopes, created_at, last_used_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+  ).run(
+    id,
+    userId,
+    vaultId,
+    name,
+    hashToken(token),
+    scopes,
+    new Date().toISOString(),
+    null,
+    ttlDays ? new Date(Date.now() + ttlDays * 86400_000).toISOString() : null,
+  );
+
+  console.log(`\nKey created: ${id}`);
+  console.log(`Name:        ${name}`);
+  console.log(`Scopes:      ${scopes}`);
+  console.log(`Vault:       ${vaultId}`);
   console.log(`\nToken (shown once, save it now):\n`);
   console.log(`  ${token}\n`);
 }
@@ -79,22 +80,21 @@ function list() {
   console.log("─".repeat(80));
   for (const k of keys) {
     console.log(
-      `${k.id.padEnd(14)}${k.name.padEnd(20)}${k.scopes.join(",").padEnd(16)}${k.vault_id.padEnd(8)}${k.created_at.slice(0, 10)}`
+      `${k.id.padEnd(14)}${k.name.padEnd(20)}${k.scopes.padEnd(16)}${k.vault_id.padEnd(8)}${k.created_at.slice(0, 10)}`
     );
   }
   console.log();
 }
 
 function revoke(id: string) {
-  const keys = loadKeys();
-  const idx = keys.findIndex((k) => k.id === id);
-  if (idx === -1) {
+  const db = getDb();
+  const key = db.prepare("SELECT * FROM api_keys WHERE id = ?").get(id) as StoredKey | undefined;
+  if (!key) {
     console.error(`Key not found: ${id}`);
     process.exit(1);
   }
-  const removed = keys.splice(idx, 1)[0];
-  saveKeys(keys);
-  console.log(`Revoked key: ${removed.id} (${removed.name})`);
+  db.prepare("DELETE FROM api_keys WHERE id = ?").run(id);
+  console.log(`Revoked key: ${key.id} (${key.name})`);
 }
 
 // -- CLI --
@@ -122,37 +122,41 @@ if (command === "create") {
     process.exit(1);
   }
   revoke(id);
-} else {
+} else if (command) {
   console.log("Usage: grove keys <create|list|revoke>");
 }
 
 // -- Programmatic API (used by proxy /keys endpoint) --
 export function createKey(name: string, scopes: string[] = ["read", "write"], vaultId = "life", ttlDays?: number) {
-  const keys = loadKeys();
   const raw = randomBytes(32).toString("hex");
   const token = PREFIX + raw;
-  const key: StoredKey = {
-    id: generateId(),
+  const db = getDb();
+
+  const adminUser = db.prepare("SELECT id FROM users LIMIT 1").get() as { id: string } | undefined;
+  const userId = adminUser?.id ?? "user_00000000";
+
+  const id = generateId();
+  db.prepare(
+    "INSERT INTO api_keys (id, user_id, vault_id, name, hashed_token, scopes, created_at, last_used_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+  ).run(
+    id,
+    userId,
+    vaultId,
     name,
-    hashed_token: hashToken(token),
-    scopes,
-    vault_id: vaultId,
-    created_at: new Date().toISOString(),
-    last_used_at: null,
-    expires_at: ttlDays ? new Date(Date.now() + ttlDays * 86400_000).toISOString() : null,
-  };
-  keys.push(key);
-  saveKeys(keys);
-  return { id: key.id, name: key.name, token };
+    hashToken(token),
+    scopes.join(","),
+    new Date().toISOString(),
+    null,
+    ttlDays ? new Date(Date.now() + ttlDays * 86400_000).toISOString() : null,
+  );
+
+  return { id, name, token };
 }
 
 export function revokeKey(id: string): boolean {
-  const keys = loadKeys();
-  const idx = keys.findIndex((k) => k.id === id);
-  if (idx === -1) return false;
-  keys.splice(idx, 1);
-  saveKeys(keys);
-  return true;
+  const db = getDb();
+  const result = db.prepare("DELETE FROM api_keys WHERE id = ?").run(id);
+  return result.changes > 0;
 }
 
 /** Check if a key has expired */
@@ -161,4 +165,8 @@ export function isExpired(key: StoredKey): boolean {
   return new Date(key.expires_at).getTime() < Date.now();
 }
 
-export { loadKeys, hashToken, type StoredKey };
+/** Update last_used_at timestamp for a key */
+export function updateLastUsed(id: string): void {
+  const db = getDb();
+  db.prepare("UPDATE api_keys SET last_used_at = ? WHERE id = ?").run(new Date().toISOString(), id);
+}
