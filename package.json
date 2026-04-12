@@ -1,8 +1,25 @@
 {
   "name": "grove",
-  "version": "0.0.1",
-  "description": "A hosted knowledge API that makes Obsidian vaults searchable and writable from any Claude surface.",
+  "version": "1.0.0",
+  "description": "A hosted knowledge API that makes Obsidian vaults searchable and writable from any MCP client.",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jmilinovich/grove.git"
+  },
+  "homepage": "https://grove.md",
+  "author": "John Milinovich",
+  "license": "MIT",
+  "keywords": [
+    "obsidian",
+    "mcp",
+    "knowledge-base",
+    "model-context-protocol",
+    "search",
+    "ai",
+    "knowledge-management",
+    "personal-knowledge"
+  ],
   "scripts": {
     "proxy": "tsx src/proxy.ts",
     "keys": "tsx src/keys.ts",

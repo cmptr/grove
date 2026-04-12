@@ -69,7 +69,7 @@ Combines BM25 keyword matching and vector embeddings via Reciprocal Rank Fusion.
 }
 ```
 
-~30ms per query. Self-hosted embeddings (bge-base-en-v1.5, 768-dim). No OpenAI dependency. No data leaves your infrastructure.
+~30ms per query. Embeddings via Voyage AI (voyage-4-large, 1024-dim). No OpenAI dependency. Your notes stay on your server — only query text is sent for embedding.
 
 ### `get` — read a note
 
@@ -129,7 +129,7 @@ Grove is remote, bidirectional, and opinionated. It treats your vault as a struc
 | Graph analysis | No | Centrality, clusters, lifecycle |
 | Auth | None needed | OAuth 2.0 + bearer tokens |
 | Scoped sharing | No | Trails — topic-scoped access with deny lists |
-| Embeddings | Usually OpenAI API | Self-hosted, privacy-first |
+| Embeddings | Usually OpenAI API | Voyage AI, your infrastructure |
 
 ## The write flow
 
@@ -173,29 +173,29 @@ Server is the sole writer to git. Local machines pull. One direction. No split-b
               ┌────────────┼────────────┐
               │            │            │
        ┌──────┴──┐  ┌─────┴────┐  ┌───┴────┐
-       │ QMD     │  │ TEI      │  │ git    │
+       │ QMD     │  │ Voyage   │  │ git    │
        │ BM25    │  │ Vectors  │  │ vault  │
-       │ :8177   │  │ :8090    │  │ ~/life │
+       │ :8177   │  │  (API)   │  │ ~/life │
        └─────────┘  └──────────┘  └────────┘
 ```
 
-- **TypeScript**, ~2,500 LOC, raw `node:http` (no frameworks)
+- **TypeScript**, ~7,600 LOC, raw `node:http` (no frameworks)
 - **Auth:** OAuth 2.0 with PKCE for Claude.ai custom connectors, bearer tokens for CLI/API
-- **Search:** QMD (BM25) + TEI (bge-base-en-v1.5 embeddings) + RRF fusion
+- **Search:** QMD (BM25) + Voyage AI (voyage-4-large embeddings) + RRF fusion
 - **Persistence:** Git repo. Every note is a markdown file. Every mutation is a commit.
 - **Rate limiting:** 120 reads/min, 20 writes/min per API key. LRU idempotency cache.
 
 ## Self-hosting
 
-Grove runs on a 4-core VPS ($24/mo). Here's how to deploy your own:
+Grove runs on an AWS t3.medium (~$30/mo). Here's how to deploy your own:
 
 ### Prerequisites
 
 - Node.js >= 22
 - Git
 - A git-tracked Obsidian vault (or any folder of markdown files)
-- [QMD](https://github.com/tobilu/qmd) for search indexing
-- Docker (for TEI embeddings, optional — falls back to BM25-only)
+- [QMD](https://github.com/tobi/qmd) for search indexing
+- A Voyage AI API key (for vector embeddings, optional — falls back to BM25-only)
 
 ### Setup
 
@@ -230,7 +230,7 @@ pm2 start "qmd serve --vault /root/vault --port 8177" --name qmd-server
 # Proxy pass to localhost:8420
 ```
 
-Vault syncs every 5 minutes via cron. Embeddings are pre-computed on your local machine (Apple Silicon is fast) and synced to VPS via scp. See `sync-index.sh`.
+Vault syncs every 5 minutes via cron. Embeddings are computed on the server via Voyage AI API at index time.
 
 ## The garden: how I actually use this
 
