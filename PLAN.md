@@ -14,7 +14,7 @@ Grove is a TypeScript API server that wraps a git-tracked Obsidian vault and exp
 **Depends on:** `@tobilu/qmd` (search engine), `@modelcontextprotocol/sdk` (MCP transport)
 **Deploys to:** AWS t3.medium at `api.grove.md` (52.37.76.231), frontend on Vercel at `grove.md`
 **Live:** Phases 0-5 complete, security hardened, observable, magic link auth, persistent sessions, S3 backups, cross-domain auth with grove.md
-**Next:** Ops dashboard (P4-4–P4-9) → Multi-user collaboration (Phase 9) → Knowledge views (P4-10+) → Discovery (Phase 7)
+**Next:** Agent infrastructure (CI/CD, proxy extraction, graceful shutdown) → Ops dashboard (Phase 4b) → Multi-user (Phase 9a) → Discovery (Phase 7) → Knowledge views (P4-10+)
 
 ---
 
@@ -64,6 +64,127 @@ Grove is a TypeScript API server that wraps a git-tracked Obsidian vault and exp
 4. **Every write creates a git commit** with the API key identity in the commit message.
 5. **The search index updates synchronously on write** before returning 200. Eventual consistency is not acceptable — agents with no memory between calls will create duplicates.
 6. **Notes are the domain model.** The API returns structured JSON (parsed frontmatter, resolved links, computed backlinks), not raw markdown.
+
+---
+
+## Current State (as of 2026-04-12)
+
+Snapshot for cold-start agents. Verify against live system before acting.
+
+**Services (VPS — api.grove.md, 52.37.76.231):**
+| Process | Port | Purpose |
+|---------|------|---------|
+| `grove-proxy` | 8420 | Auth, OAuth, CORS, rate limiting, request routing |
+| `grove-server` | 8190 | MCP server, 6 tools, write queue |
+| `qmd-server` | 8177 | BM25 search (FTS5 index) |
+| Embedding | Voyage AI API | Vector embeddings (voyage-4-large, 1024-dim) |
+| nginx | 443 | TLS termination, reverse proxy to 8420 |
+
+**Database schema (`~/.grove/grove.db`):** `users`, `vaults`, `api_keys`, `trails`, `trail_grants`, `sessions`, `magic_links`, `oauth_clients`, `oauth_codes`, `auth_codes`
+
+**MCP Tools:** `query`, `get`, `multi_get`, `write_note`, `list_notes`, `vault_status`
+
+**Vault:** ~1,083 notes, ~5,600 embeddings, git-tracked at GitHub (private)
+
+**Source modules (25):** `proxy.ts` (1,351 LOC — route extraction needed), `server.ts` (820), `hybrid-search.ts` (494), `vault-graph.ts` (462), `vault-stats.ts` (439), `auth.ts` (358), `db.ts` (330), `vault-ops.ts` (286), `embed.ts` (274), `trails.ts` (262), `embed-node.ts` (193), `embed-single.ts` (170), `keys.ts` (172), `metrics.ts` (164), `notes-validate.ts` (136), `rest.ts` (476), `sync-sources.ts` (117), `rate-limit.ts` (118), `logger.ts` (103), `cli.ts` (708), `email.ts` (33), `users.ts` (60)
+
+**Test coverage:** 19 test files, 2,933 LOC, 228 tests, 0.39 test/code ratio. Coverage gaps: proxy.ts (64 LOC of tests for 1,351 LOC), no end-to-end write path test, no integration test harness.
+
+---
+
+## Agent Workflow
+
+How autonomous coding agents should work on this repo. Follow this protocol exactly.
+
+### Branch & PR Protocol
+
+1. Create branch: `agent/<task-id>` (e.g., `agent/p4-api-2`)
+2. Implement the task per its spec — do not touch files outside your spec's file list
+3. Run `npm test` — all tests must pass
+4. Run `npx tsc --noEmit` — must compile clean
+5. Commit with descriptive message referencing the task ID
+6. Open PR with task ID in title (e.g., `P4-API-2: User list endpoint + fix last_login_at`)
+7. CI runs tests + typecheck automatically. If it fails, fix and push.
+8. After merge to main, CI deploys automatically. Verify via health check.
+9. If broken post-deploy: `git revert <merge-commit>`, open issue, re-spec task.
+
+### File Ownership Rules
+
+When the execution strategy assigns files to specific agents, those are exclusive. Do not modify files outside your assignment. If you discover a bug in another file, document it as a follow-up task — don't fix it in your PR.
+
+### Merge Conflict Resolution
+
+If your branch conflicts with main:
+1. `git fetch origin && git rebase origin/main`
+2. Resolve conflicts preserving the intent of both changes
+3. Re-run `npm test && npx tsc --noEmit`
+4. Force-push your branch (not main)
+
+### Writing Tests
+
+Every new endpoint, function, or behavior change needs tests:
+- **Unit tests:** Test the function in isolation. Mock external dependencies.
+- **Test file naming:** `test/<module>.test.ts` (match the source file name)
+- **Fixtures:** Extend `test/fixtures/vault/` for vault-dependent tests. Document what you added.
+- **Acceptance criteria tests:** Each acceptance criterion in the spec should map to at least one test assertion.
+
+---
+
+## Dependency DAG
+
+```
+                    ┌─────────────────┐
+                    │  P4-PREREQ      │
+                    │  CI/CD pipeline  │
+                    │  Proxy extraction│
+                    │  Graceful shutdown│
+                    └────────┬────────┘
+                             │
+                    ┌────────▼────────┐
+                    │  Phase 4b       │
+                    │  Batch 1        │
+                    │  (4 backend     │
+                    │   agents)       │
+                    └────────┬────────┘
+                             │
+              ┌──────────────┼──────────────┐
+              ▼              ▼              ▼
+     ┌────────────┐  ┌────────────┐  ┌────────────┐
+     │ Phase 4b   │  │ Phase 4b   │  │ Phase 9a   │
+     │ Batch 2    │  │ Batch 3    │  │ User mgmt  │
+     │ (3 FE      │  │ (consumer) │  │ P9-1..P9-4 │
+     │  agents)   │  │            │  │            │
+     └──────┬─────┘  └────────────┘  └──────┬─────┘
+            │                               │
+            ▼                               ▼
+     ┌────────────┐                  ┌────────────┐
+     │ Phase 4d   │                  │ Phase 9b   │
+     │ Knowledge  │                  │ Trail UX   │
+     │ views      │                  │ P9-5..P9-7 │
+     └────────────┘                  └────────────┘
+
+     ┌────────────┐       ┌────────────┐
+     │ Phase 7a   │──────→│ Phase 7b   │
+     │ Discovery  │       │ Bulk       │
+     │ P7-1..P7-5 │       │ onboarding │
+     └────────────┘       └────────────┘
+         │
+         │ (P7-2 needs LLM — use Claude API,
+         │  not local Ollama. See Phase 7 spec.)
+         ▼
+     ┌────────────┐
+     │ Phase 8    │
+     │ Multi-vault│
+     └────────────┘
+```
+
+**Key dependency rules:**
+- P4-PREREQ must complete before any Phase 4b agent launches
+- Phase 4b Batch 2 needs Batch 1 merged and deployed
+- Phase 9a can start after P4-PREREQ (needs the extracted routes, not the dashboard)
+- Phase 9b needs Phase 9a + Phase 4b Batch 2 (for the UI shell)
+- Phase 7 has no dependency on Phase 4b — can run in parallel if agents are available
+- Phase 7a P7-2 (concept extraction) uses Claude API, not local Ollama (Phase 6 is killed)
 
 ---
 
@@ -308,9 +429,166 @@ Claude.ai → proxy.ts (auth/OAuth/CORS/logging) → Grove MCP server (all 6 too
 - [x] **P4-3: Auth middleware (proxy.ts)**
   Next.js 16 proxy file checks `grove_token` cookie on all routes. Unauthenticated users redirect to `/login?redirect=<path>`. Public paths (`/`, `/login`, `/api/auth`) exempt.
 
+#### Phase 4-PREREQ: Agent Infrastructure
+
+**Goal:** Make the codebase safe and efficient for autonomous parallel agent execution. These are structural prerequisites — without them, Phase 4b agents will hit merge conflicts, deploy broken code, and risk data loss.
+
+**Duration:** 3 tasks, can run as 2 parallel agents + 1 sequential. Half-day total.
+
+- [ ] **P4-PREREQ-1: Extract proxy.ts route handlers** (`src/proxy.ts` → `src/routes/*.ts`)
+
+  `proxy.ts` is 1,351 lines with every route in a single `createServer` callback. Every Phase 4b backend agent touches this file. Extract route handlers into domain-specific files.
+
+  **New file structure:**
+  ```
+  src/routes/
+  ├── auth.ts        # /auth/magic-link, /auth/verify, /auth/exchange, /auth/session, /auth/logout
+  ├── admin.ts       # /keys, /metrics, /health, /admin/* (login, session)
+  ├── mcp.ts         # /mcp proxy forwarding
+  ├── rest.ts        # /v1/* REST API routes (move from existing rest.ts or merge)
+  └── oauth.ts       # OAuth 2.0 endpoints (/.well-known, /authorize, /token, /register)
+  ```
+
+  **proxy.ts becomes a thin dispatcher:**
+  ```typescript
+  import { handleAuthRoutes } from "./routes/auth.js";
+  import { handleAdminRoutes } from "./routes/admin.js";
+  import { handleMcpRoutes } from "./routes/mcp.js";
+  import { handleRestRoutes } from "./routes/rest.js";
+  import { handleOAuthRoutes } from "./routes/oauth.js";
+
+  const server = createServer(async (req, res) => {
+    // Common middleware: CORS, request ID, logging, body parsing
+    // ...
+    // Route dispatch
+    if (await handleOAuthRoutes(req, res, ctx)) return;
+    if (await handleAuthRoutes(req, res, ctx)) return;
+    if (await handleAdminRoutes(req, res, ctx)) return;
+    if (await handleRestRoutes(req, res, ctx)) return;
+    if (await handleMcpRoutes(req, res, ctx)) return;
+    send404(res);
+  });
+  ```
+
+  Each route handler returns `true` if it handled the request. `adminAuth()`, `validateToken()`, `sendJson()` etc. move to `src/routes/helpers.ts` or stay in `proxy.ts` as shared utilities.
+
+  **Files:** `src/proxy.ts` (reduce to ~300 LOC dispatcher), `src/routes/auth.ts`, `src/routes/admin.ts`, `src/routes/mcp.ts`, `src/routes/rest.ts`, `src/routes/oauth.ts`, `src/routes/helpers.ts`
+
+  **Tests:** Existing `test/proxy.test.ts` tests must still pass. Add a smoke test: boot server, hit each route category, verify routing works.
+
+  **Acceptance criteria:**
+  - `proxy.ts` is <400 LOC
+  - All existing tests pass with zero changes to test files
+  - Each route file is self-contained — a Phase 4b agent adding a new admin route creates or edits `src/routes/admin.ts`, not `proxy.ts`
+  - No behavioral changes to any endpoint
+
+- [ ] **P4-PREREQ-2: GitHub Actions CI/CD pipeline** (`.github/workflows/ci.yml`)
+
+  Agents need automated feedback. Without CI, broken code ships silently.
+
+  **Workflow:**
+  ```yaml
+  name: CI
+  on:
+    push:
+      branches: [main]
+    pull_request:
+      branches: [main]
+
+  jobs:
+    test:
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/checkout@v4
+        - uses: actions/setup-node@v4
+          with:
+            node-version: 22
+            cache: npm
+        - run: npm ci
+        - run: npx tsc --noEmit
+        - run: npm test
+
+    deploy:
+      needs: test
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      runs-on: ubuntu-latest
+      steps:
+        - name: Deploy to VPS
+          uses: appleboy/ssh-action@v1
+          with:
+            host: 52.37.76.231
+            username: ubuntu
+            key: ${{ secrets.DEPLOY_SSH_KEY }}
+            script: |
+              cd /root/grove
+              git pull --ff-only
+              npm ci --production
+              sudo pm2 restart grove-server grove-proxy
+              sleep 5
+              curl -sf https://api.grove.md/health || (echo "DEPLOY HEALTH CHECK FAILED" && exit 1)
+  ```
+
+  **Setup required:**
+  - Add `DEPLOY_SSH_KEY` as a GitHub Actions secret (create a dedicated deploy key, not the admin SSH key)
+  - Create a `deploy` user on VPS with restricted sudo (only `pm2 restart`, `git pull` in `/root/grove`)
+  - Enable branch protection on `main`: require CI pass before merge
+
+  **Files:** `.github/workflows/ci.yml`
+
+  **Acceptance criteria:**
+  - PRs get automated test + typecheck results
+  - Merges to main auto-deploy to VPS
+  - Failed health check on deploy is visible in GitHub Actions
+  - No manual SSH needed for routine deploys
+
+- [ ] **P4-PREREQ-3: Graceful shutdown + operational hardening** (`src/proxy.ts`, `src/server.ts`)
+
+  Currently neither process handles SIGTERM. PM2 restart kills in-flight writes.
+
+  **Add to both `proxy.ts` and `server.ts`:**
+  ```typescript
+  let shuttingDown = false;
+  for (const signal of ["SIGTERM", "SIGINT"] as const) {
+    process.on(signal, async () => {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      log("info", `${signal} received, flushing write queue...`);
+      await writeQueue.flush();
+      closeDb();
+      server.close(() => process.exit(0));
+      setTimeout(() => process.exit(1), 15_000);
+    });
+  }
+  ```
+
+  **Also:**
+  - Log git push failures in `write-queue.ts` (currently empty catch block)
+  - Add `PRAGMA wal_checkpoint(TRUNCATE)` to backup script before tarring grove.db
+  - Increase PM2 `kill_timeout` to 15000ms in ecosystem config
+
+  **Files:** `src/proxy.ts`, `src/server.ts`, `src/write-queue.ts`, PM2 ecosystem config
+
+  **Tests:** `test/write-queue.test.ts` — add test that `flush()` completes pending operations before resolving
+
+  **Acceptance criteria:**
+  - `pm2 restart grove-server` flushes the write queue before shutting down (verify via log output)
+  - Push failures emit structured log entries (not silently swallowed)
+  - Backup script produces consistent SQLite snapshots
+
+##### Execution strategy for P4-PREREQ
+
+- **Agent X:** P4-PREREQ-1 (proxy extraction) — this is the largest task, ~2-3 hours
+- **Agent Y:** P4-PREREQ-2 (CI/CD) + P4-PREREQ-3 (graceful shutdown) — independent of proxy extraction, can run in parallel
+
+Merge Agent X first (it restructures proxy.ts). Then merge Agent Y (touches proxy.ts minimally — just adding signal handlers to the dispatcher). Deploy. Verify health check passes. Then launch Phase 4b agents.
+
+---
+
 #### Phase 4b: Ops Dashboard
 
 Implementation splits into two batches: backend API additions (grove repo), then frontend pages (grove-www repo). Backend first because the frontend depends on the endpoints existing.
+
+**Prerequisites:** P4-PREREQ complete. proxy.ts is extracted into route files. CI/CD is live.
 
 ##### Batch 1: Backend API additions (grove repo)
 
@@ -600,19 +878,17 @@ These are the views that make the portal more than an admin panel. They surface 
 
 **Batch 1 — Backend APIs + dashboard layout (4 parallel agents):**
 
-Each backend agent works in an isolated worktree on the grove repo. To avoid merge conflicts in proxy.ts, agents insert routes at specific anchor points:
+Each backend agent works in an isolated worktree on the grove repo. After P4-PREREQ, routes are in `src/routes/*.ts` — agents create or modify separate route files with zero overlap:
 
-- **Agent A:** P4-API-1 (trail CRUD) — Insert trail routes after the `/v1/stats` handler, before the `// Unknown /v1/ route` fallthrough. Touch `src/trails.ts` (add `updateTrail`). Also update CORS: the `/v1/` OPTIONS handler only allows `GET, OPTIONS` — add `POST, PATCH, DELETE` for admin endpoints.
-- **Agent B:** P4-API-2 (user list + last_login_at) — Insert user route after the `/v1/list` handler, before `/v1/stats`. Touch `src/auth.ts` (fix createSession).
-- **Agent C:** P4-API-3 (keys/metrics fixes) — Modify existing `/keys` and `/metrics` handlers. No new route blocks — just editing existing ones. Zero overlap with A/B.
-- **Agent D:** P4-API-4 (git stats) — Only touches `src/vault-stats.ts`. Zero proxy.ts conflict.
-
-Import ordering: Agent A adds imports after the trails import (line ~45 in proxy.ts). Agent B adds after the rest import (line ~46). This gives enough separation for clean merges.
+- **Agent A:** P4-API-1 (trail CRUD) — Add trail admin routes to `src/routes/admin.ts`. Touch `src/trails.ts` (add `updateTrail`). No overlap with B/C.
+- **Agent B:** P4-API-2 (user list + last_login_at) — Add user route to `src/routes/admin.ts` (separate handler function, no conflict with A's trail routes). Touch `src/auth.ts` (fix createSession). If merge conflict risk with Agent A on `admin.ts`, create `src/routes/admin-users.ts` instead.
+- **Agent C:** P4-API-3 (keys/metrics fixes) — Modify existing handlers in `src/routes/admin.ts` (keys list) and `src/routes/admin.ts` (metrics). These are edits to existing code, not new routes. Zero overlap with A/B's additions.
+- **Agent D:** P4-API-4 (git stats) — Only touches `src/vault-stats.ts`. Zero route file conflict.
 
 In parallel on the grove-www repo:
 - **Agent E:** P4-FE-0 (dashboard layout + all 5 API proxy routes + header link + dashboard overview stub)
 
-Merge backend agents first, deploy. Then merge Agent E.
+Merge order: Agent D first (no conflicts possible), then A+C (minimal overlap), then B. Deploy. Then merge Agent E.
 
 **Batch 2 — Frontend pages (3 parallel agents, after Batch 1):**
 
@@ -749,17 +1025,11 @@ Trail management UI (P4-5), consumer onboarding pages (P4-8), and trail usage vi
 
 ---
 
-### Phase 6: LLM Judge (deferred)
+### Phase 6: LLM Judge — CANCELLED
 
-**Goal:** Add semantic content filtering for trail edge cases where tag/type/path filtering is too coarse.
+**Decision:** Tag/type/path prefilter covers 90%+ of trail filtering needs. Tag hygiene audit (2026-04-11) confirmed 15% tag coverage is sufficient because path-based filtering carries the load. Ollama doesn't fit on t3.medium (needs 3-4GB RAM minimum). The judge was a solution looking for a problem.
 
-**Prerequisites:** Phase 5 shipped. Real edge cases documented from trail usage. Tag hygiene audit shows gaps.
-
-- [ ] **P6-1: Install Ollama on VPS** — bind to `127.0.0.1:11434`, run in cgroup with memory/CPU limits. T4 has ~15GB VRAM headroom after TEI (~1GB).
-- [ ] **P6-2: Qwen2.5-3B generative model** — via Ollama, for judge inference.
-- [ ] **P6-3: Judge integration** — soft signal layer after tag prefilter. Evaluates survivors against `topic_description`. Demotes (reranks lower), does not hard-exclude. Logs every decision.
-- [ ] **P6-4: Judge eval suite** — labeled test cases, precision >95%, recall >90%. Measure latency impact. Run as `npm run test:judge`.
-- [ ] **P6-5: Judge toggle** — per-trail `use_judge: boolean`. Off by default. Enable for trails where prefilter isn't enough.
+**If trail filtering proves too coarse:** Evaluate adding semantic filtering as a rerank signal in the `query` tool. Use Claude API (not local LLM) for the judgment call — simpler, no infrastructure, pay-per-use. Add as a Phase 7 extension task if real consumer complaints emerge.
 
 ---
 
@@ -767,32 +1037,161 @@ Trail management UI (P4-5), consumer onboarding pages (P4-8), and trail usage vi
 
 **Goal:** Knowledge grows autonomously. New content integrates without manual invocation.
 
-**Prerequisites:** Phases 2-5 stable. Safety infrastructure proven.
+**Prerequisites:** Phases 2-5 stable. CI/CD live (P4-PREREQ-2).
+
+**Key design decision (changed from original plan):** Concept extraction uses Claude API via MCP tool calls (not local Ollama). The discovery loop runs as a background Node.js process that calls Grove's own MCP tools — it's an agent that uses the same API as Claude.ai. This means no GPU, no Ollama, no model management. The VPS stays lean.
 
 #### Phase 7a: Background Discovery
 
-- [ ] **P7-1: Discovery loop**
-  Background process on VPS, triggered by git commits and write_note calls. For each changed note: extract entities/concepts, check if concept notes exist, create if not, wire wikilinks.
+- [ ] **P7-1: Discovery loop skeleton** (`src/discovery.ts`, `src/discovery-worker.ts`)
 
-- [ ] **P7-2: Concept extraction**
-  Use local LLM (Ollama, from Phase 6) to identify concepts, people, projects from note content. Match against existing vault entities (via list_notes + aliases). Create new concept notes for genuinely new entities.
+  Background process managed by PM2. Watches for vault changes via two triggers:
+  1. **Git hook:** `post-commit` hook in the vault repo calls `curl http://localhost:8190/internal/discovery-trigger?path=<changed-file>`
+  2. **Write queue hook:** `write-queue.ts` emits an event after successful write+commit
 
-- [ ] **P7-3: Semantic neighbor surfacing**
-  For each new/changed note, find embedding-similar notes that aren't already linked. Log surprising connections to a discovery feed.
+  The loop maintains a SQLite queue table (`discovery_queue`) with columns: `path`, `trigger` (commit|write), `queued_at`, `processed_at`, `status`.
 
-- [ ] **P7-4: Discovery digest**
-  New `vault_status` mode: `discovery`. Returns what the loop found recently — new concepts created, new links wired, surprising connections. Powers the `/garden` daily practice.
+  **Files:** `src/discovery.ts` (main loop — dequeues, dispatches to extractors), `src/discovery-worker.ts` (PM2 entry point), `src/db.ts` (add `discovery_queue` table to schema)
 
-- [ ] **P7-5: Bookmark integration**
-  X bookmarks (via `bird` CLI) become a trigger for the discovery loop, not a manual `/garden-forage` invocation. Cron or webhook watches for new bookmarks, ingests them, extracts concepts.
+  **Acceptance criteria:**
+  - `pm2 start discovery-worker` runs without errors
+  - Writing a note via `write_note` adds an entry to `discovery_queue`
+  - The loop dequeues and logs "processing <path>" for each entry
+  - Processed entries are marked `status = 'done'` with timestamp
+  - The loop handles errors gracefully — a failed note doesn't block the queue
+
+- [ ] **P7-2: Concept extraction via Claude API** (`src/discovery-extract.ts`)
+
+  For each changed note, call Claude API (claude-haiku-4-5 for cost efficiency) with:
+  - The note's full content
+  - The vault's entity vocabulary (from `list_notes` with type filter)
+  - A structured output schema requesting: extracted entities (name, type, confidence), suggested wikilinks, new concept notes to create
+
+  ```typescript
+  interface ExtractionResult {
+    entities: { name: string; type: "person" | "concept" | "project" | "company"; confidence: number; existing_path?: string }[];
+    suggested_links: { from_text: string; to_path: string }[];
+    new_notes: { path: string; type: string; tags: string[]; content: string }[];
+  }
+  ```
+
+  Match extracted entities against existing vault notes (case-insensitive name + alias matching via `list_notes`). Only create new concept notes for entities with confidence > 0.8 that don't match existing notes.
+
+  **Files:** `src/discovery-extract.ts` (extraction logic), `src/discovery.ts` (integrate extractor into loop)
+  **Dependencies:** `@anthropic-ai/sdk` (add to package.json)
+  **Env var:** `ANTHROPIC_API_KEY` (add to env var docs)
+
+  **Tests:** `test/discovery-extract.test.ts` — mock Claude API response, verify entity matching, verify dedup against existing notes
+  **Acceptance criteria:**
+  - Given a journal entry mentioning "John Smith" and an existing `Resources/People/John Smith.md`, extraction matches (doesn't create duplicate)
+  - Given a note about "reinforcement learning" with no existing concept note, extraction suggests creating `Resources/Concepts/Reinforcement Learning.md`
+  - Extraction result includes confidence scores; low-confidence entities are logged but not acted on
+
+- [ ] **P7-3: Wikilink wiring** (`src/discovery-link.ts`)
+
+  After extraction, wire wikilinks into the source note. For each `suggested_links` entry: find the `from_text` in the note content, wrap it in `[[to_path|from_text]]`. Write the updated note via `write_note` (through the write queue, not direct filesystem).
+
+  Also create any `new_notes` from the extraction result via `write_note`.
+
+  **Files:** `src/discovery-link.ts` (link insertion logic), `src/discovery.ts` (integrate linker into loop after extraction)
+  **Tests:** `test/discovery-link.test.ts` — verify link insertion preserves existing content, handles edge cases (text appears multiple times, text is already linked)
+  **Acceptance criteria:**
+  - A note mentioning "machine learning" gets `[[Resources/Concepts/Machine Learning|machine learning]]` inserted
+  - Already-linked text is not double-linked
+  - Link insertion doesn't corrupt frontmatter
+  - New concept notes are created with proper frontmatter (type, tags, aliases)
+
+- [ ] **P7-4: Semantic neighbor surfacing** (`src/discovery-neighbors.ts`)
+
+  After processing a note, find embedding-similar notes not already linked. Use `query` tool with `vec` sub-query type, filter out notes that are already wikilinked from/to the source note. Store surprising connections in a `discovery_results` table.
+
+  ```sql
+  CREATE TABLE IF NOT EXISTS discovery_results (
+    id TEXT PRIMARY KEY,
+    source_path TEXT NOT NULL,
+    target_path TEXT NOT NULL,
+    similarity REAL NOT NULL,
+    relationship TEXT, -- "semantic neighbor", "potential duplicate", etc.
+    created_at TEXT NOT NULL,
+    dismissed_at TEXT -- user can dismiss suggestions
+  );
+  ```
+
+  **Files:** `src/discovery-neighbors.ts`, `src/db.ts` (add table)
+  **Acceptance criteria:**
+  - Processing a note about "transformer architecture" surfaces similar notes about "attention mechanisms"
+  - Already-linked notes are excluded from results
+  - Results are stored with similarity scores for later review
+
+- [ ] **P7-5: Discovery digest** (extend `vault_status` in `src/server.ts`)
+
+  New `vault_status` mode: `discovery`. Returns:
+  ```typescript
+  {
+    recent_extractions: { path: string; entities_found: number; links_wired: number; processed_at: string }[];
+    new_concepts_created: { path: string; created_at: string; triggered_by: string }[];
+    surprising_connections: { source: string; target: string; similarity: number }[];
+    queue_depth: number;
+    last_processed_at: string;
+  }
+  ```
+
+  Data sourced from `discovery_queue` and `discovery_results` tables.
+
+  **Files:** `src/server.ts` (add discovery mode to vault_status handler), `src/db.ts` (query functions)
+  **Acceptance criteria:**
+  - `vault_status(mode: "discovery")` returns the digest
+  - Empty state (no discovery results yet) returns zeroed fields, not errors
+
+- [ ] **P7-6: Bookmark integration** (`src/discovery-bookmarks.ts`)
+
+  Cron job (every 30 min) checks for new X bookmarks via `bird` CLI. For each new bookmark:
+  1. Fetch the URL content (or use `bird` metadata)
+  2. Create a Source note in `Sources/` with proper frontmatter
+  3. Enqueue the new note in `discovery_queue` for concept extraction
+
+  **Files:** `src/discovery-bookmarks.ts` (bookmark sync), PM2 cron config or `node-cron` in the worker
+  **Acceptance criteria:**
+  - New X bookmarks appear as Source notes in the vault
+  - Each bookmark note gets queued for discovery processing
+  - Already-synced bookmarks are not duplicated (dedup via URL)
 
 #### Phase 7b: Bulk Onboarding
 
-- [ ] **P7-6: Ingest command**
-  `grove ingest <dir>` — reads a directory of files, parses frontmatter/content, deduplicates against existing vault, writes new notes via write_note.
+- [ ] **P7-7: Ingest command** (extend `src/cli.ts`)
 
-- [ ] **P7-7: Concept bootstrapping**
-  After ingest, run discovery loop over all new notes to extract concepts and build the initial graph. This is the cold start path for new users or new content dumps.
+  `grove ingest <dir>` — reads a directory of .md files, parses frontmatter/content, deduplicates against existing vault (by title + content hash), writes new notes via `write_note` MCP tool call. Creates a snapshot before starting (`grove snapshot`).
+
+  **Files:** `src/cli.ts` (add `ingest` command)
+  **Acceptance criteria:**
+  - `grove ingest ./import/` creates notes from all .md files in the directory
+  - Duplicate detection prevents re-importing existing notes
+  - Progress output: "Imported 42/50 notes (8 skipped as duplicates)"
+  - Snapshot created before ingest starts
+
+- [ ] **P7-8: Post-ingest concept bootstrap**
+
+  After `grove ingest`, enqueue all newly created notes in `discovery_queue` with `trigger = 'ingest'`. The discovery loop processes them, extracting concepts and wiring links. This is the cold start path for new users or content dumps.
+
+  **Files:** `src/cli.ts` (extend ingest to enqueue), `src/discovery.ts` (handle ingest trigger)
+  **Acceptance criteria:**
+  - After ingesting 50 notes, all 50 appear in discovery queue
+  - Discovery loop processes them and creates concept notes
+  - Graph connectivity increases (measurable via `vault_status(mode: "graph")`)
+
+#### Phase 7 Execution Strategy
+
+**Batch 1 (2 parallel agents):**
+- **Agent A:** P7-1 (discovery loop skeleton) — creates `src/discovery.ts`, `src/discovery-worker.ts`, adds queue table to `db.ts`
+- **Agent B:** P7-7 (ingest command) — extends `src/cli.ts` only, no overlap with Agent A
+
+**Batch 2 (2 parallel agents, after Batch 1 merged):**
+- **Agent C:** P7-2 + P7-3 (concept extraction + wikilink wiring) — creates `src/discovery-extract.ts` and `src/discovery-link.ts`, integrates into discovery loop
+- **Agent D:** P7-4 (semantic neighbors) — creates `src/discovery-neighbors.ts`, adds table to `db.ts` (different table than Batch 1, safe merge)
+
+**Batch 3 (2 parallel agents, after Batch 2 merged):**
+- **Agent E:** P7-5 (discovery digest) — extends `vault_status` in `server.ts`
+- **Agent F:** P7-6 + P7-8 (bookmarks + post-ingest bootstrap) — creates `src/discovery-bookmarks.ts`, extends cli.ts ingest
 
 ---
 
@@ -878,99 +1277,189 @@ This was originally Phase 2 but deferred — trails and discovery are higher imp
 
 **Goal:** Move Grove from "one vault owner sharing read-only trails" to "multiple users with their own identities, permissions, and collaborative workflows."
 
-**Prerequisites:** Phase B (magic link auth) complete. Phase 4b (ops dashboard) in progress or complete.
+**Prerequisites:** P4-PREREQ complete (CI/CD, route extraction). Phase B (magic link auth) complete.
 
-**Context:** Phase B established the foundation — users exist in the database, magic links create identity, sessions persist. But today there's exactly one user (`user_00000000`), everyone shares the same vault, and "collaboration" means handing someone a trail-scoped read-only key. This phase builds the layers that turn Grove into something multiple people can use together.
+**Context:** Phase B established the foundation — users exist in the database, magic links create identity, sessions persist. But today there's exactly one user (`user_00000000`), everyone shares the same vault, and "collaboration" means handing someone a trail-scoped read-only key. This phase adds user roles, invitations, and trail sharing UX.
 
-#### The collaboration spectrum
-
-Not every user needs the same access. The phases below build progressively:
-
-1. **Invited readers** — owner shares a note or trail, recipient signs in with email, reads scoped content on `grove.md`
-2. **Commenters/annotators** — readers can leave notes/reactions on shared content (stored separately from the vault)
-3. **Contributors** — trusted users can write to specific paths in the vault (e.g., a shared project area)
-4. **Vault owners** — each user has their own vault, hosted on Grove (multi-tenant)
-
-Phase 9 covers (1) and (2). Steps (3) and (4) are Phase 10+ territory.
+**Scope decision:** Annotations (comments, reactions) are deferred. Build them only after there's evidence of collaborative usage (at least 3 active non-owner users). Don't build social features for a solo product.
 
 #### Phase 9a: User Management
 
-- [ ] **P9-1: User roles**
-  Add `role` column to users table. Roles: `owner` (full access), `member` (trail-scoped access), `viewer` (read-only trail access). Owner is the vault admin. Members and viewers are invited by email.
+- [ ] **P9-1: User roles** (`src/db.ts`, `src/users.ts`, `src/routes/admin.ts`)
 
-- [ ] **P9-2: Invite flow**
-  `grove invite <email> --trail <trail-id> --role viewer` CLI command. Creates user record if needed (email only, no password). Sends magic link email with a welcome message. On first login, user gets a scoped API key for their assigned trail.
+  Add `role` column to users table: `owner` (full access), `member` (trail-scoped read+write), `viewer` (trail-scoped read-only).
 
-  API: `POST /admin/invite` — creates user + trail grant + sends magic link. Requires owner auth.
+  **Schema migration in `src/db.ts`:**
+  ```sql
+  ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'viewer';
+  UPDATE users SET role = 'owner' WHERE id = 'user_00000000';
+  ```
 
-- [ ] **P9-3: User-scoped keys**
-  Today all keys are owned by `user_00000000`. After P9-3, keys are scoped to their creating user. A viewer's auto-provisioned key only grants access to the trails they've been invited to. The `adminAuth()` function checks user role — only `owner` can manage keys and trails.
+  **`src/users.ts` changes:** Add `getUserRole(userId)`, update `createUser()` to accept optional `role` parameter.
 
-- [ ] **P9-4: User management UI**
-  Page on `grove.md` (owner-only): list users, invite new users, assign trails, revoke access. Shows: email, role, last login, assigned trails, key count.
+  **`src/routes/admin.ts` changes:** `adminAuth()` middleware checks `role = 'owner'` for admin endpoints. Non-owners get 403.
+
+  **Files:** `src/db.ts`, `src/users.ts`, `src/routes/admin.ts`
+  **Tests:** `test/users.test.ts` — create user with role, verify role-based auth check
+  **Acceptance criteria:**
+  - Existing user `user_00000000` gets `role = 'owner'` on migration
+  - New users default to `viewer`
+  - Non-owner hitting `/keys` or `/v1/admin/*` gets 403
+  - Owner access unchanged
+
+- [ ] **P9-2: Invite flow** (`src/invite.ts`, `src/routes/admin.ts`, `src/cli.ts`)
+
+  **CLI:** `grove invite <email> --trail <trail-id> --role viewer`
+  **API:** `POST /v1/admin/invite` with `{ email, trail_id, role }`
+
+  Implementation:
+  1. Create user record if no user with that email exists (`createUser(email, role)`)
+  2. Create trail grant in `trail_grants` table (link user to trail)
+  3. Send magic link email with welcome message (extend `sendMagicLinkEmail` with optional `welcome: true` flag)
+  4. On first login via magic link, auto-provision scoped API key (reuse existing auth code exchange flow)
+
+  **Files:** `src/invite.ts` (invite logic), `src/routes/admin.ts` (new route), `src/cli.ts` (new command), `src/email.ts` (welcome variant)
+  **Tests:** `test/invite.test.ts` — invite creates user + trail grant, duplicate invite is idempotent, invalid trail ID returns 404
+  **Acceptance criteria:**
+  - `grove invite alice@example.com --trail trail_abc123 --role viewer` succeeds
+  - Alice receives an email with a magic link
+  - After clicking the link, Alice has a trail-scoped API key
+  - Re-inviting the same email is idempotent (no duplicate user)
+
+- [ ] **P9-3: User-scoped keys** (`src/keys.ts`, `src/routes/admin.ts`)
+
+  Today all keys are owned by `user_00000000`. After this task, keys are scoped to their creating user.
+
+  **`src/keys.ts` changes:** `createKey()` accepts `user_id` parameter. `loadKeys()` accepts optional `user_id` filter.
+
+  **`src/routes/admin.ts` changes:** `/keys` list action filters by current user's ID (owner sees all, others see only their own). Create action sets `user_id` to current user.
+
+  **Migration:** Existing keys get `user_id = 'user_00000000'` (already the case in schema).
+
+  **Files:** `src/keys.ts`, `src/routes/admin.ts`
+  **Tests:** `test/keys.test.ts` — key created with user_id, filtered list returns only user's keys
+  **Acceptance criteria:**
+  - Owner can see and manage all keys
+  - Viewer can only see their own auto-provisioned key
+  - Creating a key records the user who created it
+
+- [ ] **P9-4: User management UI** (grove-www repo: `src/app/dashboard/users/page.tsx`)
+
+  Owner-only page in the dashboard. Requires Phase 4b dashboard layout (P4-FE-0) to be merged.
+
+  **Layout:**
+  - Header: "Users" heading + "Invite" button
+  - Table: Email, Role (badge), Last Login (relative time), Trails (comma-separated names), Keys (count), Actions
+  - Invite flow: inline form — email input + trail dropdown + role radio (viewer/member) + send button
+  - Revoke: "Remove" button per user → confirm → delete user's keys and sessions → remove from list
+
+  **Files:** `src/app/dashboard/users/page.tsx`, `src/components/user-table.tsx` (client component)
+  **Acceptance criteria:**
+  - Lists all users with metadata
+  - Invite flow sends magic link and user appears in list
+  - Revoking a user immediately invalidates their keys and sessions
+  - Non-owner accessing this page gets redirected
 
 #### Phase 9b: Trail Sharing UX
 
-- [ ] **P9-5: Shareable trail links**
+- [ ] **P9-5: Shareable trail links** (grove-www repo: `src/app/trails/[slug]/page.tsx`)
+
   Public onboarding page per trail: `grove.md/trails/<trail-slug>`. Shows trail name, description, note count, and a "Sign in to access" button. No login required to see the page — but reading notes requires auth.
 
-  For MCP users: the page shows copy-paste connection config for Claude.ai, Cursor, etc.
+  **Backend (grove repo):** Add `GET /v1/trails/:id/info` to `src/routes/rest.ts` — unauthenticated endpoint returning `{ name, description, note_count, created_at }`. Count notes matching trail filters via a quick scan.
 
-  For web users: "Sign in with email" → magic link → lands on `grove.md` with trail-scoped access.
+  **Frontend:** Centered card layout (same style as login page). Trail name (serif heading), description, note count, two access methods:
+  1. "Sign in to browse" button → `/login?trail=<id>`
+  2. "Connect via MCP" section with copy-paste config block
 
-- [ ] **P9-6: Trail-scoped grove.md experience**
-  When a viewer/member signs in via a trail link, their `grove.md` session is scoped to that trail. They see the trail name in the header, search only returns trail-visible notes, and navigation is limited to trail-allowed paths. The sidebar/breadcrumbs only show what they can access.
+  **Files:** `src/routes/rest.ts` (grove repo — new endpoint), `src/app/trails/[slug]/page.tsx` (grove-www)
+  **Acceptance criteria:**
+  - Page loads without auth — public access
+  - Shows trail name, description, note count
+  - MCP config block is copy-pasteable
+  - Non-existent trail ID → 404 page
 
-  Implementation: the auto-provisioned API key has trail-scoped access. The existing server-side filtering handles the rest — no frontend logic needed beyond showing the trail context.
+- [ ] **P9-6: Trail-scoped grove.md experience** (grove-www repo)
 
-- [ ] **P9-7: Share-a-note links**
-  Owner can generate a shareable link to a specific note: `grove.md/s/<short-id>`. The link creates a temporary trail scoped to that single note (and its immediate backlinks). Recipient signs in with email, sees the note. Link expires after a configurable TTL (default 7 days).
+  When a viewer/member signs in via a trail link, their `grove.md` session is scoped to that trail. They see the trail name in the header, search only returns trail-visible notes, and navigation is limited to trail-allowed paths.
 
-  Implementation: a `shared_links` table with `note_path`, `created_by`, `expires_at`, `max_views`. The share creates a micro-trail at access time.
+  **Implementation:** The auto-provisioned API key has trail-scoped access. The existing server-side filtering handles the rest — no frontend logic needed beyond showing the trail context in the header.
 
-#### Phase 9c: Annotations & Reactions
+  **Files:** `src/components/header.tsx` (show trail name for scoped sessions), `src/app/api/auth/callback/route.ts` (pass trail context through login flow)
+  **Acceptance criteria:**
+  - Viewer sees trail name in header after signing in via trail link
+  - Search returns only trail-scoped results
+  - Navigation shows only trail-allowed paths
+  - Owner view is unchanged
 
-- [ ] **P9-8: Annotations layer**
-  Viewers and members can leave annotations on notes. Annotations are stored in Grove's SQLite database (not in the vault markdown). Schema:
+- [ ] **P9-7: Share-a-note links** (`src/routes/admin.ts`, grove-www: `src/app/s/[id]/page.tsx`)
+
+  Owner generates a shareable link to a specific note: `grove.md/s/<short-id>`. The link creates a temporary trail scoped to that single note and its depth-1 inbound backlinks (notes that wikilink TO the shared note — outbound links excluded to prevent leaking sensitive content). Expires after configurable TTL (default 7 days).
+
+  **Schema addition in `src/db.ts`:**
   ```sql
-  CREATE TABLE annotations (
+  CREATE TABLE IF NOT EXISTS shared_links (
     id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL REFERENCES users(id),
     note_path TEXT NOT NULL,
-    content TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT
+    created_by TEXT NOT NULL REFERENCES users(id),
+    expires_at TEXT NOT NULL,
+    max_views INTEGER DEFAULT 100,
+    view_count INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL
   );
   ```
-  Annotations appear on `grove.md` below the note content. The vault owner sees all annotations; viewers see their own + the owner's replies.
 
-- [ ] **P9-9: Annotation API**
-  `POST /v1/notes/:path/annotations` — create annotation (requires auth, any role).
-  `GET /v1/notes/:path/annotations` — list annotations (filtered by visibility rules).
-  `DELETE /v1/notes/:path/annotations/:id` — delete own annotation or any (owner only).
+  **API:** `POST /v1/admin/share` with `{ note_path, ttl_days?: number, max_views?: number }` → `{ id, url, expires_at }`
 
-- [ ] **P9-10: Annotation notifications**
-  When someone annotates a note, the vault owner gets an email summary (batched daily, not per-annotation). Configurable: per-trail notification settings.
+  **Files:** `src/db.ts` (table), `src/routes/admin.ts` (create endpoint), `src/routes/rest.ts` (resolve share link → micro-trail), grove-www `src/app/s/[id]/page.tsx`
+  **Acceptance criteria:**
+  - Owner creates share link → gets URL
+  - Recipient opens URL, signs in with email, sees the note + inbound backlinks
+  - Outbound links from the shared note are NOT visible
+  - Link expires after TTL — returns "This link has expired"
+  - View count increments; link disabled after max_views reached
+
+#### Phase 9c: Annotations & Reactions — DEFERRED
+
+**Gate:** Only start when there are at least 3 active non-owner users. Building social features for a solo product is premature.
+
+When triggered, scope: annotations table in SQLite (not vault markdown), annotation API (create/list/delete), annotation display on grove.md below note content, daily email digest to owner.
 
 #### Phase 9 Design Decisions
 
 | Decision | Chosen | Why |
 |----------|--------|-----|
 | User creation | Invite-only (owner sends magic link) | No public signup. Grove is private-first. Access is granted, not requested. |
-| Annotation storage | Grove SQLite, not vault markdown | Annotations are social metadata, not knowledge. They shouldn't pollute the vault's git history or show up in Claude's MCP tools. |
-| Viewer experience | Trail-scoped grove.md, same codebase | No separate app for viewers. The existing grove-www handles it — the API key's trail scope does the filtering. |
-| Share links | Micro-trails, not public URLs | Even shared notes require email auth. No anonymous access. This is a deliberate privacy choice. |
-| Roles | owner/member/viewer | Minimal. Don't add "editor", "admin", "moderator" until there's a real need. Three roles cover the collaboration spectrum for now. |
+| Viewer experience | Trail-scoped grove.md, same codebase | No separate app for viewers. The API key's trail scope does the filtering. |
+| Share links | Micro-trails with depth-1 inbound backlinks | Even shared notes require email auth. No anonymous access. Outbound links excluded to prevent leaking sensitive content. |
+| Roles | owner/member/viewer | Minimal. Don't add "editor", "admin", "moderator" until there's a real need. |
+| Annotations | Deferred until 3+ active users | Don't build social features for a solo product. |
+
+#### Phase 9 Execution Strategy
+
+**Batch 1 (3 parallel agents, grove repo):**
+- **Agent A:** P9-1 (user roles) — touches `src/db.ts` (ALTER TABLE), `src/users.ts`, `src/routes/admin.ts` (adminAuth check)
+- **Agent B:** P9-2 (invite flow) — creates `src/invite.ts`, extends `src/routes/admin.ts` (new route), extends `src/cli.ts`, `src/email.ts`. Potential conflict with Agent A on `routes/admin.ts` — Agent B should create the route in a separate function that Agent A's adminAuth check will guard.
+- **Agent C:** P9-3 (user-scoped keys) — touches `src/keys.ts`, `src/routes/admin.ts` (existing /keys handler). Minimal overlap with A/B.
+
+Merge order: Agent A first (adminAuth changes are foundational), then B+C.
+
+**Batch 2 (2 parallel agents, after Batch 1 merged):**
+- **Agent D:** P9-4 (user management UI, grove-www) — needs dashboard layout from Phase 4b
+- **Agent E:** P9-5 + P9-6 (trail sharing pages, grove-www) — separate routes from Agent D
+
+**Batch 3 (1 agent, after Batch 2 merged):**
+- **Agent F:** P9-7 (share-a-note) — touches both repos (share table + API in grove, page in grove-www)
 
 #### Phase 9 Success Criteria
 
 - Owner invites a collaborator by email → they receive a magic link → click it → land on grove.md seeing only their trail's notes
 - Viewer searches and only gets trail-scoped results (no leaks)
-- Viewer leaves an annotation on a note → owner sees it on grove.md and in a daily email
-- Share-a-note link works: recipient opens it, signs in, sees the note + backlinks
-- Share link expires after TTL — accessing it returns "link expired"
+- Share-a-note link works: recipient opens it, signs in, sees the note + inbound backlinks only
+- Share link expires after TTL — accessing it returns "This link has expired"
 - Owner can see all users, their roles, last login, and assigned trails in the management UI
 - Revoking a user's access immediately invalidates their keys and sessions
+- Non-owner hitting admin endpoints gets 403
 
 ---
 
@@ -999,7 +1488,7 @@ Decisions made during planning. Reference these when implementing — don't re-l
 | Agent deletes | Not allowed | Allowed with scope | Probabilistic systems should not delete personal data. |
 | Git push cadence | Batched every 30s | Per-write | Cleaner history, fewer push/pull races. |
 | Scoped access naming | Trails | Views, lenses, channels, gardens | Extends the grove metaphor naturally — trails are paths through a grove. |
-| Trail boundaries | Two-layer: tag/type/path prefilter + deferred LLM judge | Semantic-only, path-only, tag-only | Prefilter is fast and deterministic, covers 90%. LLM judge deferred until real edge cases prove need. |
+| Trail boundaries | Tag/type/path prefilter only | + LLM judge, semantic-only | Prefilter is fast, deterministic, covers 90%+. LLM judge cancelled — solution looking for a problem. If filtering proves too coarse, use Claude API as rerank signal. |
 | Trail filter location | Server layer (`server.ts`) | Proxy layer | Server has frontmatter, tags, search pipeline. Proxy only resolves trail context. |
 | Hidden note response | 404 (not 403) | 403 Forbidden | 403 leaks that the note exists. 404 is indistinguishable from non-existent. |
 | Encryption at rest | EBS encryption (AWS-managed) | LUKS, git-crypt, defer | LUKS is wrong for AWS — volume is decrypted at runtime. EBS encryption is free, automatic, protects snapshots. |
@@ -1011,8 +1500,11 @@ Decisions made during planning. Reference these when implementing — don't re-l
 | Email delivery | Resend API (one fetch call) | SES, Mailgun, custom SMTP | Minimal integration — one fetch, no SDK. Dev mode falls back to console.log. |
 | Annotation storage | Grove SQLite (not vault markdown) | Inline in notes, separate annotation files | Social metadata shouldn't pollute vault git history or appear in MCP tools. |
 | User creation | Invite-only (owner sends magic link) | Public signup, OAuth providers | Grove is private-first. Access is granted, not requested. |
-| LLM judge | Deferred (Phase 6) | Ship with trails, rule-based only | Expert panel: prefilter covers 90%, LLM adds latency and fragility. Ship without, add when proven needed. |
-| Ollama binding | 127.0.0.1 only, cgroup-limited | 0.0.0.0 (default) | Default binds to all interfaces — security risk. Cgroup prevents resource starvation of main app. |
+| LLM judge | Cancelled | Ship with trails, rule-based only | Prefilter covers 90%+. LLM adds latency, fragility, and infra (Ollama doesn't fit on t3.medium). If needed later, use Claude API as rerank signal — no local model. |
+| Discovery extraction | Claude API (claude-haiku-4-5) | Local LLM (Ollama) | VPS is t3.medium (4GB RAM) — Ollama + Qwen needs 3-4GB minimum. Claude API is simpler, no GPU, no model management, pay-per-use. |
+| Route architecture | Extracted route files (`src/routes/*.ts`) | Monolith `proxy.ts` | proxy.ts at 1,351 LOC was the #1 merge conflict risk for parallel agents. Route extraction makes each agent work in separate files. |
+| CI/CD | GitHub Actions (test + auto-deploy) | Manual SSH deploy | Agents need automated feedback loops. Without CI, broken code ships silently. Auto-deploy on main merge closes the loop. |
+| Graceful shutdown | SIGTERM handler + write queue flush | None (PM2 kills after 1.6s) | PM2 restart was killing in-flight writes. Flush + 15s kill_timeout prevents data loss. |
 | Consumer discovery | `filtered_count` in responses | Hide filtering entirely | Consumers should know results are scoped so they can request broader access. |
 | Portal framework | Next.js on Vercel | Extend node:http server with HTML routes | API server stays minimal (raw node:http). Portal is a separate app with real framework needs (routing, auth middleware, SSR). Vercel deployment is free for this scale. |
 | Portal scope | Ops first, knowledge views later | Ship graph explorer immediately | Ops dashboard is needed now (key/trail management). Knowledge views are nice-to-have — design the shell so they can grow in, but don't block shipping on them. |
@@ -1050,7 +1542,11 @@ Decisions made during planning. Reference these when implementing — don't re-l
 
 7. ~~**Admin dashboard exposure:**~~ **Resolved.** Portal is grove-www on Vercel. Auth via magic link + API key with persistent sessions. Cross-domain auth code exchange bridges api.grove.md and grove.md.
 
-8. **Ollama GPU sharing:** TEI uses ~1GB VRAM on the T4 (16GB). Ollama + Qwen2.5-3B needs ~3-4GB. Should be fine, but needs load testing under concurrent requests (search embedding + judge inference simultaneously). Deferred to Phase 6.
+8. ~~**Ollama GPU sharing:**~~ **Resolved.** Phase 6 (LLM Judge) cancelled. Phase 7 uses Claude API instead of local LLM. No Ollama needed. VPS stays on t3.medium.
+
+9. **Integration test harness:** No way to boot proxy + server on random ports and make real HTTP requests in tests. Needed for verifying end-to-end behavior. Options: (a) `test/helpers/test-server.ts` that starts both, (b) supertest-style wrapper, (c) defer until test coverage becomes a bottleneck.
+
+10. **Schema versioning:** No `schema_version` table or numbered migrations. Schema changes are `CREATE TABLE IF NOT EXISTS` + ad-hoc `ALTER TABLE`. Works for now but agents adding tables may create ordering issues. Consider a lightweight migration framework before Phase 9 (which adds new tables).
 
 ---
 
@@ -1083,12 +1579,20 @@ Decisions made during planning. Reference these when implementing — don't re-l
 - `/metrics` returns request counts, latency percentiles, error rates
 - Dead man's switch fires if daily cron stops
 
+**P4-PREREQ (Agent Infrastructure) is successful when:**
+- `proxy.ts` is <400 LOC; routes live in `src/routes/*.ts`
+- PRs get automated test + typecheck results via GitHub Actions
+- Merges to main auto-deploy to VPS with health check
+- `pm2 restart grove-server` flushes write queue before shutting down (verify via log)
+- Push failures in write-queue.ts emit structured log entries
+
 **Phase 4 (Portal) is successful when:**
 - Owner can log in with admin key, get a session, and manage keys/trails from the browser
-- Usage dashboard shows request volume and latency over time
-- Vault health panel shows note count, sync status, embedding coverage
+- Usage dashboard shows request volume and latency per tool
+- Vault health panel shows note count, sync status, embedding coverage, git status
 - Trail consumer can visit a public onboarding page and copy MCP connection config
-- The app feels like a natural extension of the CLI, not a replacement for it
+- All text uses `text-ink`, `text-moss`, `text-harvest`, or opacity variants — no raw Tailwind color classes
+- All headings use `font-serif font-medium` — body text uses `font-sans`
 
 **Phase 5 (Trails) is successful when:**
 - Create a trail, generate a consumer key, connect from Claude.ai — consumer sees only trail-scoped results
@@ -1108,24 +1612,32 @@ Decisions made during planning. Reference these when implementing — don't re-l
 **Phase 3** ✅ — Structured logging, correlation IDs, audit logging, deep health check, metrics, BetterStack (uptime + logs)
 **Phase B** ✅ — Magic link auth, persistent SQLite sessions, cross-domain auth code exchange (grove.md ↔ api.grove.md)
 **Phase 5** ✅ — Trail config/CLI/filtering/eval/audit/blast-radius/tag-audit/snapshot-rollback
-
 **Phase 4a** ✅ — Next.js app scaffold, auth (magic link + API key), middleware
-**Phase 4b — Ops Dashboard (next):**
-1. **P4-4 + P4-7** — Key management + vault health (parallel, both read from existing APIs)
-2. **P4-5 + P4-6** — Trail management + usage dashboard (parallel, trails backend is ready)
-3. **P4-8 + P4-9** — Consumer onboarding page + trail usage view (parallel, lightweight)
 
-**Phase 4d — Knowledge Views (after ops dashboard):**
-4. **P4-10 + P4-11 + P4-12** — Graph explorer, lifecycle dashboard, search playground
+**P4-PREREQ — Agent Infrastructure (next, prerequisite for everything below):**
+1. Proxy route extraction (Agent X) ‖ CI/CD + graceful shutdown (Agent Y) — parallel
+2. Merge, deploy, verify health check
 
-**Phase 6** — LLM judge (deferred until trail edge cases prove the need)
-**Phase 7** — Discovery & onboarding (background discovery loop, concept extraction, bookmark integration)
-**Phase 8** — Multi-vault (work vault, cross-vault search)
+**Phase 4b — Ops Dashboard (after P4-PREREQ):**
+1. Backend APIs: Agents A-D in parallel (trail CRUD, user list, keys/metrics fixes, git stats)
+2. Frontend: Agents F-H in parallel (key mgmt, trail mgmt, vault health + usage pages)
+3. Consumer: Agent I (trail onboarding page)
 
-**Phase 9 — Multi-User & Collaboration (after Phase 4b):**
-1. **P9-1 + P9-2 + P9-3** — User roles, invite flow, user-scoped keys (foundational, build together)
-2. **P9-4** — User management UI on grove.md (depends on P9-1-3)
-3. **P9-5 + P9-6** — Shareable trail links + trail-scoped grove.md experience (parallel)
-4. **P9-7** — Share-a-note links with micro-trails
-5. **P9-8 + P9-9** — Annotations layer + API (parallel)
-6. **P9-10** — Annotation notifications (after annotations work)
+**Phase 9a — User Management (can start after P4-PREREQ, parallel with Phase 4b):**
+1. Agents A-C in parallel (user roles, invite flow, user-scoped keys)
+2. Agents D-E in parallel (user mgmt UI, trail sharing UX) — needs Phase 4b dashboard layout
+
+**Phase 7 — Discovery (can start after P4-PREREQ, parallel with above):**
+1. Agents A-B: discovery loop skeleton ‖ ingest command
+2. Agents C-D: concept extraction + wikilink wiring ‖ semantic neighbors
+3. Agents E-F: discovery digest ‖ bookmarks + post-ingest bootstrap
+
+**Phase 4d — Knowledge Views (after Phase 4b):**
+- P4-10 (graph explorer), P4-11 (lifecycle dashboard) — deferred, spec when dashboard proves useful
+
+**Phase 9b — Trail Sharing UX (after Phase 9a + Phase 4b):**
+- Shareable trail links, trail-scoped grove.md, share-a-note
+
+**~~Phase 6~~** — LLM judge: CANCELLED
+**Phase 8** — Multi-vault: deferred (work vault is read-only and auto-generated; low priority)
+**Phase 9c** — Annotations: deferred until 3+ active non-owner users
