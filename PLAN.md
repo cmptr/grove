@@ -310,46 +310,334 @@ Claude.ai → proxy.ts (auth/OAuth/CORS/logging) → Grove MCP server (all 6 too
 
 #### Phase 4b: Ops Dashboard
 
-- [ ] **P4-4: Key management UI**
-  View all keys, create new keys, revoke keys. Shows: name, prefix, scope, created date, last used, request count. Table view with inline actions. Replaces CLI `grove keys` for day-to-day use.
+Implementation splits into two batches: backend API additions (grove repo), then frontend pages (grove-www repo). Backend first because the frontend depends on the endpoints existing.
 
-- [ ] **P4-5: Trail management UI**
-  Create/edit/disable trails, set tag/type/path boundaries, generate consumer keys. Shows: trail name, status, scope summary, consumer count, request volume. Creating a trail shows the token once (modal with copy button).
+##### Batch 1: Backend API additions (grove repo)
+
+All new admin endpoints go behind `adminAuth()` in `src/proxy.ts`. They use cookie (session) or Bearer auth, same as `/keys`.
+
+- [ ] **P4-API-1: Trail CRUD HTTP endpoints**
+
+  Add to `src/proxy.ts`, after the `/keys` handler. Import `loadTrails`, `createTrail`, `disableTrail`, `deleteTrail` from `./trails.js`.
+
+  **`POST /v1/admin/trails`** — list, create, update, or delete (action-based, same pattern as `/keys`):
+  ```
+  { action: "list" }
+  → { trails: [{ id, name, description, enabled, allow_tags, deny_tags, allow_types, deny_types, allow_paths, deny_paths, rate_limit_reads, rate_limit_writes, created_at }] }
+
+  { action: "create", name: "AI Research", allow_tags: ["ai"], allow_paths: ["Resources/"], deny_paths: ["Journal/", "Areas/"] }
+  → { trail: { id, name, ... }, token: "grove_live_..." }
+
+  { action: "update", id: "trail_xxx", enabled: false }
+  → { updated: "trail_xxx" }
+
+  { action: "delete", id: "trail_xxx" }
+  → { deleted: "trail_xxx" }
+  ```
+
+  Existing functions in `src/trails.ts`: `loadTrails()` returns all trails with parsed config. `createTrail(opts)` creates trail + auto-creates scoped API key (returns trail + raw token). Check `src/trails.ts` for exact signatures.
+
+  Need to add `updateTrail(id, updates)` to `src/trails.ts` — updates `config_json` and/or `enabled` flag on the trail row.
+
+  **Files:** `src/proxy.ts` (new route), `src/trails.ts` (add `updateTrail`)
+  **Tests:** `test/trails.test.ts` — add updateTrail unit test
+
+- [ ] **P4-API-2: User list endpoint + fix last_login_at**
+
+  **`GET /v1/admin/users`** — returns all users. Requires `adminAuth()`.
+  ```
+  → { users: [{ id, username, email, created_at, last_login_at }] }
+  ```
+
+  Also fix: `last_login_at` is never written. In `src/auth.ts`, the `verifyMagicLink()` function already updates `last_login_at`. But `createSession()` (called from `POST /admin/login` API key flow) does not. Add `db.prepare("UPDATE users SET last_login_at = ? WHERE id = ?").run(now, userId)` to `createSession()` in `src/auth.ts`.
+
+  **Files:** `src/proxy.ts` (new route), `src/auth.ts` (fix createSession)
+
+- [ ] **P4-API-3: Fix /keys list + /metrics improvements**
+
+  1. Add `expires_at` to the `/keys` list response. In `src/proxy.ts`, the list action's SELECT already fetches `*` but the response mapping omits `expires_at`. Add it.
+
+  2. Merge search stats into `/metrics`. In `src/proxy.ts`, the `/metrics` handler calls `metrics.getMetrics()`. The `SearchTracker` instance (`searchMetrics` in `src/metrics.ts`) has `getSearchStats()` but it's never called from the endpoint. Update the handler to merge:
+     ```ts
+     sendJson(res, 200, { ...metrics.getMetrics(), search: searchMetrics.getSearchStats() });
+     ```
+     Check if `searchMetrics` is exported from metrics.ts — it may need to be.
+
+  3. Add auth to `/metrics`. Currently unauthenticated. Gate behind `adminAuth()`.
+
+  **Files:** `src/proxy.ts` (3 small changes), possibly `src/metrics.ts` (export searchMetrics)
+
+- [ ] **P4-API-4: Add git status to vault stats**
+
+  Add a `git` section to `VaultStats` in `src/vault-stats.ts`. Compute during `computeVaultStats()`:
+  ```ts
+  git: {
+    last_commit_at: string,     // git log -1 --format=%cI
+    last_commit_msg: string,    // git log -1 --format=%s
+    uncommitted_changes: number, // git status --porcelain | wc -l
+    branch: string,             // git rev-parse --abbrev-ref HEAD
+  }
+  ```
+  Use `execSync()` with `{ cwd: vaultPath, encoding: "utf-8" }`. Wrap in try/catch — if git fails, return null for the section.
+
+  **Files:** `src/vault-stats.ts` (add computeGitSection + merge into stats)
+
+  **Acceptance criteria:**
+  - `GET /v1/stats?sections=git` returns git section with last_commit_at, branch, uncommitted_changes
+  - Git failure doesn't crash stats computation
+
+##### Batch 2: Frontend pages (grove-www repo)
+
+All dashboard pages live under `src/app/dashboard/`. Each is a server component with auth check. The dashboard section needs:
+- A layout at `src/app/dashboard/layout.tsx` with sub-navigation
+- API proxy routes under `src/app/api/admin/` to forward requests to api.grove.md
+- Page components for each view
+
+**grove-www conventions** (every agent must follow):
+- Colors: `text-ink`, `bg-cream`, `text-moss`, `text-harvest`, `bg-surface`, `border-surface-border` only. No raw Tailwind palette.
+- Opacity: only `/60`, `/40`, `/15`. No other values.
+- Typography: headings in `font-serif font-medium`, body in `font-sans`. Only weights 400/500.
+- Section labels: `text-ink/40 text-label tracking-[0.15em] uppercase mb-4`
+- Page content: `<div className="max-w-3xl mx-auto px-6 py-8">`
+- Primary button: `bg-ink text-cream px-7 py-3.5 text-sm font-medium hover:bg-earth transition-colors active:scale-[0.98]`
+- Secondary button: `border border-ink/15 px-7 py-3.5 text-sm text-ink hover:bg-ink/5 transition-colors`
+- Icons: inline Lucide SVGs (no package import). `text-muted` rest, `hover:text-foreground`.
+- Server components default. `"use client"` only for interactivity.
+- Auth: `const cookieStore = await cookies(); const apiKey = getApiKey(cookieStore);` then redirect if null.
+- Data fetching: server components call functions in `src/lib/grove-api.ts` which hit `api.grove.md` with Bearer auth. Client-side data goes through `/api/` proxy routes.
+
+- [ ] **P4-FE-0: Dashboard layout + API proxy routes**
+
+  **`src/app/dashboard/layout.tsx`** — server component. Auth check (redirect to `/login` if no cookie). Renders a sub-navigation bar below the main header with tabs: Overview, Keys, Trails, Usage.
+
+  ```tsx
+  // Sub-nav items
+  const NAV = [
+    { label: "Overview", href: "/dashboard" },
+    { label: "Keys", href: "/dashboard/keys" },
+    { label: "Trails", href: "/dashboard/trails" },
+    { label: "Usage", href: "/dashboard/usage" },
+  ];
+  ```
+
+  Style: horizontal tabs with `text-ink/40` inactive, `text-ink border-b-2 border-moss` active state. Use `usePathname()` in a client component for active detection.
+
+  **API proxy routes** (server-side, same pattern as `/api/search`):
+  - `src/app/api/admin/keys/route.ts` — proxies POST to `api.grove.md/keys`
+  - `src/app/api/admin/trails/route.ts` — proxies POST to `api.grove.md/v1/admin/trails`
+  - `src/app/api/admin/users/route.ts` — proxies GET to `api.grove.md/v1/admin/users`
+  - `src/app/api/admin/metrics/route.ts` — proxies GET to `api.grove.md/metrics`
+  - `src/app/api/admin/stats/route.ts` — proxies GET to `api.grove.md/v1/stats`
+
+  Each proxy route: get API key from cookie, forward with Bearer auth, return JSON response.
+
+  **Also:** Add "Dashboard" link to the header in `src/components/header.tsx` (between the wordmark and search, or as a nav item).
+
+  **`src/app/dashboard/page.tsx`** — the Overview page (P4-7 vault health). See P4-7 spec below.
+
+  **Files:** `src/app/dashboard/layout.tsx`, 5 API routes, `src/components/header.tsx` (add link), `src/app/dashboard/page.tsx`
+
+  **Acceptance criteria:**
+  - `/dashboard` shows sub-nav with 4 tabs
+  - Clicking tabs navigates between dashboard pages
+  - Unauthenticated users redirect to `/login?redirect=/dashboard`
+  - Dashboard link visible in header on all app pages
+
+- [ ] **P4-7: Vault health panel (dashboard overview)**
+
+  **Route:** `src/app/dashboard/page.tsx` (the default dashboard page)
+
+  **Data source:** `GET /api/admin/stats` → proxies to `GET /v1/stats?sections=vault,freshness,index,lifecycle,git`
+
+  **Layout:** Grid of stat cards. Each card has a section label, a large number, and supporting detail.
+
+  Cards:
+  1. **Notes** — `vault.total_notes` (large number), `vault.by_type` top 3 types as small labels
+  2. **Freshness** — `freshness.velocity_7d` notes/day (large), `freshness.today` today, `freshness.stale_90d` stale
+  3. **Search index** — `index.indexed_docs` / `index.vault_docs` (e.g., "980 / 1000"), `index.drift` as percentage, `index.embedding_coverage` percentage
+  4. **Lifecycle** — horizontal bar showing seeds/sprouts/growing/mature/dormant/withering proportions, colored segments
+  5. **Git** — `git.last_commit_msg` (truncated), `git.last_commit_at` as relative time, `git.uncommitted_changes` count
+  6. **System** — health status (green/red dot), uptime from `/metrics`
+
+  **Acceptance criteria:**
+  - Page loads and shows all 6 cards with real data from the API
+  - Cards handle missing data gracefully (loading skeleton, "N/A" for null)
+  - Lifecycle bar renders proportionally
+  - Git section shows last commit info
+
+- [ ] **P4-4: Key management page**
+
+  **Route:** `src/app/dashboard/keys/page.tsx`
+
+  **Data source:** `POST /api/admin/keys` with `{ action: "list" }`, `{ action: "create", name }`, `{ action: "revoke", id }`
+
+  **Layout:**
+  - Header: "API Keys" heading + "Create key" button (primary style)
+  - Table: columns = Name, Scopes, Vault, Created, Last Used, Expires, Actions
+  - Each row: key name, scope badges (`bg-moss/15 text-moss text-xs px-2 py-0.5 rounded`), relative dates, "Revoke" button (destructive: `text-harvest hover:text-harvest/60`)
+  - Create flow: clicking "Create key" shows an inline form (key name input + create button). On success, show the token in a `bg-surface font-mono text-sm p-3 rounded` box with a copy button. Warning: "Save this now — it won't be shown again."
+  - Revoke flow: confirm dialog ("Revoke key {name}?"), then remove from list on success.
+
+  **Component structure:**
+  - `src/app/dashboard/keys/page.tsx` — server component, fetches initial key list
+  - `src/components/key-table.tsx` — client component (`"use client"`), handles create/revoke interactions
+
+  **Acceptance criteria:**
+  - Lists all API keys with metadata
+  - Create key → shows token once → new key appears in table
+  - Revoke key → confirm → key disappears from table
+  - Empty state: "No API keys. Create one to get started."
+
+- [ ] **P4-5: Trail management page**
+
+  **Route:** `src/app/dashboard/trails/page.tsx`
+
+  **Data source:** `POST /api/admin/trails` with actions: list, create, update, delete
+
+  **Layout:**
+  - Header: "Trails" heading + "Create trail" button
+  - Card list (not table — trails have more metadata). Each card:
+    - Trail name (heading), description, enabled/disabled badge
+    - Tags: `allow_tags` as green badges, `deny_tags` as muted/strikethrough
+    - Paths: `allow_paths` shown, `deny_paths` shown in muted
+    - Rate limits: `rate_limit_reads`/min, `rate_limit_writes`/min
+    - Actions: "Disable"/"Enable" toggle, "Delete" button
+  - Create flow: modal or inline form with fields: name, description, allow_tags (comma-separated input), deny_tags, allow_types, deny_types, allow_paths, deny_paths, rate_limit_reads, rate_limit_writes. On create, show the consumer API key token (same pattern as key creation).
+
+  **Component structure:**
+  - `src/app/dashboard/trails/page.tsx` — server component
+  - `src/components/trail-list.tsx` — client component for CRUD interactions
+
+  **Acceptance criteria:**
+  - Lists all trails with full configuration
+  - Create trail → shows consumer token once → trail appears in list
+  - Disable/enable trail → toggles state
+  - Delete trail → confirm → trail removed
+  - Empty state: "No trails. Create one to share your knowledge."
 
 - [ ] **P4-6: Usage dashboard**
-  Request volume over time (sparkline or simple chart), latency percentiles, error rate, search latency breakdown (BM25 vs vector). Pulls from `/metrics` endpoint. No external analytics dependency.
 
-- [ ] **P4-7: Vault health panel**
-  Note count, last sync time, git status, embedding coverage, index health, recent commits. Pulls from `vault_status` internally. The "is everything working" glance.
+  **Route:** `src/app/dashboard/usage/page.tsx`
+
+  **Data source:** `GET /api/admin/metrics` → proxies to `GET /metrics` (now auth-gated)
+
+  **Layout:**
+  - Top row: big numbers — total requests, error rate (%), uptime
+  - Tool breakdown: table with columns = Tool, Requests, Errors, p50 (ms), p95 (ms), p99 (ms). Data from `by_tool` keyed by MCP tool names (query, get, multi_get, write_note, list_notes, vault_status).
+  - Search stats section (if available): queries in last hour, avg latency, zero-result rate, top queries list
+
+  No charting library needed — use CSS bars or just numbers for v1. Keep it simple.
+
+  **Component structure:**
+  - `src/app/dashboard/usage/page.tsx` — server component, fetches metrics
+  - Inline display — no complex client-side interactivity needed
+
+  **Acceptance criteria:**
+  - Shows total requests, error rate, uptime
+  - Tool breakdown table with latency percentiles
+  - Search stats section displays if data is present
+  - Handles `/metrics` being empty on fresh server start (show "No data yet")
 
 #### Phase 4c: Trail Consumer Pages
 
 - [ ] **P4-8: Consumer onboarding page**
-  Public (unauthenticated) page per trail: `grove.md/trails/<trail-id>`. Shows trail name, description, visible note count, and MCP connection instructions (copy-paste config for Claude.ai, Cursor, etc.). No login required — the page is the onboarding.
+
+  **Route:** `src/app/trails/[slug]/page.tsx` (public — no auth required)
+
+  **Data source:** Needs a public API endpoint. Add `GET /v1/trails/:id/info` to `src/proxy.ts` in the grove repo — unauthenticated endpoint that returns trail name, description, and note count (no sensitive data). This is the only unauthenticated trail endpoint.
+
+  **Backend addition (grove repo):**
+  ```
+  GET /v1/trails/:id/info
+  → { name, description, note_count, created_at }
+  ```
+  Implementation: look up trail by ID, count notes matching the trail's filters via a quick scan.
+
+  **Layout:**
+  - Full-page, no sidebar/header (add `/trails` to `CHROME_HIDDEN_PATHS` in app-shell.tsx)
+  - Centered card layout (same style as login page)
+  - Trail name (serif heading), description paragraph
+  - Note count: "142 notes available"
+  - Two access methods:
+    1. **Web:** "Sign in to browse" button → links to `/login`
+    2. **MCP:** "Connect via MCP" section with copy-paste config block:
+       ```json
+       {
+         "mcpServers": {
+           "grove": {
+             "url": "https://api.grove.md/mcp",
+             "headers": { "Authorization": "Bearer <your-trail-key>" }
+           }
+         }
+       }
+       ```
+  - "Get a trail key" link → points to contacting the vault owner (or a future invite flow)
+
+  **Acceptance criteria:**
+  - Page loads without auth — public access
+  - Shows trail name, description, note count
+  - MCP config block is copy-pasteable
+  - Non-existent trail ID → 404 page
 
 - [ ] **P4-9: Trail usage view**
-  Per-trail request volume, filtered/allowed ratio, consumer activity. Accessible from the owner's dashboard. Helps decide if a trail's boundaries are too tight (high filter ratio) or too loose.
 
-#### Phase 4d: Knowledge Views (future, after 4a-4c are stable)
+  Deferred until P4-5 trail management is working. Will be a detail view within the trail management page showing per-trail request metrics. Requires per-trail metric tracking (not yet implemented — metrics are per-tool, not per-trail).
+
+#### Phase 4d: Knowledge Views (future, after 4b-4c are stable)
 
 These are the views that make the portal more than an admin panel. They surface what's in the vault visually — things that are hard to do in a CLI or chat interface.
 
 - [ ] **P4-10: Graph explorer**
-  Interactive visualization of the vault's wikilink graph. Powered by `vault_status(graph)` data. Click a node to see the note's connections, type, lifecycle stage. Filter by type, tag, or cluster. This is the "see the shape of your knowledge" view.
+  Interactive visualization of the vault's wikilink graph. Powered by `GET /v1/stats?sections=graph` data. Click a node to see the note's connections, type, lifecycle stage. Filter by type, tag, or cluster. Likely needs a graph visualization library (d3-force or similar). This is the "see the shape of your knowledge" view.
 
 - [ ] **P4-11: Lifecycle dashboard**
-  Visual representation of `vault_status(digest)` — seeds, sprouts, growing, mature, dormant, withering. Click a lifecycle stage to see the notes in it. The daily `/garden` practice, but visual.
+  Visual representation of `GET /v1/stats?sections=lifecycle` — seeds, sprouts, growing, mature, dormant, withering. Click a lifecycle stage to see the notes in it. The daily `/garden` practice, but visual.
 
 - [ ] **P4-12: Search playground**
   Try queries against the vault from the browser. See BM25 vs vector scores side-by-side. Useful for tuning search and understanding why results rank the way they do. Developer tool, not a consumer feature.
 
-#### Phase 4 Tests
+#### Phase 4 Execution Strategy
 
-- Auth: session creation, expiry, invalid key rejection, middleware redirect
-- Key CRUD: create, list, revoke via UI matches CLI behavior
-- Trail CRUD: create trail, verify token shown, disable/delete
-- Consumer page: unauthenticated access to trail info page
-- Dashboard: metrics endpoint returns expected shape, UI renders without error
+**Batch 1 — Backend APIs + dashboard layout (4 parallel agents):**
+
+Each backend agent works in an isolated worktree on the grove repo. To avoid merge conflicts in proxy.ts, agents insert routes at specific anchor points:
+
+- **Agent A:** P4-API-1 (trail CRUD) — Insert trail routes after the `/v1/stats` handler, before the `// Unknown /v1/ route` fallthrough. Touch `src/trails.ts` (add `updateTrail`). Also update CORS: the `/v1/` OPTIONS handler only allows `GET, OPTIONS` — add `POST, PATCH, DELETE` for admin endpoints.
+- **Agent B:** P4-API-2 (user list + last_login_at) — Insert user route after the `/v1/list` handler, before `/v1/stats`. Touch `src/auth.ts` (fix createSession).
+- **Agent C:** P4-API-3 (keys/metrics fixes) — Modify existing `/keys` and `/metrics` handlers. No new route blocks — just editing existing ones. Zero overlap with A/B.
+- **Agent D:** P4-API-4 (git stats) — Only touches `src/vault-stats.ts`. Zero proxy.ts conflict.
+
+Import ordering: Agent A adds imports after the trails import (line ~45 in proxy.ts). Agent B adds after the rest import (line ~46). This gives enough separation for clean merges.
+
+In parallel on the grove-www repo:
+- **Agent E:** P4-FE-0 (dashboard layout + all 5 API proxy routes + header link + dashboard overview stub)
+
+Merge backend agents first, deploy. Then merge Agent E.
+
+**Batch 2 — Frontend pages (3 parallel agents, after Batch 1):**
+
+All three need the dashboard layout from Agent E and the backend APIs from Agents A-D to be merged.
+
+- **Agent F:** P4-4 (key management page at `/dashboard/keys`)
+- **Agent G:** P4-5 (trail management page at `/dashboard/trails`)
+- **Agent H:** P4-7 + P4-6 (vault health overview + usage page at `/dashboard` and `/dashboard/usage`)
+
+Each creates separate pages/components — no file overlap. Merge all, deploy to Vercel.
+
+**Batch 3 — Consumer page:**
+- **Agent I:** P4-8 (trail onboarding at `/trails/[slug]` — needs backend endpoint `GET /v1/trails/:id/info` + grove-www page)
+
+#### Phase 4 Acceptance Criteria
+
+- [ ] `/dashboard` loads with sub-nav (Overview, Keys, Trails, Usage)
+- [ ] Overview page shows vault stats, lifecycle bar, git status, system health
+- [ ] Keys page lists all keys, create shows token once, revoke confirms and removes
+- [ ] Trails page lists all trails with config, create shows consumer token, enable/disable works
+- [ ] Usage page shows request counts, error rate, latency percentiles per tool
+- [ ] `/trails/<id>` loads without auth, shows trail info and MCP config
+- [ ] All pages follow the design system (cream/ink/moss, Lora headings, opacity grammar)
+- [ ] Unauthenticated dashboard access redirects to `/login?redirect=/dashboard`
+- [ ] All data refreshes on page load (no stale cache issues)
 
 ---
 
