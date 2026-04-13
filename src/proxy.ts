@@ -67,7 +67,7 @@ const rateLimiter = new RateLimiter({ reads: 120, writes: 20, windowMs: 60_000 }
 const GROVE_ADMIN_KEY = process.env.GROVE_ADMIN_KEY; // optional: restrict admin to a specific key name
 
 type AdminAuthResult =
-  | { ok: true; keyId: string; keyName: string }
+  | { ok: true; keyId: string; keyName: string; userId: string }
   | { ok: false; status: 401 | 403 };
 
 function adminAuth(req: IncomingMessage): AdminAuthResult {
@@ -77,7 +77,7 @@ function adminAuth(req: IncomingMessage): AdminAuthResult {
     const user = validateSession(sessionToken);
     if (user) {
       if (getUserRole(user.id) !== "owner") return { ok: false, status: 403 };
-      return { ok: true, keyId: user.id, keyName: user.username ?? user.email };
+      return { ok: true, keyId: user.id, keyName: user.username ?? user.email, userId: user.id };
     }
   }
   // Fall back to Bearer token
@@ -89,7 +89,7 @@ function adminAuth(req: IncomingMessage): AdminAuthResult {
   // Optionally restrict admin to a specific key
   if (GROVE_ADMIN_KEY && key.name !== GROVE_ADMIN_KEY) return { ok: false, status: 403 };
   if (getUserRole(key.user_id) !== "owner") return { ok: false, status: 403 };
-  return { ok: true, keyId: key.id, keyName: key.name };
+  return { ok: true, keyId: key.id, keyName: key.name, userId: key.user_id };
 }
 
 function validateToken(token: string): StoredKey | null {
@@ -99,6 +99,12 @@ function validateToken(token: string): StoredKey | null {
   if (!key) return null;
   if (isExpired(key)) return null;
   return key;
+}
+
+function isVaultOwner(userId: string): boolean {
+  const db = getDb();
+  const vault = db.prepare("SELECT owner_id FROM vaults WHERE slug = ?").get("life") as { owner_id: string } | undefined;
+  return vault?.owner_id === userId;
 }
 
 function log(keyName: string | null, method: string, url: string, status: number, extra?: Record<string, unknown>) {
@@ -945,10 +951,18 @@ const server = createServer(async (req, res) => {
     let parsed: any;
     try { parsed = JSON.parse(body); } catch { sendJson(res, 400, { error: "invalid json" }); return; }
 
+    const owner = isVaultOwner(admin.userId);
+
     if (parsed.action === "list") {
       const db = getDb();
-      const allKeys = (db.prepare("SELECT id, name, scopes, vault_id, created_at, last_used_at, expires_at FROM api_keys").all() as StoredKey[]).map((k) => ({
+      // Owner sees all keys; non-owner sees only their own
+      const query = owner
+        ? "SELECT id, user_id, name, scopes, vault_id, created_at, last_used_at, expires_at FROM api_keys"
+        : "SELECT id, user_id, name, scopes, vault_id, created_at, last_used_at, expires_at FROM api_keys WHERE user_id = ?";
+      const rows = (owner ? db.prepare(query).all() : db.prepare(query).all(admin.userId)) as StoredKey[];
+      const keys = rows.map((k) => ({
         id: k.id,
+        user_id: k.user_id,
         name: k.name,
         scopes: k.scopes,
         vault_id: k.vault_id,
@@ -956,15 +970,24 @@ const server = createServer(async (req, res) => {
         last_used_at: k.last_used_at,
         expires_at: k.expires_at,
       }));
-      sendJson(res, 200, { keys: allKeys });
+      sendJson(res, 200, { keys });
       return;
     }
     if (parsed.action === "create" && parsed.name) {
-      const result = createKey(parsed.name, parsed.scopes ?? ["read", "write"], parsed.vault ?? "life");
+      const result = createKey(parsed.name, parsed.scopes ?? ["read", "write"], parsed.vault ?? "life", undefined, admin.userId);
       sendJson(res, 200, { id: result.id, name: result.name, token: result.token });
       return;
     }
     if (parsed.action === "revoke" && parsed.id) {
+      // Non-owner can only revoke their own keys
+      if (!owner) {
+        const db = getDb();
+        const target = db.prepare("SELECT user_id FROM api_keys WHERE id = ?").get(parsed.id) as { user_id: string } | undefined;
+        if (!target || target.user_id !== admin.userId) {
+          sendJson(res, 403, { error: "forbidden" });
+          return;
+        }
+      }
       revokeKey(parsed.id);
       sendJson(res, 200, { revoked: parsed.id });
       return;
