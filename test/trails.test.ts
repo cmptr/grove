@@ -5,8 +5,10 @@ import { tmpdir } from "node:os";
 import {
   filterByTrail, trailAllowsWrite, loadTrails, updateTrail,
   generateTrailId, resolveTrail, disableTrail, deleteTrail,
+  getTrailPublicInfo, getTrailConfig, createTrail,
   type TrailConfig, type NoteMetadata,
 } from "../src/trails.js";
+import { createSchema, closeDb, resetDb, getDb } from "../src/db.js";
 
 // ── filterByTrail tests ────────────────────────────────────────────
 
@@ -413,5 +415,66 @@ describe("trail filter eval — recall", () => {
     const recall = allowed.length / onTopicNotes.length;
     expect(recall).toBeGreaterThanOrEqual(0.9);
     expect(allowed).toHaveLength(20); // perfect recall
+  });
+});
+
+// ── Trail public info (DB-backed) ────────────────────────────────────
+
+describe("getTrailPublicInfo + getTrailConfig", () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "grove-trail-info-test-"));
+    process.env.GROVE_DB_PATH = join(tempDir, "grove.db");
+    resetDb();
+    createSchema();
+    // Seed a user so createKey FK constraint passes
+    getDb().prepare("INSERT INTO users (id, email, role) VALUES (?, ?, ?)").run("user_test", "test@example.com", "owner");
+  });
+
+  afterEach(() => {
+    closeDb();
+    delete process.env.GROVE_DB_PATH;
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("returns null for non-existent trail", () => {
+    expect(getTrailPublicInfo("trail_nonexistent")).toBeNull();
+  });
+
+  it("returns trail public info after creation", () => {
+    const { trail } = createTrail({ name: "AI Research", description: "Shared AI notes" });
+    const info = getTrailPublicInfo(trail.id);
+    expect(info).not.toBeNull();
+    expect(info!.name).toBe("AI Research");
+    expect(info!.description).toBe("Shared AI notes");
+    expect(info!.enabled).toBe(true);
+    expect(info!.created_at).toBeTruthy();
+  });
+
+  it("returns null for disabled trail", () => {
+    const { trail } = createTrail({ name: "Disabled Trail" });
+    disableTrail(trail.id);
+    const info = getTrailPublicInfo(trail.id);
+    expect(info).not.toBeNull();
+    expect(info!.enabled).toBe(false);
+  });
+
+  it("getTrailConfig returns full config with filters", () => {
+    const { trail } = createTrail({
+      name: "Scoped Trail",
+      allow_paths: ["Resources/"],
+      deny_tags: ["private"],
+    });
+    const config = getTrailConfig(trail.id);
+    expect(config).not.toBeNull();
+    expect(config!.name).toBe("Scoped Trail");
+    expect(config!.allow_paths).toEqual(["Resources/"]);
+    expect(config!.deny_tags).toEqual(["private"]);
+    expect(config!.key_id).toBeTruthy();
+  });
+
+  it("getTrailConfig returns null for non-existent trail", () => {
+    expect(getTrailConfig("trail_nope")).toBeNull();
   });
 });

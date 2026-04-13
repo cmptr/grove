@@ -12,7 +12,7 @@ import { homedir } from "node:os";
 import { hybridSearch, bm25Search } from "./hybrid-search.js";
 import { gitLog, listNotes, gitCommit, qmdReindex, gitPush } from "./vault-ops.js";
 import { validatePath, validateNote, parseNote, serializeNote, contentHash } from "./notes-validate.js";
-import { filterByTrail, trailAllowsWrite, type TrailConfig, type NoteMetadata } from "./trails.js";
+import { filterByTrail, trailAllowsWrite, getTrailPublicInfo, getTrailConfig, type TrailConfig, type NoteMetadata } from "./trails.js";
 import { getStats, refreshStats } from "./vault-stats.js";
 import { analyzeGraph, computeDigest } from "./vault-graph.js";
 import { searchMetrics, metrics } from "./metrics.js";
@@ -273,6 +273,43 @@ export interface SearchResult {
   title: string;
   snippet: string;
   score: number;
+}
+
+// ── Trail info (unauthenticated) ──────────────────────────────────
+
+export interface TrailInfoResponse {
+  name: string;
+  description: string;
+  note_count: number;
+  created_at: string;
+}
+
+export function handleTrailInfo(trailId: string): TrailInfoResponse | null {
+  const info = getTrailPublicInfo(trailId);
+  if (!info || !info.enabled) return null;
+
+  // Count notes matching trail filters
+  const config = getTrailConfig(trailId);
+  let noteCount = 0;
+  if (config) {
+    const allNotes = listNotes(VAULT_PATH, "*");
+    noteCount = allNotes.filter((n) => {
+      const meta: NoteMetadata = {
+        path: n.path,
+        type: n.type ?? undefined,
+        tags: n.tags ?? [],
+        private: n.private,
+      };
+      return filterByTrail(config, meta);
+    }).length;
+  }
+
+  return {
+    name: info.name,
+    description: info.description,
+    note_count: noteCount,
+    created_at: info.created_at,
+  };
 }
 
 /**
