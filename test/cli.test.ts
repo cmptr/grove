@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { parseArgs, CliError } from "../src/cli.js";
+import { parseArgs, CliError, HELP, printCommandHelp } from "../src/cli.js";
 
 // ── parseArgs ───────────────────────────────────────────────────────
 
@@ -111,5 +111,83 @@ describe("CliError", () => {
     expect(new CliError("config_missing", "", 2).exitCode).toBe(2);
     expect(new CliError("server_error", "", 3).exitCode).toBe(3);
     expect(new CliError("connection_refused", "", 3).exitCode).toBe(3);
+  });
+});
+
+// ── HELP system ────────────────────────────────────────────────────
+
+describe("HELP", () => {
+  const expectedCommands = [
+    "search", "read", "list", "write", "init",
+    "graph", "digest", "health", "metrics",
+    "status", "history", "diagnostics",
+    "keys", "trails", "sync", "lint", "snapshot", "rollback",
+  ];
+
+  it("has entries for all commands", () => {
+    for (const cmd of expectedCommands) {
+      expect(HELP[cmd], `missing HELP entry for '${cmd}'`).toBeDefined();
+    }
+  });
+
+  it("every entry has usage, description, and json_schema", () => {
+    for (const [cmd, h] of Object.entries(HELP)) {
+      expect(h.usage, `${cmd}.usage`).toContain("grove");
+      expect(h.description, `${cmd}.description`).toBeTruthy();
+      expect(h.json_schema, `${cmd}.json_schema`).toBeTruthy();
+    }
+  });
+
+  it("every entry has exit codes", () => {
+    for (const [cmd, h] of Object.entries(HELP)) {
+      expect(h.exit_codes, `${cmd}.exit_codes`).toContain("0=success");
+    }
+  });
+});
+
+describe("printCommandHelp", () => {
+  it("formats known command help", () => {
+    const out = printCommandHelp("search");
+    expect(out).toContain("grove search");
+    expect(out).toContain("JSON:");
+    expect(out).toContain("Exit:");
+  });
+
+  it("returns error for unknown command", () => {
+    const out = printCommandHelp("nonexistent");
+    expect(out).toContain("Unknown command");
+  });
+
+  it("includes flags section when flags exist", () => {
+    const out = printCommandHelp("write");
+    expect(out).toContain("Flags:");
+    expect(out).toContain("--content");
+    expect(out).toContain("--type");
+  });
+
+  it("includes examples when present", () => {
+    const out = printCommandHelp("search");
+    expect(out).toContain("Examples:");
+    expect(out).toContain("taste graph");
+  });
+});
+
+// ── parseArgs: --content flag ─────────────────────────────────────
+
+describe("parseArgs --content flag", () => {
+  beforeEach(() => {
+    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+  });
+
+  it("parses --content with a string value", () => {
+    const result = parseArgs(["write", "path.md", "--content", "hello world", "--type", "concept"]);
+    expect(result.flags.content).toBe("hello world");
+    expect(result.flags.type).toBe("concept");
+  });
+
+  it("parses --content alongside --json", () => {
+    const result = parseArgs(["write", "path.md", "--content", "text", "--json"]);
+    expect(result.flags.content).toBe("text");
+    expect(result.flags.json).toBe(true);
   });
 });
