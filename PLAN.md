@@ -139,36 +139,53 @@ Every new endpoint, function, or behavior change needs tests:
                     │  Graceful shutdown│
                     └────────┬────────┘
                              │
-              ┌──────────────┼──────────────┐
-              ▼              ▼              ▼
-     ┌────────────┐  ┌────────────┐  ┌────────────┐
-     │ Phase 4b   │  │ Phase 9a   │  │ Phase 7a   │
-     │ Batch 1    │  │ User mgmt  │  │ Discovery  │
-     │ (4 backend │  │ P9-1..P9-3 │  │ P7-1..P7-6 │
-     │  agents)   │  │            │  │            │
-     └────────┬───┘  └──────┬─────┘  └──────┬─────┘
-              │              │               │
-     ┌────────▼───┐          │        ┌──────▼─────┐
-     │ Phase 4b   │          │        │ Phase 7b   │
-     │ Batch 2+3  │          │        │ Bulk       │
-     │ (FE agents)│          │        │ onboarding │
-     └────────┬───┘          │        └────────────┘
-              │              │
-              ▼              ▼
-     ┌────────────┐  ┌────────────┐
-     │ Phase 4d   │  │ Phase 9b   │
-     │ Knowledge  │  │ Trail UX   │
-     │ views      │  │ P9-5..P9-7 │
-     └────────────┘  └────────────┘
+         ┌───────────────────┼──────────────────┐
+         ▼                   ▼                   ▼
+  ┌────────────┐     ┌────────────┐      ┌────────────┐
+  │  CLI-A     │     │ Phase 4b   │      │ Phase 7a   │
+  │  Foundation│     │ Batch 1    │      │ Discovery  │
+  │  --json,   │     │ (4 backend │      │ P7-1..P7-6 │
+  │  exit codes│     │  agents)   │      │            │
+  └──────┬─────┘     └─────┬──────┘      └──────┬─────┘
+         │                 │                     │
+         │          ┌──────▼──────┐       ┌──────▼─────┐
+         │          │ Phase 4b    │       │ Phase 7b   │
+         │          │ Batch 2+3   │       │ Bulk       │
+         │          │ (FE agents) │       │ onboarding │
+         │          └──────┬──────┘       └────────────┘
+         │                 │
+         ▼                 │
+  ┌────────────┐           │
+  │  CLI-B     │◄──────────┘ (needs P4-API-1 for trail HTTP)
+  │  Consistency│
+  │  --paths,  │
+  │  trails HTTP│
+  └──────┬─────┘
+         │
+         ▼
+  ┌────────────┐     ┌────────────┐
+  │ Phase 9a   │     │ Phase 4d   │
+  │ User mgmt  │     │ Knowledge  │
+  │ + CLI-D    │     │ views      │
+  │ users cmd  │     └────────────┘
+  └──────┬─────┘
+         │
+  ┌──────▼─────┐
+  │ Phase 9b   │
+  │ Trail UX   │
+  │ + CLI-D    │
+  │ share cmd  │
+  └────────────┘
 ```
 
 **Key dependency rules:**
 - P4-PREREQ must complete before any other phase launches
-- Phase 4b Batch 2 needs Batch 1 merged and deployed
-- Phase 9a can start after P4-PREREQ — independent of Phase 4b
-- Phase 9b needs Phase 9a + Phase 4b Batch 2 (for the dashboard UI shell)
-- Phase 7 has no dependency on Phase 4b — can run in parallel if agents are available
-- Phase 7a P7-2 (concept extraction) uses Claude API, not local Ollama
+- CLI-A can start immediately after P4-PREREQ — no server feature dependencies
+- Phase 4b Batch 1 can run in parallel with CLI-A
+- CLI-B needs CLI-A merged + P4-API-1 (trail HTTP endpoints) merged
+- Phase 9a can start after CLI-B (needs `--json` for agent use + trail HTTP)
+- Phase 7 has no dependency on CLI work — can run in parallel
+- CLI-D commands land alongside their server phases (users with 9a, share with 9b, discovery with 7a)
 
 ---
 
@@ -989,6 +1006,271 @@ Trail management UI (P4-5), consumer onboarding pages (P4-8), and trail usage vi
 
 ---
 
+### CLI Evolution: Agent-Native Interface
+
+**Goal:** The `grove` CLI is the canonical interface for everything. The web dashboard is a view into what the CLI already does. An AI agent with `grove` on PATH can manage the entire system — search, write, inspect, administer — without special integration.
+
+**Prerequisites:** None. Phase A can start immediately. Later phases land alongside their server features.
+
+#### CLI Design Principles
+
+1. **Human first, `--json` for machines.** Default output is terminal-formatted. `--json` emits structured JSON. Auto-detect: if stdout is not a TTY (piped), default to JSON.
+2. **Flat top-level, noun+verb for resources.** `grove search`, `grove status` (flat verbs). `grove keys create`, `grove trails list`, `grove users invite` (noun+verb for resource management). No deeper nesting.
+3. **Exit codes are a contract.** `0`=success, `1`=client error (bad input, not found), `2`=auth error, `3`=server error (retry). Agents branch on `$?` without parsing stderr.
+4. **Every server operation has a CLI command.** If the dashboard can do it, `grove` can do it.
+5. **Non-interactive by default.** No prompts. Destructive commands (`rollback`, `keys revoke`, `trails delete`) require `--yes` flag — non-interactive but safe. Without `--yes`, print what would happen and exit 1.
+6. **stdout is data, stderr is status.** Data on stdout (human or JSON). Errors and progress on stderr. `grove search --json | jq` works cleanly.
+
+#### JSON Output Contract
+
+**Success envelope:**
+```json
+{"ok": true, "path": "Resources/Concepts/Taste Graph.md", "content_hash": "a1b2c3d4", ...}
+```
+
+**Error envelope (stderr when --json):**
+```json
+{"ok": false, "error": "not_found", "message": "Note not found: Foo.md"}
+```
+
+Error types: `not_found` (exit 1), `invalid_input` (exit 1), `validation_error` (exit 1), `auth_failed` (exit 2), `server_error` (exit 3), `rate_limited` (exit 3, includes `retry_after_ms`), `conflict` (exit 1, includes current `content_hash`).
+
+All dates ISO 8601. All paths vault-relative. `null` for missing fields, never omitted.
+
+#### CLI-A: Foundation (before Phase 4b)
+
+These make the CLI agent-usable. Do first.
+
+- [ ] **CLI-A1: `--json` global flag** (`src/cli.ts`)
+
+  Add `--json` to `parseArgs` as a top-level boolean. Each command function returns a result object instead of calling `console.log`. The dispatcher handles formatting: if `--json`, emit the result as JSON to stdout; otherwise, call the existing human formatter.
+
+  Auto-detect non-TTY: `if (!process.stdout.isTTY) flags.json = true`.
+
+  The MCP server returns tool results as text strings in `content[0].text`. The CLI already parses these — search results are JSON inside the text, `get` returns markdown with parsed frontmatter. The `--json` implementation wraps the already-parsed data in the `{"ok": true, ...}` envelope.
+
+  **Files:** `src/cli.ts` (modify parseArgs, refactor each command to return data)
+  **Tests:** `test/cli.test.ts` — verify JSON output shape for each command, verify non-TTY detection
+  **Acceptance criteria:**
+  - `grove search "test" --json` emits valid JSON with `ok`, `results`, `count` fields
+  - `grove read "path" --json` emits valid JSON with `path`, `frontmatter`, `content`, `content_hash`
+  - `grove search "test" | cat` emits JSON (non-TTY auto-detection)
+  - Human-formatted output unchanged when no `--json` and stdout is TTY
+
+- [ ] **CLI-A2: Exit codes + structured errors**
+
+  Replace all `process.exit(1)` calls with thrown `CliError`:
+  ```typescript
+  class CliError extends Error {
+    constructor(public code: string, message: string, public exitCode: number = 1) {
+      super(message);
+    }
+  }
+  ```
+
+  Dispatcher catches `CliError`, formats per output mode, exits with correct code. Unhandled errors become exit 3 with code `server_error`.
+
+  **Files:** `src/cli.ts`
+  **Tests:** `test/cli.test.ts` — verify exit codes: not-found=1, bad auth=2, server down=3
+  **Acceptance criteria:**
+  - `grove read "nonexistent" --json` exits 1 with `{"ok": false, "error": "not_found", ...}` on stderr
+  - `grove search "test"` with invalid token exits 2
+  - Connection refused exits 3
+
+- [ ] **CLI-A3: `--content` flag on write**
+
+  `grove write path.md --type concept --content "The actual content"` — alternative to stdin. If neither stdin nor `--content` is provided and stdin is a TTY, error immediately with usage hint instead of hanging.
+
+  **Files:** `src/cli.ts` (modify cmdWrite)
+  **Acceptance criteria:**
+  - `grove write path.md --content "text" --type concept` creates the note
+  - `grove write path.md --type concept` with no pipe and TTY stdin exits 1 with "Provide content via --content flag or pipe to stdin"
+
+- [ ] **CLI-A4: `grove init`**
+
+  Guided non-interactive config setup:
+  `grove init --server https://api.grove.md --token grove_live_xxx`
+
+  Validates by calling `/health` on the server. Writes `~/.grove/cli.json`. Also support `GROVE_SERVER` and `GROVE_TOKEN` env vars as overrides (env > config file).
+
+  **Files:** `src/cli.ts`
+  **Acceptance criteria:**
+  - `grove init --server X --token Y` creates config file and prints "Connected to X as <key-name>"
+  - `GROVE_TOKEN=xxx grove search "test"` works without a config file
+
+- [ ] **CLI-A5: Promote `graph` and `digest` to top-level commands**
+
+  `grove graph` → calls `vault_status(mode: "graph")`. Shows clusters, hubs, centrality.
+  `grove digest` → calls `vault_status(mode: "digest")`. Shows lifecycle stages.
+
+  Currently hidden as modes inside `grove status`. Not discoverable.
+
+  **Files:** `src/cli.ts` (add two case entries, add formatters)
+  **Acceptance criteria:**
+  - `grove graph --json` returns `{ nodes, edges, clusters, top_hubs }`
+  - `grove digest --json` returns `{ lifecycle: { seeds, sprouts, ... }, velocity_7d }`
+
+- [ ] **CLI-A6: `grove health` + `grove metrics`**
+
+  `grove health` — HTTP GET `/health`, formats component status.
+  `grove metrics` — HTTP GET `/metrics`, formats request counts and latency.
+
+  **Files:** `src/cli.ts` (add commands, HTTP calls matching keys pattern)
+  **Acceptance criteria:**
+  - `grove health --json` returns `{ ok: true, components: { proxy, server, qmd, embeddings } }`
+  - `grove metrics --json` returns request counts, p50/p95/p99, error rates
+
+- [ ] **CLI-A7: Help text with output schemas**
+
+  Each command's `--help` shows: usage, examples, flags, JSON output schema, exit codes. Top-level `grove` (no args) shows grouped command listing with one-line descriptions.
+
+  ```
+  grove search <query> [-n N] [--json] [--paths]
+    Search notes. Returns ranked results with snippets.
+    JSON: {ok, results: [{path, title, score, snippet}], count}
+    Exit: 0=found, 1=bad input, 2=auth, 3=server
+  ```
+
+  **Files:** `src/cli.ts` (add HELP records per command)
+
+#### CLI-B: Consistency + Composability (after P4-API-1)
+
+- [ ] **CLI-B1: Move trails to HTTP**
+
+  Replace direct SQLite imports (`loadTrails`, `createTrail`, etc.) with HTTP calls to `POST /v1/admin/trails` (matching the `/keys` pattern). Enables running `grove trails` from any machine, not just the server.
+
+  **Files:** `src/cli.ts` (refactor cmdTrails* functions)
+  **Acceptance criteria:**
+  - `grove trails list` works from a laptop pointing at api.grove.md
+  - All trail subcommands (list, create, disable, delete) use HTTP
+  - `grove trails delete <id>` requires `--yes` flag
+
+- [ ] **CLI-B2: `--paths` flag on search/list**
+
+  Emit one path per line, nothing else. For `xargs` composability.
+
+  ```bash
+  grove search "machine learning" --paths | xargs -I{} grove read "{}" --json
+  ```
+
+  **Files:** `src/cli.ts`
+
+- [ ] **CLI-B3: `--if-hash` on write**
+
+  Expose the server's content hash checking for safe read-modify-write loops:
+
+  ```bash
+  data=$(grove read "Taste Graph" --json)
+  hash=$(echo "$data" | jq -r '.content_hash')
+  echo "updated content" | grove write "Resources/Concepts/Taste Graph.md" --if-hash "$hash"
+  # Exits 1 with error "conflict" if hash doesn't match
+  ```
+
+  **Files:** `src/cli.ts` (pass if_hash to write_note MCP call)
+
+- [ ] **CLI-B4: `grove whoami`**
+
+  Call server, print key name, scopes, vault. Quick identity check.
+
+  **Files:** `src/cli.ts`
+
+#### CLI-C: Module Extraction (when cli.ts exceeds ~1200 LOC)
+
+Split into `src/cli/` directory:
+```
+src/cli/
+  index.ts          # parseArgs, dispatch, global flags, main()
+  output.ts         # format(), error(), JSON envelope, human formatters
+  client.ts         # Config, loadConfig, mcpRequest, callTool, httpPost
+  commands/
+    search.ts       # cmdSearch
+    read.ts         # cmdRead, cmdGet
+    write.ts        # cmdWrite
+    inspect.ts      # cmdStatus, cmdHistory, cmdDiagnostics, cmdGraph, cmdDigest
+    keys.ts         # cmdKeys*
+    trails.ts       # cmdTrails*
+    admin.ts        # cmdHealth, cmdMetrics, cmdWhoami, cmdInit
+    local.ts        # cmdSnapshot, cmdRollback, cmdLint, cmdSync
+```
+
+Each command function has signature `(client: Client, positional: string, flags: Flags) => Promise<CommandResult>`. Never calls `console.log` or `process.exit`. The dispatcher handles all I/O.
+
+This is a refactor, not a feature. Do it when adding Phase D commands makes the single file unwieldy.
+
+#### CLI-D: Feature Commands (as server features land)
+
+| Command | Server dependency | Phase |
+|---------|-------------------|-------|
+| `grove users list` | P4-API-2 (user list endpoint) | Phase 9a |
+| `grove users invite <email> --trail <id> --role viewer` | P9-2 (invite flow) | Phase 9a |
+| `grove share <path> [--ttl 7d]` | P9-7 (share-a-note) | Phase 9b |
+| `grove tag-backfill` | P5-TAG-2 (tag inference) | P5-TAG |
+| `grove ingest <dir>` | P7-7 (ingest command) | Phase 7b |
+| `grove discovery` | P7-5 (discovery digest) | Phase 7a |
+| `grove write --batch` | Needs server batch write API (not yet spec'd) | Phase 7+ |
+
+`grove write --batch` reads JSONL from stdin, each line is `{"path", "type", "tags", "content"}`. Requires a server-side batch write endpoint (one git commit for N notes). Spec the server endpoint when the need materializes (harvesting or ingestion workflows that write 10+ notes).
+
+#### CLI Execution Strategy
+
+**CLI-A (7 tasks, 2 parallel agents):**
+- **Agent A:** CLI-A1 + CLI-A2 (--json + exit codes) — these are tightly coupled, same refactor
+- **Agent B:** CLI-A3 + CLI-A4 + CLI-A5 + CLI-A6 + CLI-A7 (new flags, new commands, help) — independent of A's refactor, adds to existing command structure
+
+Merge Agent A first (structural change to how commands return data). Then Agent B (adds features on top).
+
+**CLI-B (4 tasks, after CLI-A + P4-API-1 merged):** Single agent, sequential. Each task is small.
+
+**CLI-C:** Single agent when triggered by LOC threshold.
+
+**CLI-D:** One task per feature, lands with its server phase.
+
+#### Complete Command Reference (after all phases)
+
+**Vault operations:**
+| Command | Description |
+|---------|-------------|
+| `grove search <query>` | Hybrid search (BM25 + vector) |
+| `grove read <path>` | Read a note by path or title |
+| `grove write <path>` | Create/update a note |
+| `grove list <pattern>` | List notes matching a glob |
+
+**Vault introspection:**
+| Command | Description |
+|---------|-------------|
+| `grove status` | Vault health summary |
+| `grove history` | Recent git changes |
+| `grove diagnostics` | Orphans, broken links, missing frontmatter |
+| `grove graph` | Knowledge graph: clusters, hubs, centrality |
+| `grove digest` | Lifecycle: seeds, sprouts, growing, mature |
+| `grove discovery` | Discovery loop: recent extractions, new concepts |
+
+**Administration:**
+| Command | Description |
+|---------|-------------|
+| `grove keys list\|create\|revoke` | API key management |
+| `grove trails list\|create\|disable\|delete` | Trail management |
+| `grove users list\|invite` | User management |
+| `grove health` | Server component health |
+| `grove metrics` | Request counts, latency, error rates |
+| `grove share <path>` | Generate expiring share link |
+| `grove whoami` | Current identity + scopes |
+| `grove init` | Config setup |
+
+**Local operations:**
+| Command | Description |
+|---------|-------------|
+| `grove snapshot [message]` | Create vault snapshot (git tag) |
+| `grove rollback <tag>` | Restore vault to snapshot (requires `--yes`) |
+| `grove lint <dir>` | Normalize YAML frontmatter |
+| `grove sync <dir>` | Sync archive sources |
+| `grove tag-backfill` | Apply inferred tags to untagged notes |
+| `grove ingest <dir>` | Bulk import markdown files |
+
+**Global flags:** `--json`, `--quiet`, `--verbose`, `--yes`, `--help`
+
+---
+
 ### ~~Phase 6: LLM Judge~~ — REMOVED FROM SCOPE
 
 Tag/type/path prefilter handles trail filtering. The right investment is better tag coverage across the vault, not an LLM layer. See P5-TAG below.
@@ -1459,6 +1741,11 @@ Decisions made during planning. Reference these when implementing — don't re-l
 | LLM judge | Cancelled | Ship with trails, rule-based only | Prefilter covers 90%+. LLM adds latency, fragility, and infra (Ollama doesn't fit on t3.medium). If needed later, use Claude API as rerank signal — no local model. |
 | Discovery extraction | Claude API (claude-haiku-4-5) | Local LLM (Ollama) | VPS is t3.medium (4GB RAM) — Ollama + Qwen needs 3-4GB minimum. Claude API is simpler, no GPU, no model management, pay-per-use. |
 | CI/CD | GitHub Actions CI + manual deploy trigger | Manual SSH deploy | CI gives agents automated feedback on PRs. Deploy stays manual — the VPS runs a live personal knowledge API, so deploys are a human decision. |
+| CLI as canonical interface | CLI-first, dashboard reads from CLI | Dashboard-first, CLI as secondary | Agents need full control via CLI. The dashboard is a view, not the control plane. Every server capability gets a CLI command. |
+| CLI output | Human default, `--json` for machines, auto-detect non-TTY | JSON-only, human-only | Humans and agents use the same tool. Auto-detection means agents get JSON without asking when piped. |
+| CLI taxonomy | Flat verbs + noun-verb for resources | Nested namespaces (grove admin keys list) | Flat is fewer keystrokes. Noun-verb (grove keys create) is natural for CRUD on resources. No deeper nesting. |
+| Destructive CLI ops | Require `--yes` flag, no interactive prompts | Interactive confirmation | Agents can't answer prompts. `--yes` is scriptable and explicit. Without it, command shows what would happen and exits 1. |
+| CLI communication | All ops through server (MCP or HTTP) | Some local (SQLite reads) | Local ops break when CLI runs remotely. Move trails from local SQLite to HTTP (matching keys pattern). Only truly local ops (lint, snapshot) stay local. |
 | Graceful shutdown | SIGTERM handler + write queue flush | None (PM2 kills after 1.6s) | PM2 restart was killing in-flight writes. Flush + 15s kill_timeout prevents data loss. |
 | Consumer discovery | `filtered_count` in responses | Hide filtering entirely | Consumers should know results are scoped so they can request broader access. |
 | Portal framework | Next.js on Vercel | Extend node:http server with HTML routes | API server stays minimal (raw node:http). Portal is a separate app with real framework needs (routing, auth middleware, SSR). Vercel deployment is free for this scale. |
@@ -1540,6 +1827,22 @@ Decisions made during planning. Reference these when implementing — don't re-l
 - `pm2 restart grove-server` flushes write queue before shutting down (verify via log)
 - Push failures in write-queue.ts emit structured log entries
 
+**CLI-A (Foundation) is successful when:**
+- `grove search "test" --json` returns valid JSON with `ok`, `results`, `count` fields
+- `grove read "nonexistent" --json` exits 1 with `{"ok": false, "error": "not_found"}` on stderr
+- `grove search "test" | cat` auto-detects non-TTY and emits JSON
+- `grove write path.md --content "text" --type concept` creates a note without stdin
+- `grove graph` and `grove digest` are discoverable top-level commands
+- `grove health --json` and `grove metrics --json` return server status
+- `grove init --server X --token Y` creates config and validates connection
+- `GROVE_TOKEN=xxx grove search "test"` works without a config file
+
+**CLI-B (Consistency) is successful when:**
+- `grove trails list` works from any machine (HTTP, not local SQLite)
+- `grove search "X" --paths | xargs -I{} grove read "{}"` works
+- `grove write path.md --if-hash abc123` exits 1 on conflict with current hash in error
+- `grove trails delete <id>` without `--yes` shows what would happen and exits 1
+
 **Phase 4 (Portal) is successful when:**
 - Owner can log in with admin key, get a session, and manage keys/trails from the browser
 - Usage dashboard shows request volume and latency per tool
@@ -1572,28 +1875,41 @@ Decisions made during planning. Reference these when implementing — don't re-l
 1. CI pipeline + graceful shutdown (single agent, small scope)
 2. Merge, deploy manually, verify health check
 
-**Phase 4b — Ops Dashboard (after P4-PREREQ):**
+**CLI-A — Foundation (immediately after P4-PREREQ, parallel with Phase 4b):**
+1. Agent A: --json + exit codes + structured errors (core refactor)
+2. Agent B: --content, init, graph/digest promotion, health/metrics, help (new features)
+
+**Phase 4b — Ops Dashboard (parallel with CLI-A):**
 1. Backend APIs: Agents A-D in parallel (trail CRUD, user list, keys/metrics fixes, git stats)
 2. Frontend: Agents F-H in parallel (key mgmt, trail mgmt, vault health + usage pages)
 3. Consumer: Agent I (trail onboarding page)
 
-**Phase 9a — User Management (can start after P4-PREREQ, parallel with Phase 4b):**
-1. Agents A-C in parallel (user roles, invite flow, user-scoped keys)
-2. Agents D-E in parallel (user mgmt UI, trail sharing UX) — needs Phase 4b dashboard layout
+**CLI-B — Consistency (after CLI-A + P4-API-1 merged):**
+- Trails to HTTP, --paths, --if-hash, whoami (single agent, sequential)
+
+**P5-TAG — Tag & Classification Coverage (can run anytime, independent):**
+- Auto-tagging on write + backfill existing notes → trail filtering coverage from 15% to >80%
 
 **Phase 7 — Discovery (can start after P4-PREREQ, parallel with above):**
 1. Agents A-B: discovery loop skeleton ‖ ingest command
 2. Agents C-D: concept extraction + wikilink wiring ‖ semantic neighbors
 3. Agents E-F: discovery digest ‖ bookmarks + post-ingest bootstrap
+- CLI-D: `grove discovery`, `grove ingest` land with their server features
 
-**Phase 4d — Knowledge Views (after Phase 4b):**
-- P4-10 (graph explorer), P4-11 (lifecycle dashboard) — deferred, spec when dashboard proves useful
+**Phase 9a — User Management (after CLI-B):**
+1. Agents A-C in parallel (user roles, invite flow, user-scoped keys)
+2. Agents D-E in parallel (user mgmt UI, trail sharing UX) — needs Phase 4b dashboard layout
+- CLI-D: `grove users list|invite` lands with P9-2
 
 **Phase 9b — Trail Sharing UX (after Phase 9a + Phase 4b):**
 - Shareable trail links, trail-scoped grove.md, share-a-note
+- CLI-D: `grove share` lands with P9-7
 
-**P5-TAG — Tag & Classification Coverage (can run anytime, independent):**
-- Auto-tagging on write + backfill existing notes → trail filtering coverage from 15% to >80%
+**CLI-C — Module Extraction (when cli.ts exceeds ~1200 LOC):**
+- Split into src/cli/ directory structure. Triggered by size, not schedule.
+
+**Phase 4d — Knowledge Views (after Phase 4b):**
+- P4-10 (graph explorer), P4-11 (lifecycle dashboard) — deferred, spec when dashboard proves useful
 
 **~~Phase 6~~** — LLM judge: REMOVED FROM SCOPE
 **Phase 8** — Multi-vault: deferred (work vault is read-only and auto-generated; low priority)
