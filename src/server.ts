@@ -30,7 +30,7 @@ function noteUrl(vaultPath: string): string {
 import { embedFile } from "./embed-single.js";
 import { WriteQueue } from "./write-queue.js";
 import { gitCommit, gitPush, gitLog, startupRecovery, qmdReindex, listNotes } from "./vault-ops.js";
-import { validatePath, validateNote, parseNote, serializeNote, contentHash } from "./notes-validate.js";
+import { validatePath, validateNote, parseNote, serializeNote, contentHash, inferTags } from "./notes-validate.js";
 import { analyzeGraph, computeDigest } from "./vault-graph.js";
 import { getStats, startStatsTimer, refreshStats } from "./vault-stats.js";
 import { RateLimiter, IdempotencyCache } from "./rate-limit.js";
@@ -388,8 +388,11 @@ After writing, present the url field from the response to the user.`,
         return { content: [{ type: "text" as const, text: `Path error: ${err.message}` }], isError: true };
       }
 
-      // Validate note
+      // Auto-tag: infer tags from path/frontmatter, supplement existing
       const relPath = relative(VAULT_PATH, absPath);
+      frontmatter.tags = inferTags(relPath, frontmatter);
+
+      // Validate note
       const { errors } = validateNote(relPath, frontmatter, content);
       if (errors.length > 0) {
         return { content: [{ type: "text" as const, text: `Validation errors:\n${errors.map((e) => `- ${e}`).join("\n")}` }], isError: true };

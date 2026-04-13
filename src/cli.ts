@@ -17,12 +17,13 @@
 
 import { request as httpsRequest } from "node:https";
 import { request as httpRequest } from "node:http";
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { join, relative } from "node:path";
 import { homedir } from "node:os";
 import { execSync } from "node:child_process";
 import { readArchiveSources, planSync, normalizeDir } from "./sync-sources.js";
 import { loadTrails, createTrail, disableTrail, deleteTrail } from "./trails.js";
+import { parseNote, serializeNote, inferTags } from "./notes-validate.js";
 
 // ── Vault path (local git operations) ────────────────────────────
 const VAULT_PATH = process.env.GROVE_VAULT ?? join(homedir(), "life");
@@ -813,6 +814,98 @@ function cmdLint(dir: string, flags: Record<string, string | boolean>): CmdResul
   };
 }
 
+// ── Tag backfill ────────────────────────────────────────────────
+
+function walkVaultMd(dir: string, acc: string[] = []): string[] {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name.startsWith(".")) continue;
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) { walkVaultMd(full, acc); continue; }
+    if (entry.isFile() && entry.name.endsWith(".md")) acc.push(full);
+  }
+  return acc;
+}
+
+function cmdTagBackfill(flags: Record<string, string | boolean>): CmdResult {
+  const dryRun = !!flags["dry-run"];
+
+  // Create snapshot before modifying anything
+  if (!dryRun) {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const tagName = `grove-snapshot-pre-backfill-${timestamp}`;
+    execSync(`git tag ${tagName}`, { cwd: VAULT_PATH });
+    process.stderr.write(`Snapshot created: ${tagName}\n`);
+  }
+
+  const allFiles = walkVaultMd(VAULT_PATH);
+  let updated = 0;
+  let skipped = 0;
+  const changes: Array<{ path: string; added: string[] }> = [];
+
+  for (const abs of allFiles) {
+    const rel = relative(VAULT_PATH, abs);
+    const raw = readFileSync(abs, "utf-8");
+    const { frontmatter, content } = parseNote(raw);
+
+    // Skip notes without type (not a proper note)
+    if (!frontmatter.type || typeof frontmatter.type !== "string") {
+      skipped++;
+      continue;
+    }
+
+    // Only process notes with zero tags
+    const existingTags = Array.isArray(frontmatter.tags)
+      ? frontmatter.tags
+      : typeof frontmatter.tags === "string"
+        ? [frontmatter.tags]
+        : [];
+    if (existingTags.length > 0) {
+      skipped++;
+      continue;
+    }
+
+    const newTags = inferTags(rel, frontmatter);
+    if (newTags.length === 0) {
+      skipped++;
+      continue;
+    }
+
+    if (!dryRun) {
+      frontmatter.tags = newTags;
+      writeFileSync(abs, serializeNote(frontmatter, content), "utf-8");
+    }
+
+    changes.push({ path: rel, added: newTags });
+    updated++;
+  }
+
+  // Commit all changes in one go
+  if (!dryRun && updated > 0) {
+    execSync("git add -A", { cwd: VAULT_PATH });
+    execSync(`git commit -m "grove (admin): tag-backfill ${updated} notes"`, {
+      cwd: VAULT_PATH,
+      shell: "/bin/sh",
+    });
+  }
+
+  return {
+    ok: true,
+    dry_run: dryRun || undefined,
+    updated,
+    skipped,
+    total: allFiles.length,
+    changes,
+    _fmt: () => {
+      if (updated === 0) return `No notes needed tag backfill (${allFiles.length} scanned, ${skipped} skipped).`;
+      const verb = dryRun ? "would update" : "updated";
+      const lines = changes.slice(0, 20).map((c) => `  ${verb}: ${c.path}  → +${c.added.join(", +")}`);
+      if (changes.length > 20) lines.push(`  ... and ${changes.length - 20} more`);
+      lines.push(`\n${updated}/${allFiles.length} note(s) ${verb}.`);
+      return lines.join("\n");
+    },
+  };
+}
+
 // ── Help system ─────────────────────────────────────────────────
 
 interface CmdHelp {
@@ -945,6 +1038,13 @@ export const HELP: Record<string, CmdHelp> = {
     json_schema: "{ok, changed, total}",
     exit_codes: EXIT_CODES,
   },
+  "tag-backfill": {
+    usage: "grove tag-backfill [--dry-run] [--json]",
+    description: "Backfill inferred tags on notes with zero tags. Creates a snapshot first.",
+    flags: ["--dry-run  Show what would change without writing", "--json     JSON output"],
+    json_schema: "{ok, updated, skipped, total, changes: [{path, added}]}",
+    exit_codes: EXIT_CODES,
+  },
   snapshot: {
     usage: "grove snapshot [name] | grove snapshot list",
     description: "Create or list vault snapshots (git tags).",
@@ -999,6 +1099,7 @@ Commands:
   trails                  Manage trails (scoped access)
   sync <dir>              Sync archived Sources
   lint <dir>              Normalize frontmatter
+  tag-backfill            Backfill inferred tags on untagged notes
   snapshot                Create/list vault snapshots
   rollback <tag>          Restore vault to snapshot
 
@@ -1061,6 +1162,7 @@ async function main() {
     if (command === "snapshot") { result = cmdSnapshot(process.argv.slice(3)); emitResult(result, json); return; }
     if (command === "rollback") { result = cmdRollback(positional); emitResult(result, json); return; }
     if (command === "lint") { result = cmdLint(positional, flags); emitResult(result, json); return; }
+    if (command === "tag-backfill") { result = cmdTagBackfill(flags); emitResult(result, json); return; }
     if (command === "init") { result = await cmdInit(flags); emitResult(result, json); return; }
     if (command === "trails") {
       const sub = positional || "list";
