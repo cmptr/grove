@@ -40,6 +40,7 @@ import {
   cleanupExpiredAuth,
   seedAdminEmail,
 } from "./auth.js";
+import { getUserRole } from "./users.js";
 import { generateRequestId, log as structuredLog, auditRead, auditWrite } from "./logger.js";
 import { metrics, searchMetrics } from "./metrics.js";
 import { resolveTrail, loadTrails, createTrail, updateTrail, disableTrail, deleteTrail, type TrailConfig } from "./trails.js";
@@ -64,24 +65,30 @@ const rateLimiter = new RateLimiter({ reads: 120, writes: 20, windowMs: 60_000 }
 // ── Admin auth: persistent session cookie (SQLite) + Bearer fallback ──
 const GROVE_ADMIN_KEY = process.env.GROVE_ADMIN_KEY; // optional: restrict admin to a specific key name
 
-function adminAuth(req: IncomingMessage): { keyId: string; keyName: string } | null {
+type AdminAuthResult =
+  | { ok: true; keyId: string; keyName: string }
+  | { ok: false; status: 401 | 403 };
+
+function adminAuth(req: IncomingMessage): AdminAuthResult {
   // Check session cookie first (persistent in SQLite)
   const sessionToken = getSessionFromCookie(req);
   if (sessionToken) {
     const user = validateSession(sessionToken);
     if (user) {
-      return { keyId: user.id, keyName: user.username ?? user.email };
+      if (getUserRole(user.id) !== "owner") return { ok: false, status: 403 };
+      return { ok: true, keyId: user.id, keyName: user.username ?? user.email };
     }
   }
   // Fall back to Bearer token
   const authHeader = req.headers.authorization;
   const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
-  if (!token) return null;
+  if (!token) return { ok: false, status: 401 };
   const key = validateToken(token);
-  if (!key) return null;
+  if (!key) return { ok: false, status: 401 };
   // Optionally restrict admin to a specific key
-  if (GROVE_ADMIN_KEY && key.name !== GROVE_ADMIN_KEY) return null;
-  return { keyId: key.id, keyName: key.name };
+  if (GROVE_ADMIN_KEY && key.name !== GROVE_ADMIN_KEY) return { ok: false, status: 403 };
+  if (getUserRole(key.user_id) !== "owner") return { ok: false, status: 403 };
+  return { ok: true, keyId: key.id, keyName: key.name };
 }
 
 function validateToken(token: string): StoredKey | null {
@@ -790,7 +797,7 @@ const server = createServer(async (req, res) => {
   // Metrics endpoint — request counts, latency percentiles, error rates
   if (url.pathname === "/metrics") {
     const admin = adminAuth(req);
-    if (!admin) { sendJson(res, 401, { error: "unauthorized" }); return; }
+    if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
     res.setHeader("Access-Control-Allow-Origin", GROVE_URL);
     sendJson(res, 200, { ...metrics.getMetrics(), search: searchMetrics.getSearchStats() });
     return;
@@ -917,7 +924,7 @@ const server = createServer(async (req, res) => {
     const admin = adminAuth(req);
     const authHeader = req.headers.authorization;
     const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
-    const authed = admin ?? (token ? (() => { const k = validateToken(token); return k ? { keyId: k.id, keyName: k.name } : null; })() : null);
+    const authed = admin.ok ? admin : (token ? (() => { const k = validateToken(token); return k ? { keyId: k.id, keyName: k.name } : null; })() : null);
 
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     res.end(setupPage(authed?.keyName ?? null));
@@ -927,7 +934,7 @@ const server = createServer(async (req, res) => {
   // ── Key management API (admin session cookie or bearer auth required) ──
   if (url.pathname === "/keys" && req.method === "POST") {
     const admin = adminAuth(req);
-    if (!admin) { sendJson(res, 401, { error: "unauthorized" }); return; }
+    if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
     let body: string;
     try { body = await readBody(req); } catch (err: unknown) {
@@ -1015,11 +1022,11 @@ const server = createServer(async (req, res) => {
     // ── Admin endpoints (session cookie or Bearer) ──
     if (url.pathname === "/v1/admin/users" && req.method === "GET") {
       const admin = adminAuth(req);
-      if (!admin) { sendJson(res, 401, { error: "unauthorized" }); return; }
+      if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
       const db = getDb();
-      const users = db.prepare("SELECT id, username, email, created_at, last_login_at FROM users").all() as {
-        id: string; username: string | null; email: string | null; created_at: string; last_login_at: string | null;
+      const users = db.prepare("SELECT id, username, email, role, created_at, last_login_at FROM users").all() as {
+        id: string; username: string | null; email: string | null; role: string; created_at: string; last_login_at: string | null;
       }[];
       sendJson(res, 200, { users });
       return;
@@ -1280,8 +1287,8 @@ const server = createServer(async (req, res) => {
 
     // POST /v1/admin/trails — list, create, update, delete (admin only)
     if (url.pathname === "/v1/admin/trails" && req.method === "POST") {
-      if (restTrail) {
-        // Trail-scoped keys cannot manage trails
+      if (restTrail || getUserRole(restKey.user_id) !== "owner") {
+        // Trail-scoped keys and non-owners cannot manage trails
         res.writeHead(403, restHeaders);
         res.end(JSON.stringify({ error: "admin access required" }));
         return;

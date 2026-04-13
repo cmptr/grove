@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
   username TEXT UNIQUE,
   email TEXT UNIQUE,
+  role TEXT NOT NULL DEFAULT 'viewer',
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   last_login_at TEXT
 );
@@ -159,6 +160,15 @@ CREATE INDEX IF NOT EXISTS idx_discovery_queue_status ON discovery_queue(status,
 export function createSchema(): void {
   const database = getDb();
   database.exec(SCHEMA);
+  migrateUserRoles(database);
+}
+
+/** Add role column to existing users tables that lack it. */
+function migrateUserRoles(database: Database.Database): void {
+  const cols = database.prepare("PRAGMA table_info(users)").all() as { name: string }[];
+  if (cols.some((c) => c.name === "role")) return;
+  database.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'viewer'");
+  database.exec("UPDATE users SET role = 'owner' WHERE id = 'user_00000000'");
 }
 
 /**
@@ -184,8 +194,8 @@ export function runMigration(): void {
     // No JSON files — fresh install. Create admin user and default vault.
     const adminId = "user_00000000";
     database.prepare(
-      "INSERT OR IGNORE INTO users (id, username, email) VALUES (?, ?, ?)"
-    ).run(adminId, "admin", "admin@grove.local");
+      "INSERT OR IGNORE INTO users (id, username, email, role) VALUES (?, ?, ?, ?)"
+    ).run(adminId, "admin", "admin@grove.local", "owner");
     database.prepare(
       "INSERT OR IGNORE INTO vaults (id, owner_id, slug, display_name, git_repo_path) VALUES (?, ?, ?, ?, ?)"
     ).run("vault_00000000", adminId, "life", "Life", join(homedir(), "life"));
@@ -197,8 +207,8 @@ export function runMigration(): void {
     // Create admin user
     const adminId = "user_00000000";
     database.prepare(
-      "INSERT OR IGNORE INTO users (id, username, email) VALUES (?, ?, ?)"
-    ).run(adminId, "admin", "admin@grove.local");
+      "INSERT OR IGNORE INTO users (id, username, email, role) VALUES (?, ?, ?, ?)"
+    ).run(adminId, "admin", "admin@grove.local", "owner");
 
     // Create default vault
     database.prepare(
