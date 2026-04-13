@@ -1,7 +1,7 @@
 /**
  * REST API handlers for the Grove note viewer.
  *
- * Provides GET /v1/notes/* and GET /v1/search endpoints.
+ * Provides GET /v1/notes/*, GET /v1/search, GET /v1/status/:mode endpoints.
  * These are thin facades over existing MCP tool logic,
  * designed for Next.js SSR fetching from grove-www.
  */
@@ -10,10 +10,11 @@ import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { join, relative, resolve, basename } from "node:path";
 import { homedir } from "node:os";
 import { hybridSearch, bm25Search } from "./hybrid-search.js";
-import { listNotes } from "./vault-ops.js";
+import { gitLog, listNotes } from "./vault-ops.js";
 import { parseNote, contentHash } from "./notes-validate.js";
 import { filterByTrail, type TrailConfig, type NoteMetadata } from "./trails.js";
 import { getStats } from "./vault-stats.js";
+import { analyzeGraph, computeDigest } from "./vault-graph.js";
 import { searchMetrics, metrics } from "./metrics.js";
 
 const VAULT_PATH = process.env.GROVE_VAULT ?? join(homedir(), "life");
@@ -474,4 +475,129 @@ export function handleStats(
   }
 
   return result;
+}
+
+// ── Status endpoints (vault_status modes via REST) ─────────────────
+
+export type StatusMode = "health" | "history" | "diagnostics" | "graph" | "digest";
+
+export const VALID_STATUS_MODES = new Set<StatusMode>(["health", "history", "diagnostics", "graph", "digest"]);
+
+/**
+ * Health: doc count, freshness, lifecycle, folder/type breakdown.
+ */
+export function handleStatusHealth(trail?: TrailConfig | null): Record<string, unknown> | null {
+  const stats = getStats(VAULT_PATH);
+  if (!stats) return null;
+
+  const result: Record<string, unknown> = {
+    total_notes: stats.vault.total_notes,
+    vault_path: VAULT_PATH,
+    by_folder: stats.vault.by_folder,
+    by_type: stats.vault.by_type,
+    frontmatter_completeness: stats.vault.frontmatter_completeness,
+    freshness: stats.freshness,
+    lifecycle: stats.lifecycle,
+    computed_at: stats.computed_at,
+  };
+
+  if (trail) {
+    result.trail_note = "stats are vault-wide; use list_notes for trail-scoped counts";
+  }
+
+  return result;
+}
+
+/**
+ * History: recent git log, optionally filtered by since/path_prefix.
+ */
+export async function handleStatusHistory(
+  since?: string,
+  pathPrefix?: string,
+): Promise<{ entries: unknown[] }> {
+  const entries = await gitLog(VAULT_PATH, {
+    since: since ?? "1 week ago",
+    pathPrefix: pathPrefix ?? undefined,
+  });
+  return { entries: entries.slice(0, 30) };
+}
+
+/**
+ * Diagnostics: orphan notes, broken links, missing frontmatter, stale inbox.
+ */
+export function handleStatusDiagnostics(): Record<string, unknown> {
+  const notes = listNotes(VAULT_PATH, "*", { includeAliases: true });
+
+  const issues = {
+    orphans: [] as string[],
+    broken_links: [] as string[],
+    missing_frontmatter: [] as string[],
+    stale_inbox: [] as string[],
+  };
+
+  // Build link graph
+  const incomingLinks = new Map<string, number>();
+  for (const note of notes) incomingLinks.set(note.path, 0);
+
+  for (const note of notes) {
+    const abs = join(VAULT_PATH, note.path);
+    let raw: string;
+    try { raw = readFileSync(abs, "utf-8"); } catch { continue; }
+
+    const links = [...raw.matchAll(/\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g)].map((m) => m[1]);
+    for (const link of links) {
+      const target = link.toLowerCase();
+      const found = notes.find(
+        (n) => n.name.toLowerCase() === target || n.aliases?.some((a: string) => a.toLowerCase() === target),
+      );
+      if (found) {
+        incomingLinks.set(found.path, (incomingLinks.get(found.path) ?? 0) + 1);
+      } else {
+        issues.broken_links.push(`${note.path}: [[${link}]]`);
+      }
+    }
+
+    if (note.path.startsWith("Resources/") && !note.type) {
+      issues.missing_frontmatter.push(note.path);
+    }
+  }
+
+  // Orphans: Resource notes with zero incoming links
+  for (const note of notes) {
+    if (note.path.startsWith("Resources/") && (incomingLinks.get(note.path) ?? 0) === 0) {
+      issues.orphans.push(note.path);
+    }
+  }
+
+  // Stale inbox: files older than 7 days
+  const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  for (const note of notes) {
+    if (note.path.startsWith("Inbox/") && new Date(note.modified_at).getTime() < sevenDaysAgo) {
+      issues.stale_inbox.push(note.path);
+    }
+  }
+
+  return {
+    total_notes: notes.length,
+    orphans: { count: issues.orphans.length, notes: issues.orphans.slice(0, 20) },
+    broken_links: { count: issues.broken_links.length, links: issues.broken_links.slice(0, 20) },
+    missing_frontmatter: { count: issues.missing_frontmatter.length, notes: issues.missing_frontmatter.slice(0, 20) },
+    stale_inbox: { count: issues.stale_inbox.length, notes: issues.stale_inbox },
+  };
+}
+
+/**
+ * Graph: wikilink graph analysis — most connected, bridges, clusters, orphans.
+ */
+export async function handleStatusGraph(): Promise<Record<string, unknown>> {
+  const stats = getStats(VAULT_PATH);
+  if (stats) return stats.graph as unknown as Record<string, unknown>;
+  return await analyzeGraph(VAULT_PATH) as unknown as Record<string, unknown>;
+}
+
+/**
+ * Digest: garden lifecycle — seeds, sprouts, growing, mature, dormant, withering.
+ */
+export async function handleStatusDigest(): Promise<Record<string, unknown>> {
+  return await computeDigest(VAULT_PATH) as unknown as Record<string, unknown>;
 }

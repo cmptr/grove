@@ -43,7 +43,12 @@ import {
 import { generateRequestId, log as structuredLog, auditRead, auditWrite } from "./logger.js";
 import { metrics, searchMetrics } from "./metrics.js";
 import { resolveTrail, loadTrails, createTrail, updateTrail, disableTrail, deleteTrail, type TrailConfig } from "./trails.js";
-import { handleGetNote, handleSearch, handleListNotes, handleStats } from "./rest.js";
+import {
+  handleGetNote, handleSearch, handleListNotes, handleStats,
+  handleStatusHealth, handleStatusHistory, handleStatusDiagnostics,
+  handleStatusGraph, handleStatusDigest, VALID_STATUS_MODES,
+  type StatusMode,
+} from "./rest.js";
 import { startStatsTimer } from "./vault-stats.js";
 
 const QMD_PORT = Number(process.env.QMD_PORT ?? 8181);
@@ -1139,6 +1144,57 @@ const server = createServer(async (req, res) => {
       }
       res.writeHead(200, restHeaders);
       res.end(JSON.stringify(stats));
+      return;
+    }
+
+    // GET /v1/status/:mode — vault status endpoints
+    const statusMatch = url.pathname.match(/^\/v1\/status\/([a-z]+)$/);
+    if (statusMatch && req.method === "GET") {
+      const mode = statusMatch[1] as StatusMode;
+      if (!VALID_STATUS_MODES.has(mode)) {
+        res.writeHead(400, restHeaders);
+        res.end(JSON.stringify({ error: `invalid mode: ${mode}`, valid: [...VALID_STATUS_MODES] }));
+        return;
+      }
+
+      structuredLog("info", "rest.status", rid, { key_id: restKey.id, key_name: restKey.name, mode });
+
+      try {
+        let result: Record<string, unknown> | null;
+
+        switch (mode) {
+          case "health":
+            result = handleStatusHealth(restTrail);
+            if (!result) {
+              res.writeHead(503, restHeaders);
+              res.end(JSON.stringify({ error: "stats not yet computed, try again shortly" }));
+              return;
+            }
+            break;
+          case "history": {
+            const since = url.searchParams.get("since") ?? undefined;
+            const pathPrefix = url.searchParams.get("path_prefix") ?? undefined;
+            result = await handleStatusHistory(since, pathPrefix);
+            break;
+          }
+          case "diagnostics":
+            result = handleStatusDiagnostics();
+            break;
+          case "graph":
+            result = await handleStatusGraph();
+            break;
+          case "digest":
+            result = await handleStatusDigest();
+            break;
+        }
+
+        res.writeHead(200, restHeaders);
+        res.end(JSON.stringify(result));
+      } catch (err) {
+        console.error(`[rest] status/${mode} error:`, err);
+        res.writeHead(500, restHeaders);
+        res.end(JSON.stringify({ error: "internal error" }));
+      }
       return;
     }
 
