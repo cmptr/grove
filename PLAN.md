@@ -86,7 +86,7 @@ Snapshot for cold-start agents. Verify against live system before acting.
 
 **Vault:** ~1,083 notes, ~5,600 embeddings, git-tracked at GitHub (private)
 
-**Source modules (25):** `proxy.ts` (1,351 LOC — route extraction needed), `server.ts` (820), `hybrid-search.ts` (494), `vault-graph.ts` (462), `vault-stats.ts` (439), `auth.ts` (358), `db.ts` (330), `vault-ops.ts` (286), `embed.ts` (274), `trails.ts` (262), `embed-node.ts` (193), `embed-single.ts` (170), `keys.ts` (172), `metrics.ts` (164), `notes-validate.ts` (136), `rest.ts` (476), `sync-sources.ts` (117), `rate-limit.ts` (118), `logger.ts` (103), `cli.ts` (708), `email.ts` (33), `users.ts` (60)
+**Source modules (25):** `proxy.ts` (1,351 LOC), `server.ts` (820), `hybrid-search.ts` (494), `vault-graph.ts` (462), `vault-stats.ts` (439), `auth.ts` (358), `db.ts` (330), `vault-ops.ts` (286), `embed.ts` (274), `trails.ts` (262), `embed-node.ts` (193), `embed-single.ts` (170), `keys.ts` (172), `metrics.ts` (164), `notes-validate.ts` (136), `rest.ts` (476), `sync-sources.ts` (117), `rate-limit.ts` (118), `logger.ts` (103), `cli.ts` (708), `email.ts` (33), `users.ts` (60)
 
 **Test coverage:** 19 test files, 2,933 LOC, 228 tests, 0.39 test/code ratio. Coverage gaps: proxy.ts (64 LOC of tests for 1,351 LOC), no end-to-end write path test, no integration test harness.
 
@@ -135,56 +135,40 @@ Every new endpoint, function, or behavior change needs tests:
 ```
                     ┌─────────────────┐
                     │  P4-PREREQ      │
-                    │  CI/CD pipeline  │
-                    │  Proxy extraction│
+                    │  CI pipeline    │
                     │  Graceful shutdown│
-                    └────────┬────────┘
-                             │
-                    ┌────────▼────────┐
-                    │  Phase 4b       │
-                    │  Batch 1        │
-                    │  (4 backend     │
-                    │   agents)       │
                     └────────┬────────┘
                              │
               ┌──────────────┼──────────────┐
               ▼              ▼              ▼
      ┌────────────┐  ┌────────────┐  ┌────────────┐
-     │ Phase 4b   │  │ Phase 4b   │  │ Phase 9a   │
-     │ Batch 2    │  │ Batch 3    │  │ User mgmt  │
-     │ (3 FE      │  │ (consumer) │  │ P9-1..P9-4 │
+     │ Phase 4b   │  │ Phase 9a   │  │ Phase 7a   │
+     │ Batch 1    │  │ User mgmt  │  │ Discovery  │
+     │ (4 backend │  │ P9-1..P9-3 │  │ P7-1..P7-6 │
      │  agents)   │  │            │  │            │
-     └──────┬─────┘  └────────────┘  └──────┬─────┘
-            │                               │
-            ▼                               ▼
-     ┌────────────┐                  ┌────────────┐
-     │ Phase 4d   │                  │ Phase 9b   │
-     │ Knowledge  │                  │ Trail UX   │
-     │ views      │                  │ P9-5..P9-7 │
-     └────────────┘                  └────────────┘
-
-     ┌────────────┐       ┌────────────┐
-     │ Phase 7a   │──────→│ Phase 7b   │
-     │ Discovery  │       │ Bulk       │
-     │ P7-1..P7-5 │       │ onboarding │
-     └────────────┘       └────────────┘
-         │
-         │ (P7-2 needs LLM — use Claude API,
-         │  not local Ollama. See Phase 7 spec.)
-         ▼
-     ┌────────────┐
-     │ Phase 8    │
-     │ Multi-vault│
-     └────────────┘
+     └────────┬───┘  └──────┬─────┘  └──────┬─────┘
+              │              │               │
+     ┌────────▼───┐          │        ┌──────▼─────┐
+     │ Phase 4b   │          │        │ Phase 7b   │
+     │ Batch 2+3  │          │        │ Bulk       │
+     │ (FE agents)│          │        │ onboarding │
+     └────────┬───┘          │        └────────────┘
+              │              │
+              ▼              ▼
+     ┌────────────┐  ┌────────────┐
+     │ Phase 4d   │  │ Phase 9b   │
+     │ Knowledge  │  │ Trail UX   │
+     │ views      │  │ P9-5..P9-7 │
+     └────────────┘  └────────────┘
 ```
 
 **Key dependency rules:**
-- P4-PREREQ must complete before any Phase 4b agent launches
+- P4-PREREQ must complete before any other phase launches
 - Phase 4b Batch 2 needs Batch 1 merged and deployed
-- Phase 9a can start after P4-PREREQ (needs the extracted routes, not the dashboard)
-- Phase 9b needs Phase 9a + Phase 4b Batch 2 (for the UI shell)
+- Phase 9a can start after P4-PREREQ — independent of Phase 4b
+- Phase 9b needs Phase 9a + Phase 4b Batch 2 (for the dashboard UI shell)
 - Phase 7 has no dependency on Phase 4b — can run in parallel if agents are available
-- Phase 7a P7-2 (concept extraction) uses Claude API, not local Ollama (Phase 6 is killed)
+- Phase 7a P7-2 (concept extraction) uses Claude API, not local Ollama
 
 ---
 
@@ -431,69 +415,19 @@ Claude.ai → proxy.ts (auth/OAuth/CORS/logging) → Grove MCP server (all 6 too
 
 #### Phase 4-PREREQ: Agent Infrastructure
 
-**Goal:** Make the codebase safe and efficient for autonomous parallel agent execution. These are structural prerequisites — without them, Phase 4b agents will hit merge conflicts, deploy broken code, and risk data loss.
+**Goal:** Automated test feedback on PRs and safe process restarts. Two tasks, one agent.
 
-**Duration:** 3 tasks, can run as 2 parallel agents + 1 sequential. Half-day total.
+- [ ] **P4-PREREQ-1: GitHub Actions CI** (`.github/workflows/ci.yml`)
 
-- [ ] **P4-PREREQ-1: Extract proxy.ts route handlers** (`src/proxy.ts` → `src/routes/*.ts`)
-
-  `proxy.ts` is 1,351 lines with every route in a single `createServer` callback. Every Phase 4b backend agent touches this file. Extract route handlers into domain-specific files.
-
-  **New file structure:**
-  ```
-  src/routes/
-  ├── auth.ts        # /auth/magic-link, /auth/verify, /auth/exchange, /auth/session, /auth/logout
-  ├── admin.ts       # /keys, /metrics, /health, /admin/* (login, session)
-  ├── mcp.ts         # /mcp proxy forwarding
-  ├── rest.ts        # /v1/* REST API routes (move from existing rest.ts or merge)
-  └── oauth.ts       # OAuth 2.0 endpoints (/.well-known, /authorize, /token, /register)
-  ```
-
-  **proxy.ts becomes a thin dispatcher:**
-  ```typescript
-  import { handleAuthRoutes } from "./routes/auth.js";
-  import { handleAdminRoutes } from "./routes/admin.js";
-  import { handleMcpRoutes } from "./routes/mcp.js";
-  import { handleRestRoutes } from "./routes/rest.js";
-  import { handleOAuthRoutes } from "./routes/oauth.js";
-
-  const server = createServer(async (req, res) => {
-    // Common middleware: CORS, request ID, logging, body parsing
-    // ...
-    // Route dispatch
-    if (await handleOAuthRoutes(req, res, ctx)) return;
-    if (await handleAuthRoutes(req, res, ctx)) return;
-    if (await handleAdminRoutes(req, res, ctx)) return;
-    if (await handleRestRoutes(req, res, ctx)) return;
-    if (await handleMcpRoutes(req, res, ctx)) return;
-    send404(res);
-  });
-  ```
-
-  Each route handler returns `true` if it handled the request. `adminAuth()`, `validateToken()`, `sendJson()` etc. move to `src/routes/helpers.ts` or stay in `proxy.ts` as shared utilities.
-
-  **Files:** `src/proxy.ts` (reduce to ~300 LOC dispatcher), `src/routes/auth.ts`, `src/routes/admin.ts`, `src/routes/mcp.ts`, `src/routes/rest.ts`, `src/routes/oauth.ts`, `src/routes/helpers.ts`
-
-  **Tests:** Existing `test/proxy.test.ts` tests must still pass. Add a smoke test: boot server, hit each route category, verify routing works.
-
-  **Acceptance criteria:**
-  - `proxy.ts` is <400 LOC
-  - All existing tests pass with zero changes to test files
-  - Each route file is self-contained — a Phase 4b agent adding a new admin route creates or edits `src/routes/admin.ts`, not `proxy.ts`
-  - No behavioral changes to any endpoint
-
-- [ ] **P4-PREREQ-2: GitHub Actions CI/CD pipeline** (`.github/workflows/ci.yml`)
-
-  Agents need automated feedback. Without CI, broken code ships silently.
+  Agents need automated feedback on PRs. Deploy stays manual — the VPS runs the owner's live knowledge API, so deploys should be a human decision.
 
   **Workflow:**
   ```yaml
   name: CI
   on:
-    push:
-      branches: [main]
     pull_request:
       branches: [main]
+    workflow_dispatch:  # manual deploy trigger
 
   jobs:
     test:
@@ -510,14 +444,14 @@ Claude.ai → proxy.ts (auth/OAuth/CORS/logging) → Grove MCP server (all 6 too
 
     deploy:
       needs: test
-      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      if: github.event_name == 'workflow_dispatch'
       runs-on: ubuntu-latest
       steps:
         - name: Deploy to VPS
           uses: appleboy/ssh-action@v1
           with:
             host: 52.37.76.231
-            username: ubuntu
+            username: deploy
             key: ${{ secrets.DEPLOY_SSH_KEY }}
             script: |
               cd /root/grove
@@ -529,19 +463,17 @@ Claude.ai → proxy.ts (auth/OAuth/CORS/logging) → Grove MCP server (all 6 too
   ```
 
   **Setup required:**
-  - Add `DEPLOY_SSH_KEY` as a GitHub Actions secret (create a dedicated deploy key, not the admin SSH key)
+  - Add `DEPLOY_SSH_KEY` as a GitHub Actions secret (dedicated deploy key, not admin SSH key)
   - Create a `deploy` user on VPS with restricted sudo (only `pm2 restart`, `git pull` in `/root/grove`)
-  - Enable branch protection on `main`: require CI pass before merge
 
   **Files:** `.github/workflows/ci.yml`
 
   **Acceptance criteria:**
   - PRs get automated test + typecheck results
-  - Merges to main auto-deploy to VPS
-  - Failed health check on deploy is visible in GitHub Actions
-  - No manual SSH needed for routine deploys
+  - Deploy is manual: click "Run workflow" in GitHub Actions, or SSH as before
+  - Failed tests block PR merge (branch protection recommended but not required)
 
-- [ ] **P4-PREREQ-3: Graceful shutdown + operational hardening** (`src/proxy.ts`, `src/server.ts`)
+- [ ] **P4-PREREQ-2: Graceful shutdown + operational hardening** (`src/proxy.ts`, `src/server.ts`)
 
   Currently neither process handles SIGTERM. PM2 restart kills in-flight writes.
 
@@ -577,10 +509,7 @@ Claude.ai → proxy.ts (auth/OAuth/CORS/logging) → Grove MCP server (all 6 too
 
 ##### Execution strategy for P4-PREREQ
 
-- **Agent X:** P4-PREREQ-1 (proxy extraction) — this is the largest task, ~2-3 hours
-- **Agent Y:** P4-PREREQ-2 (CI/CD) + P4-PREREQ-3 (graceful shutdown) — independent of proxy extraction, can run in parallel
-
-Merge Agent X first (it restructures proxy.ts). Then merge Agent Y (touches proxy.ts minimally — just adding signal handlers to the dispatcher). Deploy. Verify health check passes. Then launch Phase 4b agents.
+Single agent handles both tasks (they're small and touch overlapping files). Merge, deploy manually, verify health check. Then launch Phase 4b agents.
 
 ---
 
@@ -588,11 +517,11 @@ Merge Agent X first (it restructures proxy.ts). Then merge Agent Y (touches prox
 
 Implementation splits into two batches: backend API additions (grove repo), then frontend pages (grove-www repo). Backend first because the frontend depends on the endpoints existing.
 
-**Prerequisites:** P4-PREREQ complete. proxy.ts is extracted into route files. CI/CD is live.
+**Prerequisites:** P4-PREREQ complete (CI live, graceful shutdown in place).
 
 ##### Batch 1: Backend API additions (grove repo)
 
-All new admin endpoints go behind `adminAuth()` in `src/proxy.ts`. They use cookie (session) or Bearer auth, same as `/keys`.
+All new admin endpoints go behind `adminAuth()` in `src/proxy.ts`. They use cookie (session) or Bearer auth, same as `/keys`. Agents use worktrees to avoid merge conflicts in proxy.ts.
 
 - [ ] **P4-API-1: Trail CRUD HTTP endpoints**
 
@@ -878,17 +807,17 @@ These are the views that make the portal more than an admin panel. They surface 
 
 **Batch 1 — Backend APIs + dashboard layout (4 parallel agents):**
 
-Each backend agent works in an isolated worktree on the grove repo. After P4-PREREQ, routes are in `src/routes/*.ts` — agents create or modify separate route files with zero overlap:
+Each backend agent works in an isolated worktree on the grove repo. To avoid merge conflicts in proxy.ts, agents insert routes at specific anchor points:
 
-- **Agent A:** P4-API-1 (trail CRUD) — Add trail admin routes to `src/routes/admin.ts`. Touch `src/trails.ts` (add `updateTrail`). No overlap with B/C.
-- **Agent B:** P4-API-2 (user list + last_login_at) — Add user route to `src/routes/admin.ts` (separate handler function, no conflict with A's trail routes). Touch `src/auth.ts` (fix createSession). If merge conflict risk with Agent A on `admin.ts`, create `src/routes/admin-users.ts` instead.
-- **Agent C:** P4-API-3 (keys/metrics fixes) — Modify existing handlers in `src/routes/admin.ts` (keys list) and `src/routes/admin.ts` (metrics). These are edits to existing code, not new routes. Zero overlap with A/B's additions.
-- **Agent D:** P4-API-4 (git stats) — Only touches `src/vault-stats.ts`. Zero route file conflict.
+- **Agent A:** P4-API-1 (trail CRUD) — Insert trail routes after the `/v1/stats` handler, before the `// Unknown /v1/ route` fallthrough. Touch `src/trails.ts` (add `updateTrail`). Also update CORS: add `POST, PATCH, DELETE` for `/v1/admin/*`.
+- **Agent B:** P4-API-2 (user list + last_login_at) — Insert user route after the `/v1/list` handler, before `/v1/stats`. Touch `src/auth.ts` (fix createSession).
+- **Agent C:** P4-API-3 (keys/metrics fixes) — Modify existing `/keys` and `/metrics` handlers in proxy.ts. No new route blocks — editing existing code. Zero overlap with A/B.
+- **Agent D:** P4-API-4 (git stats) — Only touches `src/vault-stats.ts`. Zero proxy.ts conflict.
 
 In parallel on the grove-www repo:
 - **Agent E:** P4-FE-0 (dashboard layout + all 5 API proxy routes + header link + dashboard overview stub)
 
-Merge order: Agent D first (no conflicts possible), then A+C (minimal overlap), then B. Deploy. Then merge Agent E.
+Merge order: Agent D first (no conflicts possible), then C (edits existing code), then A, then B. Deploy manually. Then merge Agent E.
 
 **Batch 2 — Frontend pages (3 parallel agents, after Batch 1):**
 
@@ -1010,7 +939,42 @@ On MCP `initialize`, if the session is trail-scoped, return trail metadata (name
 - [x] **P5-11: Snapshot/rollback**
   `grove snapshot` creates a git tag. `grove rollback <tag>` reverts. Automatic snapshot before any bulk operation.
 
-#### Phase 5c: Portal Integration (deferred to Phase 4)
+#### Phase 5c: Tag & Classification Coverage
+
+The trail filtering system works, but only 15% of notes have tags. Rather than adding an LLM judge layer, invest in better classification coverage so the existing deterministic filter catches everything.
+
+- [ ] **P5-TAG-1: Auto-tagging on write** (`src/notes-validate.ts`, `src/server.ts`)
+
+  When `write_note` creates or updates a note, infer tags from the note's path and type if none are provided. Rules:
+  - `Journal/*` → add `#journal`
+  - `Resources/People/*` → add `#person`
+  - `Resources/Concepts/*` → add `#concept`
+  - `Resources/Recipes/*` → add `#recipe`
+  - `Areas/Health/*` → add `#health`, `#private`
+  - `Areas/Finances/*` → add `#finances`, `#private`
+  - Notes with `private: true` in frontmatter → add `#private`
+
+  These are defaults — they don't override existing tags, they supplement. The agent writing the note can still set explicit tags.
+
+  **Files:** `src/notes-validate.ts` (add `inferTags(path, frontmatter)` function), `src/server.ts` (call before write)
+  **Tests:** `test/notes-validate.test.ts` — verify tag inference for each path pattern
+  **Acceptance criteria:**
+  - A note written to `Areas/Health/sleep.md` with no tags gets `#health` and `#private` automatically
+  - A note written with explicit tags keeps them; inferred tags are added, not replaced
+  - Trail filtering accuracy improves (re-run P5-8 eval suite)
+
+- [ ] **P5-TAG-2: Backfill existing notes** (`src/cli.ts`)
+
+  `grove tag-backfill` — reads all notes, applies `inferTags()` to notes with zero tags, writes back via `write_note`. Creates a snapshot before starting.
+
+  **Files:** `src/cli.ts` (new command)
+  **Acceptance criteria:**
+  - Running `grove tag-backfill` on the vault increases tag coverage from ~15% to >80%
+  - Snapshot created before backfill starts
+  - Notes that already have tags are not modified
+  - Trail filter eval suite (P5-8) still passes with 100% precision
+
+#### Phase 5d: Portal Integration (deferred to Phase 4)
 
 Trail management UI (P4-5), consumer onboarding pages (P4-8), and trail usage views (P4-9) are now part of the Phase 4 Portal. The trail backend is ready — these are frontend tasks.
 
@@ -1021,15 +985,13 @@ Trail management UI (P4-5), consumer onboarding pages (P4-8), and trail usage vi
 - Scope enforcement: trail-scoped key can't access notes outside trail
 - Write constraints: trail with read access can't write; trail with write access can't write outside scope
 - End-to-end: create trail → generate key → connect as consumer → search → verify filtering
-- Load test: concurrent trail-scoped requests don't bottleneck (especially when LLM judge is added later)
+- Tag coverage: after backfill, >80% of notes have at least one tag
 
 ---
 
-### Phase 6: LLM Judge — CANCELLED
+### ~~Phase 6: LLM Judge~~ — REMOVED FROM SCOPE
 
-**Decision:** Tag/type/path prefilter covers 90%+ of trail filtering needs. Tag hygiene audit (2026-04-11) confirmed 15% tag coverage is sufficient because path-based filtering carries the load. Ollama doesn't fit on t3.medium (needs 3-4GB RAM minimum). The judge was a solution looking for a problem.
-
-**If trail filtering proves too coarse:** Evaluate adding semantic filtering as a rerank signal in the `query` tool. Use Claude API (not local LLM) for the judgment call — simpler, no infrastructure, pay-per-use. Add as a Phase 7 extension task if real consumer complaints emerge.
+Tag/type/path prefilter handles trail filtering. The right investment is better tag coverage across the vault, not an LLM layer. See P5-TAG below.
 
 ---
 
@@ -1285,7 +1247,7 @@ This was originally Phase 2 but deferred — trails and discovery are higher imp
 
 #### Phase 9a: User Management
 
-- [ ] **P9-1: User roles** (`src/db.ts`, `src/users.ts`, `src/routes/admin.ts`)
+- [ ] **P9-1: User roles** (`src/db.ts`, `src/users.ts`, `src/proxy.ts`)
 
   Add `role` column to users table: `owner` (full access), `member` (trail-scoped read+write), `viewer` (trail-scoped read-only).
 
@@ -1297,9 +1259,9 @@ This was originally Phase 2 but deferred — trails and discovery are higher imp
 
   **`src/users.ts` changes:** Add `getUserRole(userId)`, update `createUser()` to accept optional `role` parameter.
 
-  **`src/routes/admin.ts` changes:** `adminAuth()` middleware checks `role = 'owner'` for admin endpoints. Non-owners get 403.
+  **`src/proxy.ts` changes:** `adminAuth()` middleware checks `role = 'owner'` for admin endpoints. Non-owners get 403.
 
-  **Files:** `src/db.ts`, `src/users.ts`, `src/routes/admin.ts`
+  **Files:** `src/db.ts`, `src/users.ts`, `src/proxy.ts`
   **Tests:** `test/users.test.ts` — create user with role, verify role-based auth check
   **Acceptance criteria:**
   - Existing user `user_00000000` gets `role = 'owner'` on migration
@@ -1307,7 +1269,7 @@ This was originally Phase 2 but deferred — trails and discovery are higher imp
   - Non-owner hitting `/keys` or `/v1/admin/*` gets 403
   - Owner access unchanged
 
-- [ ] **P9-2: Invite flow** (`src/invite.ts`, `src/routes/admin.ts`, `src/cli.ts`)
+- [ ] **P9-2: Invite flow** (`src/invite.ts`, `src/proxy.ts`, `src/cli.ts`)
 
   **CLI:** `grove invite <email> --trail <trail-id> --role viewer`
   **API:** `POST /v1/admin/invite` with `{ email, trail_id, role }`
@@ -1318,7 +1280,7 @@ This was originally Phase 2 but deferred — trails and discovery are higher imp
   3. Send magic link email with welcome message (extend `sendMagicLinkEmail` with optional `welcome: true` flag)
   4. On first login via magic link, auto-provision scoped API key (reuse existing auth code exchange flow)
 
-  **Files:** `src/invite.ts` (invite logic), `src/routes/admin.ts` (new route), `src/cli.ts` (new command), `src/email.ts` (welcome variant)
+  **Files:** `src/invite.ts` (invite logic), `src/proxy.ts` (new route), `src/cli.ts` (new command), `src/email.ts` (welcome variant)
   **Tests:** `test/invite.test.ts` — invite creates user + trail grant, duplicate invite is idempotent, invalid trail ID returns 404
   **Acceptance criteria:**
   - `grove invite alice@example.com --trail trail_abc123 --role viewer` succeeds
@@ -1326,17 +1288,17 @@ This was originally Phase 2 but deferred — trails and discovery are higher imp
   - After clicking the link, Alice has a trail-scoped API key
   - Re-inviting the same email is idempotent (no duplicate user)
 
-- [ ] **P9-3: User-scoped keys** (`src/keys.ts`, `src/routes/admin.ts`)
+- [ ] **P9-3: User-scoped keys** (`src/keys.ts`, `src/proxy.ts`)
 
   Today all keys are owned by `user_00000000`. After this task, keys are scoped to their creating user.
 
   **`src/keys.ts` changes:** `createKey()` accepts `user_id` parameter. `loadKeys()` accepts optional `user_id` filter.
 
-  **`src/routes/admin.ts` changes:** `/keys` list action filters by current user's ID (owner sees all, others see only their own). Create action sets `user_id` to current user.
+  **`src/proxy.ts` changes:** `/keys` list action filters by current user's ID (owner sees all, others see only their own). Create action sets `user_id` to current user.
 
   **Migration:** Existing keys get `user_id = 'user_00000000'` (already the case in schema).
 
-  **Files:** `src/keys.ts`, `src/routes/admin.ts`
+  **Files:** `src/keys.ts`, `src/proxy.ts`
   **Tests:** `test/keys.test.ts` — key created with user_id, filtered list returns only user's keys
   **Acceptance criteria:**
   - Owner can see and manage all keys
@@ -1366,13 +1328,13 @@ This was originally Phase 2 but deferred — trails and discovery are higher imp
 
   Public onboarding page per trail: `grove.md/trails/<trail-slug>`. Shows trail name, description, note count, and a "Sign in to access" button. No login required to see the page — but reading notes requires auth.
 
-  **Backend (grove repo):** Add `GET /v1/trails/:id/info` to `src/routes/rest.ts` — unauthenticated endpoint returning `{ name, description, note_count, created_at }`. Count notes matching trail filters via a quick scan.
+  **Backend (grove repo):** Add `GET /v1/trails/:id/info` to `src/proxy.ts` — unauthenticated endpoint returning `{ name, description, note_count, created_at }`. Count notes matching trail filters via a quick scan.
 
   **Frontend:** Centered card layout (same style as login page). Trail name (serif heading), description, note count, two access methods:
   1. "Sign in to browse" button → `/login?trail=<id>`
   2. "Connect via MCP" section with copy-paste config block
 
-  **Files:** `src/routes/rest.ts` (grove repo — new endpoint), `src/app/trails/[slug]/page.tsx` (grove-www)
+  **Files:** `src/proxy.ts` (grove repo — new endpoint), `src/app/trails/[slug]/page.tsx` (grove-www)
   **Acceptance criteria:**
   - Page loads without auth — public access
   - Shows trail name, description, note count
@@ -1392,7 +1354,7 @@ This was originally Phase 2 but deferred — trails and discovery are higher imp
   - Navigation shows only trail-allowed paths
   - Owner view is unchanged
 
-- [ ] **P9-7: Share-a-note links** (`src/routes/admin.ts`, grove-www: `src/app/s/[id]/page.tsx`)
+- [ ] **P9-7: Share-a-note links** (`src/proxy.ts`, grove-www: `src/app/s/[id]/page.tsx`)
 
   Owner generates a shareable link to a specific note: `grove.md/s/<short-id>`. The link creates a temporary trail scoped to that single note and its depth-1 inbound backlinks (notes that wikilink TO the shared note — outbound links excluded to prevent leaking sensitive content). Expires after configurable TTL (default 7 days).
 
@@ -1411,19 +1373,13 @@ This was originally Phase 2 but deferred — trails and discovery are higher imp
 
   **API:** `POST /v1/admin/share` with `{ note_path, ttl_days?: number, max_views?: number }` → `{ id, url, expires_at }`
 
-  **Files:** `src/db.ts` (table), `src/routes/admin.ts` (create endpoint), `src/routes/rest.ts` (resolve share link → micro-trail), grove-www `src/app/s/[id]/page.tsx`
+  **Files:** `src/db.ts` (table), `src/proxy.ts` (create endpoint), `src/proxy.ts` (resolve share link → micro-trail), grove-www `src/app/s/[id]/page.tsx`
   **Acceptance criteria:**
   - Owner creates share link → gets URL
   - Recipient opens URL, signs in with email, sees the note + inbound backlinks
   - Outbound links from the shared note are NOT visible
   - Link expires after TTL — returns "This link has expired"
   - View count increments; link disabled after max_views reached
-
-#### Phase 9c: Annotations & Reactions — DEFERRED
-
-**Gate:** Only start when there are at least 3 active non-owner users. Building social features for a solo product is premature.
-
-When triggered, scope: annotations table in SQLite (not vault markdown), annotation API (create/list/delete), annotation display on grove.md below note content, daily email digest to owner.
 
 #### Phase 9 Design Decisions
 
@@ -1433,14 +1389,14 @@ When triggered, scope: annotations table in SQLite (not vault markdown), annotat
 | Viewer experience | Trail-scoped grove.md, same codebase | No separate app for viewers. The API key's trail scope does the filtering. |
 | Share links | Micro-trails with depth-1 inbound backlinks | Even shared notes require email auth. No anonymous access. Outbound links excluded to prevent leaking sensitive content. |
 | Roles | owner/member/viewer | Minimal. Don't add "editor", "admin", "moderator" until there's a real need. |
-| Annotations | Deferred until 3+ active users | Don't build social features for a solo product. |
+| Annotations | Out of scope | Build if/when collaborative usage patterns emerge. Not planning for it now. |
 
 #### Phase 9 Execution Strategy
 
 **Batch 1 (3 parallel agents, grove repo):**
-- **Agent A:** P9-1 (user roles) — touches `src/db.ts` (ALTER TABLE), `src/users.ts`, `src/routes/admin.ts` (adminAuth check)
-- **Agent B:** P9-2 (invite flow) — creates `src/invite.ts`, extends `src/routes/admin.ts` (new route), extends `src/cli.ts`, `src/email.ts`. Potential conflict with Agent A on `routes/admin.ts` — Agent B should create the route in a separate function that Agent A's adminAuth check will guard.
-- **Agent C:** P9-3 (user-scoped keys) — touches `src/keys.ts`, `src/routes/admin.ts` (existing /keys handler). Minimal overlap with A/B.
+- **Agent A:** P9-1 (user roles) — touches `src/db.ts` (ALTER TABLE), `src/users.ts`, `src/proxy.ts` (adminAuth check)
+- **Agent B:** P9-2 (invite flow) — creates `src/invite.ts`, extends `src/proxy.ts` (new route), extends `src/cli.ts`, `src/email.ts`. Potential conflict with Agent A on `routes/admin.ts` — Agent B should create the route in a separate function that Agent A's adminAuth check will guard.
+- **Agent C:** P9-3 (user-scoped keys) — touches `src/keys.ts`, `src/proxy.ts` (existing /keys handler). Minimal overlap with A/B.
 
 Merge order: Agent A first (adminAuth changes are foundational), then B+C.
 
@@ -1498,12 +1454,11 @@ Decisions made during planning. Reference these when implementing — don't re-l
 | Admin auth | Magic link + API key + persistent SQLite sessions | GitHub OAuth, passkey, JWT | Magic links are frictionless and establish email identity. Sessions survive restarts. Foundation for multi-user. |
 | Cross-domain auth | Auth code exchange (one-time code redirect) | Shared cookie domain, iframe, proxy all requests | Auth codes are single-use, 60s TTL, don't require same domain. Frontend keeps working with Bearer auth unchanged. |
 | Email delivery | Resend API (one fetch call) | SES, Mailgun, custom SMTP | Minimal integration — one fetch, no SDK. Dev mode falls back to console.log. |
-| Annotation storage | Grove SQLite (not vault markdown) | Inline in notes, separate annotation files | Social metadata shouldn't pollute vault git history or appear in MCP tools. |
+| Annotations | Out of scope | Inline in notes, separate annotation files | Not building social features until collaborative usage patterns emerge. |
 | User creation | Invite-only (owner sends magic link) | Public signup, OAuth providers | Grove is private-first. Access is granted, not requested. |
 | LLM judge | Cancelled | Ship with trails, rule-based only | Prefilter covers 90%+. LLM adds latency, fragility, and infra (Ollama doesn't fit on t3.medium). If needed later, use Claude API as rerank signal — no local model. |
 | Discovery extraction | Claude API (claude-haiku-4-5) | Local LLM (Ollama) | VPS is t3.medium (4GB RAM) — Ollama + Qwen needs 3-4GB minimum. Claude API is simpler, no GPU, no model management, pay-per-use. |
-| Route architecture | Extracted route files (`src/routes/*.ts`) | Monolith `proxy.ts` | proxy.ts at 1,351 LOC was the #1 merge conflict risk for parallel agents. Route extraction makes each agent work in separate files. |
-| CI/CD | GitHub Actions (test + auto-deploy) | Manual SSH deploy | Agents need automated feedback loops. Without CI, broken code ships silently. Auto-deploy on main merge closes the loop. |
+| CI/CD | GitHub Actions CI + manual deploy trigger | Manual SSH deploy | CI gives agents automated feedback on PRs. Deploy stays manual — the VPS runs a live personal knowledge API, so deploys are a human decision. |
 | Graceful shutdown | SIGTERM handler + write queue flush | None (PM2 kills after 1.6s) | PM2 restart was killing in-flight writes. Flush + 15s kill_timeout prevents data loss. |
 | Consumer discovery | `filtered_count` in responses | Hide filtering entirely | Consumers should know results are scoped so they can request broader access. |
 | Portal framework | Next.js on Vercel | Extend node:http server with HTML routes | API server stays minimal (raw node:http). Portal is a separate app with real framework needs (routing, auth middleware, SSR). Vercel deployment is free for this scale. |
@@ -1580,9 +1535,8 @@ Decisions made during planning. Reference these when implementing — don't re-l
 - Dead man's switch fires if daily cron stops
 
 **P4-PREREQ (Agent Infrastructure) is successful when:**
-- `proxy.ts` is <400 LOC; routes live in `src/routes/*.ts`
 - PRs get automated test + typecheck results via GitHub Actions
-- Merges to main auto-deploy to VPS with health check
+- Deploy is available as a manual workflow trigger (not automatic)
 - `pm2 restart grove-server` flushes write queue before shutting down (verify via log)
 - Push failures in write-queue.ts emit structured log entries
 
@@ -1615,8 +1569,8 @@ Decisions made during planning. Reference these when implementing — don't re-l
 **Phase 4a** ✅ — Next.js app scaffold, auth (magic link + API key), middleware
 
 **P4-PREREQ — Agent Infrastructure (next, prerequisite for everything below):**
-1. Proxy route extraction (Agent X) ‖ CI/CD + graceful shutdown (Agent Y) — parallel
-2. Merge, deploy, verify health check
+1. CI pipeline + graceful shutdown (single agent, small scope)
+2. Merge, deploy manually, verify health check
 
 **Phase 4b — Ops Dashboard (after P4-PREREQ):**
 1. Backend APIs: Agents A-D in parallel (trail CRUD, user list, keys/metrics fixes, git stats)
@@ -1638,6 +1592,9 @@ Decisions made during planning. Reference these when implementing — don't re-l
 **Phase 9b — Trail Sharing UX (after Phase 9a + Phase 4b):**
 - Shareable trail links, trail-scoped grove.md, share-a-note
 
-**~~Phase 6~~** — LLM judge: CANCELLED
+**P5-TAG — Tag & Classification Coverage (can run anytime, independent):**
+- Auto-tagging on write + backfill existing notes → trail filtering coverage from 15% to >80%
+
+**~~Phase 6~~** — LLM judge: REMOVED FROM SCOPE
 **Phase 8** — Multi-vault: deferred (work vault is read-only and auto-generated; low priority)
-**Phase 9c** — Annotations: deferred until 3+ active non-owner users
+**~~Phase 9c~~** — Annotations: REMOVED FROM SCOPE
