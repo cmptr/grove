@@ -41,7 +41,7 @@ import {
   seedAdminEmail,
 } from "./auth.js";
 import { generateRequestId, log as structuredLog, auditRead, auditWrite } from "./logger.js";
-import { metrics } from "./metrics.js";
+import { metrics, searchMetrics } from "./metrics.js";
 import { resolveTrail, type TrailConfig } from "./trails.js";
 import { handleGetNote, handleSearch, handleListNotes, handleStats } from "./rest.js";
 import { startStatsTimer } from "./vault-stats.js";
@@ -784,8 +784,10 @@ const server = createServer(async (req, res) => {
 
   // Metrics endpoint — request counts, latency percentiles, error rates
   if (url.pathname === "/metrics") {
+    const admin = adminAuth(req);
+    if (!admin) { sendJson(res, 401, { error: "unauthorized" }); return; }
     res.setHeader("Access-Control-Allow-Origin", GROVE_URL);
-    sendJson(res, 200, metrics.getMetrics());
+    sendJson(res, 200, { ...metrics.getMetrics(), search: searchMetrics.getSearchStats() });
     return;
   }
 
@@ -932,13 +934,14 @@ const server = createServer(async (req, res) => {
 
     if (parsed.action === "list") {
       const db = getDb();
-      const allKeys = (db.prepare("SELECT id, name, scopes, vault_id, created_at, last_used_at FROM api_keys").all() as StoredKey[]).map((k) => ({
+      const allKeys = (db.prepare("SELECT id, name, scopes, vault_id, created_at, last_used_at, expires_at FROM api_keys").all() as StoredKey[]).map((k) => ({
         id: k.id,
         name: k.name,
         scopes: k.scopes,
         vault_id: k.vault_id,
         created_at: k.created_at,
         last_used_at: k.last_used_at,
+        expires_at: k.expires_at,
       }));
       sendJson(res, 200, { keys: allKeys });
       return;
