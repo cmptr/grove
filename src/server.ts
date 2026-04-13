@@ -35,7 +35,7 @@ import { getStats, startStatsTimer } from "./vault-stats.js";
 import { RateLimiter, IdempotencyCache } from "./rate-limit.js";
 import { log as structuredLog, auditRead } from "./logger.js";
 import { filterByTrail, logTrailAccess, type TrailConfig, type NoteMetadata } from "./trails.js";
-import { runMigration } from "./db.js";
+import { runMigration, enqueueDiscovery } from "./db.js";
 
 // ── Path traversal guard ─────────────────────────────────────────
 // Resolves a relative path against the vault and rejects any attempt
@@ -663,6 +663,26 @@ const httpServer = createServer(async (req, res) => {
   if (req.url === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true, server: "grove" }));
+    return;
+  }
+
+  // Discovery trigger — called by git post-commit hook
+  if (req.url?.startsWith("/internal/discovery-trigger")) {
+    const url = new URL(req.url, `http://${req.headers.host ?? "localhost"}`);
+    const path = url.searchParams.get("path");
+    if (!path) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "missing path parameter" }));
+      return;
+    }
+    try {
+      enqueueDiscovery(path, "commit");
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, path, trigger: "commit" }));
+    } catch (err) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: (err as Error).message }));
+    }
     return;
   }
 

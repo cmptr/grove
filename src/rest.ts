@@ -18,6 +18,7 @@ import { analyzeGraph, computeDigest } from "./vault-graph.js";
 import { searchMetrics, metrics } from "./metrics.js";
 import { WriteQueue } from "./write-queue.js";
 import { embedFile } from "./embed-single.js";
+import { enqueueDiscovery } from "./db.js";
 
 const VAULT_PATH = process.env.GROVE_VAULT ?? join(homedir(), "life");
 
@@ -700,6 +701,13 @@ export async function handleWriteNote(
       url: noteUrl(relPath),
     };
   });
+
+  // Enqueue for discovery processing
+  try {
+    enqueueDiscovery(result.path, "write");
+  } catch (err) {
+    console.error(`[grove] discovery enqueue failed for ${result.path}:`, (err as Error).message);
+  }
 
   // Fire-and-forget: re-embed the changed file
   embedFile(VAULT_PATH, result.path).catch((err) =>

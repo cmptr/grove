@@ -12,16 +12,20 @@ import { homedir } from "node:os";
 import { createHash, randomBytes } from "node:crypto";
 
 const GROVE_DIR = join(homedir(), ".grove");
-const DB_PATH = process.env.GROVE_DB_PATH ?? join(GROVE_DIR, "grove.db");
 const KEYS_PATH = join(GROVE_DIR, "keys.json");
 const TRAILS_PATH = join(GROVE_DIR, "trails.json");
+
+function dbPath(): string {
+  return process.env.GROVE_DB_PATH ?? join(GROVE_DIR, "grove.db");
+}
 
 let db: Database.Database | null = null;
 
 export function getDb(): Database.Database {
   if (db) return db;
-  mkdirSync(GROVE_DIR, { recursive: true });
-  db = new Database(DB_PATH);
+  const path = dbPath();
+  mkdirSync(join(path, ".."), { recursive: true });
+  db = new Database(path);
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
   return db;
@@ -138,6 +142,18 @@ CREATE TABLE IF NOT EXISTS auth_codes (
   used_at TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS discovery_queue (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  path TEXT NOT NULL,
+  trigger TEXT NOT NULL CHECK(trigger IN ('commit', 'write', 'ingest')),
+  queued_at TEXT NOT NULL DEFAULT (datetime('now')),
+  processed_at TEXT,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'processing', 'done', 'error')),
+  error_message TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_discovery_queue_status ON discovery_queue(status, queued_at);
 `;
 
 export function createSchema(): void {
@@ -292,6 +308,79 @@ export function runMigration(): void {
 
   // Migrate OAuth clients from JSON to SQLite
   migrateOAuth(database);
+}
+
+// ── Discovery queue helpers ───────────────────────────────────────
+
+export interface DiscoveryQueueEntry {
+  id: number;
+  path: string;
+  trigger: "commit" | "write" | "ingest";
+  queued_at: string;
+  processed_at: string | null;
+  status: "pending" | "processing" | "done" | "error";
+  error_message: string | null;
+}
+
+/** Enqueue a path for discovery processing. */
+export function enqueueDiscovery(
+  path: string,
+  trigger: "commit" | "write" | "ingest",
+): void {
+  const database = getDb();
+  database
+    .prepare(
+      "INSERT INTO discovery_queue (path, trigger) VALUES (?, ?)",
+    )
+    .run(path, trigger);
+}
+
+/** Claim the next pending entry for processing (atomic status flip). */
+export function dequeueDiscovery(): DiscoveryQueueEntry | null {
+  const database = getDb();
+  const row = database
+    .prepare(
+      `UPDATE discovery_queue
+         SET status = 'processing'
+       WHERE id = (
+         SELECT id FROM discovery_queue
+         WHERE status = 'pending'
+         ORDER BY queued_at ASC
+         LIMIT 1
+       )
+       RETURNING *`,
+    )
+    .get() as DiscoveryQueueEntry | undefined;
+  return row ?? null;
+}
+
+/** Mark an entry as done. */
+export function markDiscoveryDone(id: number): void {
+  const database = getDb();
+  database
+    .prepare(
+      "UPDATE discovery_queue SET status = 'done', processed_at = datetime('now') WHERE id = ?",
+    )
+    .run(id);
+}
+
+/** Mark an entry as errored with a message. */
+export function markDiscoveryError(id: number, message: string): void {
+  const database = getDb();
+  database
+    .prepare(
+      "UPDATE discovery_queue SET status = 'error', processed_at = datetime('now'), error_message = ? WHERE id = ?",
+    )
+    .run(message, id);
+}
+
+/** Count pending entries in the queue. */
+export function discoveryQueueDepth(): number {
+  const database = getDb();
+  const row = database
+    .prepare("SELECT COUNT(*) as count FROM discovery_queue WHERE status = 'pending'")
+    .get() as { count: number };
+  return row.count;
 }
 
 function hashTokenForMigration(token: string): string {
