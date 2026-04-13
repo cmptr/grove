@@ -24,6 +24,8 @@ import { execSync } from "node:child_process";
 import { readArchiveSources, planSync, normalizeDir } from "./sync-sources.js";
 import { loadTrails, createTrail, disableTrail, deleteTrail } from "./trails.js";
 import { parseNote, serializeNote, inferTags, contentHash } from "./notes-validate.js";
+import { enqueueDiscovery, createSchema } from "./db.js";
+import { syncBookmarks } from "./discovery-bookmarks.js";
 
 // ── Vault path (local git operations) ────────────────────────────
 const VAULT_PATH = process.env.GROVE_VAULT ?? join(homedir(), "life");
@@ -772,12 +774,29 @@ async function cmdIngest(config: Config, dir: string, flags: Record<string, stri
   }
   if (toImport.length > 0) process.stderr.write("\n");
 
+  // P7-8: Enqueue all successfully imported notes for discovery processing
+  let enqueued = 0;
+  for (const r of results) {
+    if (!r.status.startsWith("error")) {
+      try {
+        enqueueDiscovery(r.path, "ingest");
+        enqueued++;
+      } catch {
+        // DB may not be initialized in all environments — best-effort
+      }
+    }
+  }
+  if (enqueued > 0) {
+    process.stderr.write(`Enqueued ${enqueued} notes for discovery processing\n`);
+  }
+
   return {
     ok: true,
     action: "ingest",
     imported,
     failed,
     skipped: skipped.length,
+    enqueued,
     total: mdFiles.length,
     results,
     _fmt: () => {
@@ -790,7 +809,34 @@ async function cmdIngest(config: Config, dir: string, flags: Record<string, stri
         lines.push(`  ${icon} ${r.path}`);
       }
       lines.push(`\nImported ${imported}/${mdFiles.length} notes (${skipped.length} skipped as duplicates)`);
+      if (enqueued > 0) lines.push(`${enqueued} enqueued for discovery`);
       if (failed > 0) lines.push(`${failed} failed`);
+      return lines.join("\n");
+    },
+  };
+}
+
+// ── Bookmark sync ───────────────────────────────────────────
+
+function cmdBookmarkSync(flags: Record<string, string | boolean>): CmdResult {
+  const count = typeof flags.count === "string" ? parseInt(flags.count, 10) || 20 : 20;
+
+  // Ensure DB schema exists for enqueue
+  try { createSchema(); } catch { /* may already exist */ }
+
+  const result = syncBookmarks(count);
+
+  return {
+    ok: true,
+    action: "bookmark_sync",
+    ...result,
+    _fmt: () => {
+      const lines: string[] = [];
+      lines.push(`Fetched ${result.fetched} bookmarks from X`);
+      lines.push(`Created ${result.created} new Source notes (${result.skipped} already synced)`);
+      if (result.enqueued > 0) lines.push(`Enqueued ${result.enqueued} for discovery processing`);
+      for (const p of result.notes) lines.push(`  + ${p}`);
+      for (const e of result.errors) lines.push(`  ! ${e}`);
       return lines.join("\n");
     },
   };
@@ -1269,9 +1315,17 @@ export const HELP: Record<string, CmdHelp> = {
     usage: "grove ingest <dir> [--dry-run] [--json]",
     description: "Import .md files into the vault. Deduplicates by title against existing notes. Creates a snapshot before starting.",
     flags: ["--dry-run  Show what would be imported", "--json     JSON output"],
-    json_schema: "{ok, action, imported, failed, skipped, total, results: [{path, status}]}",
+    json_schema: "{ok, action, imported, failed, skipped, enqueued, total, results: [{path, status}]}",
     exit_codes: EXIT_CODES,
     examples: ["grove ingest ./import/", "grove ingest ./export/ --dry-run"],
+  },
+  bookmarks: {
+    usage: "grove bookmarks [--count N] [--json]",
+    description: "Sync X bookmarks into Source notes. Deduplicates by tweet ID. Enqueues new notes for discovery.",
+    flags: ["--count N  Number of bookmarks to fetch (default: 20)", "--json     JSON output"],
+    json_schema: "{ok, action, fetched, created, skipped, enqueued, notes, errors}",
+    exit_codes: EXIT_CODES,
+    examples: ["grove bookmarks", "grove bookmarks --count 50"],
   },
   lint: {
     usage: "grove lint <dir> [--dry-run] [--json]",
@@ -1460,6 +1514,13 @@ async function main() {
         default:
           throw new CliError("bad_request", `Unknown trails subcommand: ${sub}\nUsage: grove trails [list|create|disable|delete]`, 1);
       }
+      emitResult(result, json);
+      return;
+    }
+
+    // Bookmark sync (local — no server needed)
+    if (command === "bookmarks") {
+      result = cmdBookmarkSync(flags);
       emitResult(result, json);
       return;
     }
