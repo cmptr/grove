@@ -22,7 +22,6 @@ import { join, relative } from "node:path";
 import { homedir } from "node:os";
 import { execSync } from "node:child_process";
 import { readArchiveSources, planSync, normalizeDir } from "./sync-sources.js";
-import { loadTrails, createTrail, disableTrail, deleteTrail } from "./trails.js";
 import { parseNote, serializeNote, inferTags } from "./notes-validate.js";
 
 // ── Vault path (local git operations) ────────────────────────────
@@ -138,6 +137,13 @@ async function restGet(config: Config, path: string): Promise<any> {
   const data = tryParseJson(res.body);
   if (data == null) throw new CliError("server_error", `Unexpected response (${res.status}): ${res.body.slice(0, 200)}`, 3);
   return data;
+}
+
+async function restPut(config: Config, path: string, body: unknown, extraHeaders?: Record<string, string>): Promise<{ status: number; data: any }> {
+  const url = new URL(path, config.server);
+  const res = await httpDo("PUT", url, { Authorization: `Bearer ${config.token}`, ...extraHeaders }, JSON.stringify(body));
+  const data = tryParseJson(res.body);
+  return { status: res.status, data: data ?? { raw: res.body.slice(0, 200) } };
 }
 
 // ── MCP JSON-RPC (fallback for endpoints without REST routes) ───
@@ -347,7 +353,7 @@ async function cmdList(config: Config, pattern: string, flags: Record<string, st
 }
 
 async function cmdWrite(config: Config, path: string, flags: Record<string, string | boolean>): Promise<CmdResult> {
-  if (!path) throw new CliError("bad_request", "Usage: grove write <path> --type <type> [--content text | stdin]", 1);
+  if (!path) throw new CliError("bad_request", "Usage: grove write <path> --type <type> [--content text | stdin] [--if-hash hash]", 1);
   const type = (flags.type as string) ?? "concept";
   const tags = flags.tags
     ? (flags.tags as string).split(",").map((t) => t.trim())
@@ -368,13 +374,24 @@ async function cmdWrite(config: Config, path: string, flags: Record<string, stri
 
   if (!content) throw new CliError("bad_request", "No content provided.", 1);
 
-  // Write still uses MCP (no PUT /v1/notes endpoint yet)
-  const raw = await mcpCall(config, "write_note", {
-    path,
-    frontmatter: JSON.stringify({ type, tags }),
-    content,
-  });
-  const data = tryParseJson(raw) ?? { message: raw };
+  const extraHeaders: Record<string, string> = {};
+  if (typeof flags["if-hash"] === "string") {
+    extraHeaders["If-Match"] = `"${flags["if-hash"]}"`;
+  }
+
+  const { status, data } = await restPut(
+    config,
+    `/v1/notes/${encodeURIComponent(path)}`,
+    { frontmatter: { type, tags }, content },
+    extraHeaders,
+  );
+
+  if (status === 409) throw new CliError("conflict", data?.error ?? "Content changed since last read (hash mismatch)", 1);
+  if (status === 400) throw new CliError("bad_request", data?.error ?? "Bad request", 1);
+  if (status === 401) throw new CliError("auth_error", "Authentication failed. Check your token.", 2);
+  if (status === 403) throw new CliError("auth_error", "Permission denied.", 2);
+  if (status >= 500) throw new CliError("server_error", `Server error (${status})`, 3);
+
   return { ok: true, ...data, _fmt: formatStatus };
 }
 
@@ -501,6 +518,22 @@ async function cmdMetrics(config: Config): Promise<CmdResult> {
       if (search && search.queries_1h > 0) {
         lines.push(`\nSearch (1h): ${search.queries_1h} queries, avg ${search.avg_latency_ms}ms, ${((search.zero_result_rate ?? 0) * 100).toFixed(0)}% zero-result`);
       }
+      return lines.join("\n");
+    },
+  };
+}
+
+async function cmdWhoami(config: Config): Promise<CmdResult> {
+  const data = await restGet(config, "/v1/whoami");
+  return {
+    ok: true,
+    ...data,
+    _fmt: () => {
+      const lines: string[] = [];
+      lines.push(`Key:    ${data.key_name ?? data.key_id}`);
+      lines.push(`Scopes: ${(data.scopes ?? []).join(", ") || "(none)"}`);
+      lines.push(`Vault:  ${data.vault_id ?? "-"}`);
+      if (data.trail) lines.push(`Trail:  ${data.trail.name} (${data.trail.id})`);
       return lines.join("\n");
     },
   };
@@ -658,10 +691,18 @@ async function cmdKeysRevoke(config: Config, id: string): Promise<CmdResult> {
   return { ok: true, revoked: data.revoked, _fmt: () => `Revoked key: ${data.revoked}` };
 }
 
-// ── Trail management (local, via trails.json) ──────────────
+// ── Trail management (remote, via /v1/admin/trails API) ──────────────
 
-function cmdTrailsList(): CmdResult {
-  const trails = loadTrails();
+function trailsPost(config: Config, body: unknown): Promise<{ status: number; body: string }> {
+  const url = new URL("/v1/admin/trails", config.server);
+  return httpDo("POST", url, { Authorization: `Bearer ${config.token}` }, JSON.stringify(body));
+}
+
+async function cmdTrailsList(config: Config): Promise<CmdResult> {
+  const res = await trailsPost(config, { action: "list" });
+  handleHttpStatus(res);
+  const data = tryParseJson(res.body) ?? {};
+  const trails = data.trails ?? [];
   return {
     ok: true,
     trails,
@@ -672,9 +713,9 @@ function cmdTrailsList(): CmdResult {
       lines.push("─".repeat(90));
       for (const t of trails) {
         const status = t.enabled ? "active" : "disabled";
-        const tags = t.allow_tags.length > 0 ? t.allow_tags.join(",") : "(all)";
-        const paths = t.allow_paths.length > 0 ? t.allow_paths.join(",") : "(all)";
-        lines.push(`${t.id.padEnd(16)}${t.name.padEnd(20)}${status.padEnd(10)}${tags.padEnd(24)}${paths}`);
+        const tags = (t.allow_tags ?? []).length > 0 ? t.allow_tags.join(",") : "(all)";
+        const paths = (t.allow_paths ?? []).length > 0 ? t.allow_paths.join(",") : "(all)";
+        lines.push(`${(t.id ?? "").padEnd(16)}${(t.name ?? "").padEnd(20)}${status.padEnd(10)}${tags.padEnd(24)}${paths}`);
       }
       lines.push("");
       return lines.join("\n");
@@ -682,10 +723,11 @@ function cmdTrailsList(): CmdResult {
   };
 }
 
-function cmdTrailCreate(name: string, flags: Record<string, string | boolean>): CmdResult {
+async function cmdTrailCreate(config: Config, name: string, flags: Record<string, string | boolean>): Promise<CmdResult> {
   if (!name) throw new CliError("bad_request", "Usage: grove trails create <name> [--allow-tags t1,t2] [--deny-tags t1,t2] [--allow-types t1,t2] [--allow-paths p1,p2]", 1);
   const splitFlag = (f: string | boolean | undefined) => typeof f === "string" ? f.split(",").map((s) => s.trim()).filter(Boolean) : [];
-  const { trail, token } = createTrail({
+  const res = await trailsPost(config, {
+    action: "create",
     name,
     description: (flags.description as string) ?? "",
     allow_tags: splitFlag(flags["allow-tags"]),
@@ -695,6 +737,10 @@ function cmdTrailCreate(name: string, flags: Record<string, string | boolean>): 
     allow_paths: splitFlag(flags["allow-paths"]),
     deny_paths: splitFlag(flags["deny-paths"]),
   });
+  handleHttpStatus(res);
+  const data = tryParseJson(res.body) ?? {};
+  const trail = data.trail ?? {};
+  const token = data.token ?? "";
   return {
     ok: true,
     id: trail.id,
@@ -705,15 +751,22 @@ function cmdTrailCreate(name: string, flags: Record<string, string | boolean>): 
   };
 }
 
-function cmdTrailDisable(id: string): CmdResult {
+async function cmdTrailDisable(config: Config, id: string): Promise<CmdResult> {
   if (!id) throw new CliError("bad_request", "Usage: grove trails disable <trail-id>", 1);
-  if (!disableTrail(id)) throw new CliError("not_found", `Trail not found: ${id}`, 1);
+  const res = await trailsPost(config, { action: "update", id, enabled: false });
+  handleHttpStatus(res);
+  const data = tryParseJson(res.body) ?? {};
+  if (!data.updated) throw new CliError("not_found", `Trail not found: ${id}`, 1);
   return { ok: true, disabled: id, _fmt: () => `Disabled trail: ${id}` };
 }
 
-function cmdTrailDelete(id: string): CmdResult {
-  if (!id) throw new CliError("bad_request", "Usage: grove trails delete <trail-id>", 1);
-  if (!deleteTrail(id)) throw new CliError("not_found", `Trail not found: ${id}`, 1);
+async function cmdTrailDelete(config: Config, id: string, flags: Record<string, string | boolean>): Promise<CmdResult> {
+  if (!id) throw new CliError("bad_request", "Usage: grove trails delete <trail-id> --yes", 1);
+  if (!flags.yes) throw new CliError("bad_request", "Destructive operation. Pass --yes to confirm.\nUsage: grove trails delete <trail-id> --yes", 1);
+  const res = await trailsPost(config, { action: "delete", id });
+  handleHttpStatus(res);
+  const data = tryParseJson(res.body) ?? {};
+  if (!data.deleted) throw new CliError("not_found", `Trail not found: ${id}`, 1);
   return { ok: true, deleted: id, _fmt: () => `Deleted trail: ${id}` };
 }
 
@@ -926,7 +979,7 @@ export const HELP: Record<string, CmdHelp> = {
     flags: ["-n N      Max results (default 10)", "--json    JSON output", "--paths   Paths only (for piping)"],
     json_schema: "{ok, results: [{path, title, score, snippet}], count}",
     exit_codes: EXIT_CODES,
-    examples: ["grove search 'taste graph'", "grove search 'parametric design' -n 5"],
+    examples: ["grove search 'taste graph'", "grove search 'parametric design' -n 5", "grove search 'ML' --paths | xargs -I{} grove read '{}'"],
   },
   read: {
     usage: "grove read <path-or-title> [--json]",
@@ -937,17 +990,17 @@ export const HELP: Record<string, CmdHelp> = {
     examples: ["grove read 'Taste Graph'", "grove read Resources/Concepts/taste-graph.md"],
   },
   list: {
-    usage: "grove list <glob> [--aliases] [--json]",
+    usage: "grove list <glob> [--aliases] [--paths] [--json]",
     description: "List notes matching a glob pattern.",
-    flags: ["--aliases  Include aliases", "--json     JSON output"],
+    flags: ["--aliases  Include aliases", "--paths    One path per line (for piping)", "--json     JSON output"],
     json_schema: "{ok, entries: [{path, type, modified_at, aliases?}], count}",
     exit_codes: EXIT_CODES,
     examples: ["grove list 'Resources/People/*'", "grove list 'Journal/2026/*' --json"],
   },
   write: {
-    usage: "grove write <path> --type <type> [--content text | stdin] [--tags t1,t2]",
+    usage: "grove write <path> --type <type> [--content text | stdin] [--tags t1,t2] [--if-hash hash]",
     description: "Create or update a note. Content from --content flag or stdin.",
-    flags: ["--type T      Note type (default: concept)", "--content S   Note content (alternative to stdin)", "--tags T1,T2  Comma-separated tags"],
+    flags: ["--type T      Note type (default: concept)", "--content S   Note content (alternative to stdin)", "--tags T1,T2  Comma-separated tags", "--if-hash H   Content hash from prior read (rejects on conflict)"],
     json_schema: "{ok, path, action, content_hash, url}",
     exit_codes: EXIT_CODES,
     examples: ["grove write Inbox/idea.md --type concept --content 'My idea'", "cat draft.md | grove write Resources/Concepts/new.md --type concept"],
@@ -1020,7 +1073,7 @@ export const HELP: Record<string, CmdHelp> = {
   trails: {
     usage: "grove trails [list|create|disable|delete] [--json]",
     description: "Manage trails (scoped read access).",
-    flags: ["--allow-tags T   Allow tags", "--deny-tags T    Deny tags", "--allow-types T  Allow types", "--allow-paths P  Allow paths", "--json           JSON output"],
+    flags: ["--allow-tags T   Allow tags", "--deny-tags T    Deny tags", "--allow-types T  Allow types", "--allow-paths P  Allow paths", "--yes            Confirm destructive delete", "--json           JSON output"],
     json_schema: "{ok, trails: [{id, name, enabled, allow_tags, allow_paths}]}",
     exit_codes: EXIT_CODES,
   },
@@ -1036,6 +1089,13 @@ export const HELP: Record<string, CmdHelp> = {
     description: "Normalize YAML frontmatter in .md files.",
     flags: ["--dry-run  Show what would change", "--json     JSON output"],
     json_schema: "{ok, changed, total}",
+    exit_codes: EXIT_CODES,
+  },
+  whoami: {
+    usage: "grove whoami [--json]",
+    description: "Show current identity — key name, scopes, vault.",
+    flags: ["--json    JSON output"],
+    json_schema: "{ok, key_id, key_name, scopes, vault_id, trail?}",
     exit_codes: EXIT_CODES,
   },
   "tag-backfill": {
@@ -1094,6 +1154,7 @@ Commands:
   health                  Server component health
   metrics                 Request counts and latency
 
+  whoami                  Show current identity
   init                    Configure CLI connection
   keys                    Manage API keys
   trails                  Manage trails (scoped access)
@@ -1113,7 +1174,15 @@ Setup: grove init --server https://api.grove.md --token grove_live_...`;
 
 // ── Output dispatcher ───────────────────────────────────────────
 
-function emitResult(result: CmdResult, json: boolean): void {
+function emitResult(result: CmdResult, json: boolean, paths?: boolean): void {
+  if (paths) {
+    // --paths mode: one path per line, nothing else
+    const items = (result as any).results ?? (result as any).entries ?? [];
+    for (const item of items) {
+      if (item.path) process.stdout.write(item.path + "\n");
+    }
+    return;
+  }
   if (json) {
     // Strip internal _fmt before serializing
     const { _fmt, ...data } = result;
@@ -1164,20 +1233,6 @@ async function main() {
     if (command === "lint") { result = cmdLint(positional, flags); emitResult(result, json); return; }
     if (command === "tag-backfill") { result = cmdTagBackfill(flags); emitResult(result, json); return; }
     if (command === "init") { result = await cmdInit(flags); emitResult(result, json); return; }
-    if (command === "trails") {
-      const sub = positional || "list";
-      const subArg = process.argv.slice(4)[0] ?? "";
-      switch (sub) {
-        case "list":    result = cmdTrailsList(); break;
-        case "create":  result = cmdTrailCreate(subArg, flags); break;
-        case "disable": result = cmdTrailDisable(subArg); break;
-        case "delete":  result = cmdTrailDelete(subArg); break;
-        default:
-          throw new CliError("bad_request", `Unknown trails subcommand: ${sub}\nUsage: grove trails [list|create|disable|delete]`, 1);
-      }
-      emitResult(result, json);
-      return;
-    }
 
     const config = loadConfig();
 
@@ -1191,6 +1246,22 @@ async function main() {
         case "revoke": result = await cmdKeysRevoke(config, subArg); break;
         default:
           throw new CliError("bad_request", `Unknown keys subcommand: ${sub}\nUsage: grove keys [list|create|revoke]`, 1);
+      }
+      emitResult(result, json);
+      return;
+    }
+
+    // Trail management
+    if (command === "trails") {
+      const sub = positional || "list";
+      const subArg = process.argv.slice(4)[0] ?? "";
+      switch (sub) {
+        case "list":    result = await cmdTrailsList(config); break;
+        case "create":  result = await cmdTrailCreate(config, subArg, flags); break;
+        case "disable": result = await cmdTrailDisable(config, subArg); break;
+        case "delete":  result = await cmdTrailDelete(config, subArg, flags); break;
+        default:
+          throw new CliError("bad_request", `Unknown trails subcommand: ${sub}\nUsage: grove trails [list|create|disable|delete]`, 1);
       }
       emitResult(result, json);
       return;
@@ -1210,10 +1281,12 @@ async function main() {
       case "digest":      result = await cmdDigest(config); break;
       case "health":      result = await cmdHealth(config); break;
       case "metrics":     result = await cmdMetrics(config); break;
+      case "whoami":      result = await cmdWhoami(config); break;
       default:
         throw new CliError("bad_request", `Unknown command: ${command}\nRun 'grove' for available commands.`, 1);
     }
-    emitResult(result, json);
+    const paths = !!flags.paths && (command === "search" || command === "list");
+    emitResult(result, json, paths);
   } catch (err) {
     if (err instanceof CliError) {
       emitError(err, json);

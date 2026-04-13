@@ -122,6 +122,7 @@ describe("HELP", () => {
     "graph", "digest", "health", "metrics",
     "status", "history", "diagnostics",
     "keys", "trails", "sync", "lint", "snapshot", "rollback",
+    "whoami", "tag-backfill",
   ];
 
   it("has entries for all commands", () => {
