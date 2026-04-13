@@ -172,6 +172,84 @@ Documentation is a first-class deliverable, not an afterthought. Agents reading 
 - Changing behavior of an existing endpoint/command? Update the relevant docs in the same PR.
 - Don't create docs PRs that are separate from the feature — docs ship with the feature.
 
+### Running Agents in tmux
+
+Each batch in an execution strategy has runnable commands. Open a tmux session, split panes for parallel agents, paste the commands.
+
+**Setup: create a tmux session for a batch**
+
+```bash
+# Example: Phase 4b Batch 1 (4 parallel agents)
+tmux new-session -s grove-4b -n agents
+
+# Split into 4 panes
+tmux split-window -h
+tmux split-window -v
+tmux select-pane -t 0 && tmux split-window -v
+
+# Or just open panes manually — the commands are what matter
+```
+
+**Agent command pattern:**
+
+Each agent runs `claude` with a worktree (isolated branch) and a task prompt that references PLAN.md:
+
+```bash
+# Pane 1: Agent A
+claude --worktree "Read PLAN.md task P4-API-1. Implement it exactly per spec. Branch: agent/p4-api-1. Run tests before committing."
+
+# Pane 2: Agent B
+claude --worktree "Read PLAN.md task P4-API-2. Implement it exactly per spec. Branch: agent/p4-api-2. Run tests before committing."
+
+# Pane 3: Agent C
+claude --worktree "Read PLAN.md task P4-API-3. Implement it exactly per spec. Branch: agent/p4-api-3. Run tests before committing."
+
+# Pane 4: Agent D
+claude --worktree "Read PLAN.md task P4-API-4. Implement it exactly per spec. Branch: agent/p4-api-4. Run tests before committing."
+```
+
+**Status pane — monitor progress:**
+
+Add a status pane that watches for agent branches and test results:
+
+```bash
+# In a separate pane, loop to show branch status
+while true; do
+  clear
+  echo "=== Grove Agent Status $(date +%H:%M:%S) ==="
+  echo ""
+  for branch in $(git branch -a 2>/dev/null | grep "agent/" | sed 's/^[ *]*//' | sort); do
+    commits=$(git log main..$branch --oneline 2>/dev/null | wc -l | tr -d ' ')
+    last=$(git log $branch -1 --format="%s" 2>/dev/null)
+    echo "  $branch  ($commits commits)  $last"
+  done
+  echo ""
+  echo "=== Worktrees ==="
+  git worktree list 2>/dev/null | grep -v "^$(pwd) "
+  echo ""
+  echo "=== Tests ==="
+  npm test 2>&1 | tail -3
+  sleep 30
+done
+```
+
+**Merge sequence after a batch completes:**
+
+```bash
+# Merge in order specified by execution strategy
+git checkout main
+git merge agent/p4-api-4   # no-conflict agent first
+git merge agent/p4-api-3
+git merge agent/p4-api-1
+git merge agent/p4-api-2   # highest-conflict-risk last
+npm test                    # verify everything together
+# Deploy manually when satisfied
+```
+
+**Quick reference — batch commands for each phase:**
+
+Execution strategies in each phase section below include the exact `claude` commands for each agent. Copy-paste into tmux panes.
+
 ---
 
 ## Dependency DAG
@@ -570,7 +648,14 @@ Claude.ai → proxy.ts (auth/OAuth/CORS/logging) → Grove MCP server (all 6 too
 
 ##### Execution strategy for P4-PREREQ
 
-Single agent handles both tasks (they're small and touch overlapping files). Merge, deploy manually, verify health check. Then launch Phase 4b agents.
+Single agent, both tasks:
+
+```bash
+# One pane
+claude --worktree "Read PLAN.md tasks P4-PREREQ-1 and P4-PREREQ-2. Implement both per spec. Branch: agent/p4-prereq. Run tests before committing."
+```
+
+After it finishes: merge, deploy manually (`ssh` + `git pull` + `pm2 restart`), verify health check. Then launch Phase 4b agents.
 
 ---
 
@@ -879,6 +964,18 @@ In parallel on the grove-www repo:
 - **Agent E:** P4-FE-0 (dashboard layout + all 5 API proxy routes + header link + dashboard overview stub)
 
 Merge order: Agent D first (no conflicts possible), then C (edits existing code), then A, then B. Deploy manually. Then merge Agent E.
+
+**Batch 1 tmux commands:**
+```bash
+# Pane 1
+claude --worktree "Read PLAN.md task P4-API-1. Implement trail CRUD HTTP endpoints per spec. Branch: agent/p4-api-1."
+# Pane 2
+claude --worktree "Read PLAN.md task P4-API-2. Implement user list endpoint and fix last_login_at per spec. Branch: agent/p4-api-2."
+# Pane 3
+claude --worktree "Read PLAN.md task P4-API-3. Fix /keys list and /metrics per spec. Branch: agent/p4-api-3."
+# Pane 4
+claude --worktree "Read PLAN.md task P4-API-4. Add git status to vault stats per spec. Branch: agent/p4-api-4."
+```
 
 **Batch 2 — Frontend pages (3 parallel agents, after Batch 1):**
 
@@ -1201,6 +1298,14 @@ Merge A first, then B. Then REST-4 (CLI migration) as a follow-up — it depends
 
 REST-4 can be combined with CLI-A1 (--json) since both refactor the CLI command functions. The agent doing CLI-A would handle both the output format change and the MCP→REST migration in one pass.
 
+**tmux commands:**
+```bash
+# Pane 1
+claude --worktree "Read PLAN.md tasks REST-1 and REST-2. Extract handleWriteNote and add PUT /v1/notes/:path per spec. Branch: agent/rest-write."
+# Pane 2
+claude --worktree "Read PLAN.md task REST-3. Add GET /v1/status/:mode endpoints per spec. Branch: agent/rest-status."
+```
+
 #### CLI-A: Foundation (before Phase 4b)
 
 These make the CLI agent-usable. Do first. REST-1 through REST-3 should land before or alongside CLI-A (CLI-A4's migration depends on REST endpoints existing).
@@ -1378,12 +1483,24 @@ This is a refactor, not a feature. Do it when adding Phase D commands makes the 
 #### CLI Execution Strategy
 
 **CLI-A (7 tasks, 2 parallel agents):**
-- **Agent A:** CLI-A1 + CLI-A2 (--json + exit codes) — these are tightly coupled, same refactor
-- **Agent B:** CLI-A3 + CLI-A4 + CLI-A5 + CLI-A6 + CLI-A7 (new flags, new commands, help) — independent of A's refactor, adds to existing command structure
+- **Agent A:** CLI-A1 + CLI-A2 + REST-4 (--json + exit codes + MCP→REST migration) — tightly coupled refactor
+- **Agent B:** CLI-A3 + CLI-A4 + CLI-A5 + CLI-A6 + CLI-A7 (new flags, new commands, help) — independent of A
 
 Merge Agent A first (structural change to how commands return data). Then Agent B (adds features on top).
 
+**tmux commands:**
+```bash
+# Pane 1
+claude --worktree "Read PLAN.md tasks CLI-A1, CLI-A2, and REST-4. Refactor CLI: add --json, exit codes, migrate from MCP to REST HTTP calls. Branch: agent/cli-json."
+# Pane 2
+claude --worktree "Read PLAN.md tasks CLI-A3 through CLI-A7. Add --content flag, grove init, graph/digest commands, health/metrics, help text. Branch: agent/cli-commands."
+```
+
 **CLI-B (4 tasks, after CLI-A + P4-API-1 merged):** Single agent, sequential. Each task is small.
+
+```bash
+claude --worktree "Read PLAN.md tasks CLI-B1 through CLI-B4. Move trails to HTTP, add --paths, --if-hash, whoami. Branch: agent/cli-consistency."
+```
 
 **CLI-C:** Single agent when triggered by LOC threshold.
 
@@ -1593,13 +1710,34 @@ Tag/type/path prefilter handles trail filtering. The right investment is better 
 - **Agent A:** P7-1 (discovery loop skeleton) — creates `src/discovery.ts`, `src/discovery-worker.ts`, adds queue table to `db.ts`
 - **Agent B:** P7-7 (ingest command) — extends `src/cli.ts` only, no overlap with Agent A
 
+```bash
+# Pane 1
+claude --worktree "Read PLAN.md task P7-1. Build the discovery loop skeleton per spec. Branch: agent/p7-discovery-loop."
+# Pane 2
+claude --worktree "Read PLAN.md task P7-7. Build the grove ingest command per spec. Branch: agent/p7-ingest."
+```
+
 **Batch 2 (2 parallel agents, after Batch 1 merged):**
 - **Agent C:** P7-2 + P7-3 (concept extraction + wikilink wiring) — creates `src/discovery-extract.ts` and `src/discovery-link.ts`, integrates into discovery loop
 - **Agent D:** P7-4 (semantic neighbors) — creates `src/discovery-neighbors.ts`, adds table to `db.ts` (different table than Batch 1, safe merge)
 
+```bash
+# Pane 1
+claude --worktree "Read PLAN.md tasks P7-2 and P7-3. Build concept extraction and wikilink wiring per spec. Branch: agent/p7-extraction."
+# Pane 2
+claude --worktree "Read PLAN.md task P7-4. Build semantic neighbor surfacing per spec. Branch: agent/p7-neighbors."
+```
+
 **Batch 3 (2 parallel agents, after Batch 2 merged):**
 - **Agent E:** P7-5 (discovery digest) — extends `vault_status` in `server.ts`
 - **Agent F:** P7-6 + P7-8 (bookmarks + post-ingest bootstrap) — creates `src/discovery-bookmarks.ts`, extends cli.ts ingest
+
+```bash
+# Pane 1
+claude --worktree "Read PLAN.md task P7-5. Add discovery mode to vault_status per spec. Branch: agent/p7-digest."
+# Pane 2
+claude --worktree "Read PLAN.md tasks P7-6 and P7-8. Build bookmark integration and post-ingest bootstrap per spec. Branch: agent/p7-bookmarks."
+```
 
 ---
 
@@ -1841,17 +1979,37 @@ This was originally Phase 2 but deferred — trails and discovery are higher imp
 
 **Batch 1 (3 parallel agents, grove repo):**
 - **Agent A:** P9-1 (user roles) — touches `src/db.ts` (ALTER TABLE), `src/users.ts`, `src/proxy.ts` (adminAuth check)
-- **Agent B:** P9-2 (invite flow) — creates `src/invite.ts`, extends `src/proxy.ts` (new route), extends `src/cli.ts`, `src/email.ts`. Potential conflict with Agent A on `routes/admin.ts` — Agent B should create the route in a separate function that Agent A's adminAuth check will guard.
+- **Agent B:** P9-2 (invite flow) — creates `src/invite.ts`, extends `src/proxy.ts` (new route), extends `src/cli.ts`, `src/email.ts`
 - **Agent C:** P9-3 (user-scoped keys) — touches `src/keys.ts`, `src/proxy.ts` (existing /keys handler). Minimal overlap with A/B.
 
 Merge order: Agent A first (adminAuth changes are foundational), then B+C.
+
+```bash
+# Pane 1
+claude --worktree "Read PLAN.md task P9-1. Add user roles per spec. Branch: agent/p9-roles."
+# Pane 2
+claude --worktree "Read PLAN.md task P9-2. Build invite flow per spec. Branch: agent/p9-invite."
+# Pane 3
+claude --worktree "Read PLAN.md task P9-3. Scope keys to users per spec. Branch: agent/p9-scoped-keys."
+```
 
 **Batch 2 (2 parallel agents, after Batch 1 merged):**
 - **Agent D:** P9-4 (user management UI, grove-www) — needs dashboard layout from Phase 4b
 - **Agent E:** P9-5 + P9-6 (trail sharing pages, grove-www) — separate routes from Agent D
 
+```bash
+# Pane 1
+claude --worktree "Read PLAN.md task P9-4. Build user management dashboard page per spec. Branch: agent/p9-user-ui."
+# Pane 2
+claude --worktree "Read PLAN.md tasks P9-5 and P9-6. Build trail sharing pages per spec. Branch: agent/p9-trail-sharing."
+```
+
 **Batch 3 (1 agent, after Batch 2 merged):**
 - **Agent F:** P9-7 (share-a-note) — touches both repos (share table + API in grove, page in grove-www)
+
+```bash
+claude --worktree "Read PLAN.md task P9-7. Build share-a-note links per spec. Branch: agent/p9-share."
+```
 
 #### Phase 9 Success Criteria
 
