@@ -47,7 +47,7 @@ import { resolveTrail, loadTrails, createTrail, updateTrail, disableTrail, delet
 import {
   handleGetNote, handleSearch, handleListNotes, handleStats, handleWriteNote,
   handleStatusHealth, handleStatusHistory, handleStatusDiagnostics,
-  handleStatusGraph, handleStatusDigest, VALID_STATUS_MODES,
+  handleStatusGraph, handleStatusDigest, handleTrailInfo, VALID_STATUS_MODES,
   type StatusMode,
 } from "./rest.js";
 import { startStatsTimer } from "./vault-stats.js";
@@ -886,7 +886,8 @@ const server = createServer(async (req, res) => {
     // If redirect to grove.md, use auth code flow
     if (redirect && redirect.startsWith("https://grove.md")) {
       const code = createAuthCode(result.user.id);
-      res.writeHead(302, { "Location": `${redirect}?code=${code}` });
+      const sep = redirect.includes("?") ? "&" : "?";
+      res.writeHead(302, { "Location": `${redirect}${sep}code=${code}` });
       res.end();
       return;
     }
@@ -975,6 +976,19 @@ const server = createServer(async (req, res) => {
     }
     if (parsed.action === "create" && parsed.name) {
       const result = createKey(parsed.name, parsed.scopes ?? ["read", "write"], parsed.vault ?? "life", undefined, admin.userId);
+
+      // If trail_id provided, create a trail grant linking this key to the trail
+      if (parsed.trail_id) {
+        const db = getDb();
+        const trail = db.prepare("SELECT id FROM trails WHERE id = ?").get(parsed.trail_id);
+        if (trail) {
+          const grantId = "grant_" + randomBytes(4).toString("hex");
+          db.prepare(
+            "INSERT INTO trail_grants (id, trail_id, grantee_type, grantee_id, created_at) VALUES (?, ?, ?, ?, ?)"
+          ).run(grantId, parsed.trail_id, "token", result.id, new Date().toISOString());
+        }
+      }
+
       sendJson(res, 200, { id: result.id, name: result.name, token: result.token });
       return;
     }
@@ -1089,6 +1103,19 @@ const server = createServer(async (req, res) => {
           sendJson(res, 500, { error: msg });
         }
       }
+      return;
+    }
+
+    // GET /v1/trails/:id/info — public trail info (unauthenticated)
+    const trailInfoMatch = url.pathname.match(/^\/v1\/trails\/([^/]+)\/info$/);
+    if (trailInfoMatch && req.method === "GET") {
+      const trailId = decodeURIComponent(trailInfoMatch[1]);
+      const info = handleTrailInfo(trailId);
+      if (!info) {
+        sendJson(res, 404, { error: "trail not found" });
+        return;
+      }
+      sendJson(res, 200, info);
       return;
     }
 

@@ -196,6 +196,29 @@ export function deleteTrail(id: string): boolean {
   return result.changes > 0;
 }
 
+export interface TrailPublicInfo {
+  name: string;
+  description: string;
+  created_at: string;
+  enabled: boolean;
+}
+
+export function getTrailPublicInfo(id: string): TrailPublicInfo | null {
+  const db = getDb();
+  const row = db.prepare("SELECT name, description, created_at, enabled FROM trails WHERE id = ?").get(id) as {
+    name: string; description: string; created_at: string; enabled: number;
+  } | undefined;
+  if (!row) return null;
+  return { name: row.name, description: row.description, created_at: row.created_at, enabled: row.enabled === 1 };
+}
+
+export function getTrailConfig(id: string): TrailConfig | null {
+  const db = getDb();
+  const row = db.prepare("SELECT t.*, tg.grantee_id FROM trails t LEFT JOIN trail_grants tg ON t.id = tg.trail_id AND tg.grantee_type = 'token' WHERE t.id = ?").get(id) as (TrailRow & { grantee_id: string | null }) | undefined;
+  if (!row) return null;
+  return rowToConfig(row, row.grantee_id ?? "");
+}
+
 export function resolveTrail(keyId: string): TrailConfig | null {
   const db = getDb();
   const row = db.prepare(
