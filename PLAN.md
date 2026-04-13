@@ -120,13 +120,57 @@ If your branch conflicts with main:
 3. Re-run `npm test && npx tsc --noEmit`
 4. Force-push your branch (not main)
 
-### Writing Tests
+### Testing Requirements
 
-Every new endpoint, function, or behavior change needs tests:
-- **Unit tests:** Test the function in isolation. Mock external dependencies.
+Every new endpoint, function, or behavior change needs tests. The test/code ratio is currently 0.39 — the goal is 0.5+.
+
+**Unit tests (required for every PR):**
+- Test the function in isolation. Mock external dependencies (HTTP, filesystem, SQLite).
 - **Test file naming:** `test/<module>.test.ts` (match the source file name)
-- **Fixtures:** Extend `test/fixtures/vault/` for vault-dependent tests. Document what you added.
-- **Acceptance criteria tests:** Each acceptance criterion in the spec should map to at least one test assertion.
+- **Fixtures:** Extend `test/fixtures/vault/` for vault-dependent tests. Document what you added in a comment at the top of the fixture file.
+- **Acceptance criteria → tests:** Each acceptance criterion in the task spec maps to at least one test assertion. If the spec says "returns 409 on hash mismatch," there's a test for that.
+
+**REST endpoint tests (required for every new endpoint):**
+- Test request → response for success, validation error, auth error, not-found
+- Test trail-scoped behavior (filtered results, write scope enforcement)
+- Test with `If-Match` header for write endpoints
+
+**CLI command tests (required for every new command):**
+- Test JSON output schema matches the contract (parse output, verify fields)
+- Test exit codes for success and each error type
+- Test `--help` output includes usage, flags, and JSON schema
+- Mock HTTP responses (after REST-4 migration) — no live server needed
+
+**What NOT to test:**
+- Don't test the framework (node:http, better-sqlite3, vitest itself)
+- Don't snapshot test human-formatted output (it changes too often)
+- Don't test internal implementation details that could change without affecting behavior
+
+### Documentation Requirements
+
+Documentation is a first-class deliverable, not an afterthought. Agents reading docs should be able to use any CLI command or REST endpoint without reading source code.
+
+**REST API docs (`docs/api.md` — create when REST-2 ships):**
+- Every endpoint: method, path, auth, request schema, response schema, error codes
+- Examples with curl commands
+- Trail filtering behavior per endpoint
+- Rate limit information
+
+**CLI docs (`docs/cli.md` — create when CLI-A7 ships):**
+- Every command: usage, flags, examples, JSON output schema, exit codes
+- Workflow examples showing multi-command composition
+- Config setup instructions
+
+**Inline code docs:**
+- Exported functions get a JSDoc comment with param types, return type, and one-line description
+- Non-obvious logic gets a comment explaining *why*, not *what*
+- Don't add docs to internal/private functions unless the logic is genuinely surprising
+
+**Update rules:**
+- Adding a REST endpoint? Update `docs/api.md` in the same PR.
+- Adding a CLI command? Update `docs/cli.md` in the same PR.
+- Changing behavior of an existing endpoint/command? Update the relevant docs in the same PR.
+- Don't create docs PRs that are separate from the feature — docs ship with the feature.
 
 ---
 
@@ -1037,9 +1081,129 @@ Error types: `not_found` (exit 1), `invalid_input` (exit 1), `validation_error` 
 
 All dates ISO 8601. All paths vault-relative. `null` for missing fields, never omitted.
 
+#### REST API: Full Read/Write Surface
+
+The REST API is currently read-only (GET endpoints for grove-www SSR). All writes go through MCP, which requires a stateful session handshake (initialize → session ID → tool call). This is painful for CLI, scripts, webhooks, and any HTTP client.
+
+**Architecture:** Extract a shared service layer. Both MCP tools and REST endpoints call the same functions. No HTTP hop between them — both are in-process.
+
+```
+REST (stateless HTTP)  ←── CLI, grove-www, scripts, curl, webhooks
+       ↓
+   Service layer       ←── validation, write queue, git, reindex, trail filtering
+       ↑
+MCP (stateful session) ←── Claude.ai, Claude Code, MCP clients
+```
+
+- [ ] **REST-1: Extract `handleWriteNote` service function** (`src/rest.ts` or `src/vault-write.ts`)
+
+  Move the write logic from server.ts's `write_note` tool handler into a shared function:
+  ```typescript
+  export async function handleWriteNote(
+    notePath: string,
+    frontmatter: Record<string, unknown>,
+    content: string,
+    options: { ifHash?: string; trail?: TrailConfig | null; keyName?: string }
+  ): Promise<{ path: string; action: string; content_hash: string; commit: string; url: string }>
+  ```
+
+  The MCP `write_note` tool becomes a thin wrapper that parses arguments and calls this function.
+
+  **Files:** `src/rest.ts` (add function), `src/server.ts` (refactor write_note tool to call it)
+  **Tests:** Existing write tests must pass. Add `test/rest.test.ts` tests for the extracted function.
+  **Acceptance criteria:**
+  - MCP `write_note` behavior unchanged
+  - `handleWriteNote` is independently callable with the same validation, write queue, git commit, and reindex behavior
+
+- [ ] **REST-2: `PUT /v1/notes/:path` write endpoint** (`src/proxy.ts`)
+
+  ```
+  PUT /v1/notes/Resources/Concepts/context-engineering.md
+  Authorization: Bearer grove_live_xxx
+  If-Match: "abc123"  (optional — optimistic concurrency, maps to if_hash)
+  Content-Type: application/json
+
+  {
+    "frontmatter": { "type": "concept", "tags": ["ai"] },
+    "content": "# Context Engineering\n\nThe art of..."
+  }
+
+  → 201 Created (new) or 200 OK (update)
+  {
+    "path": "Resources/Concepts/context-engineering.md",
+    "action": "create",
+    "content_hash": "def456",
+    "commit": "abc789",
+    "url": "https://grove.md/Resources/Concepts/context-engineering"
+  }
+
+  → 409 Conflict (hash mismatch)
+  → 400 Bad Request (validation failure)
+  → 403 Forbidden (trail scope violation on writes — 403 not 404, client needs to know why)
+  ```
+
+  PUT because the client specifies the resource path. `If-Match` header is standard HTTP optimistic concurrency.
+
+  Wire through auth, trail resolution, rate limiting (same as MCP path). Call `handleWriteNote`.
+
+  **Files:** `src/proxy.ts` (new route), `src/rest.ts` (already has handleWriteNote from REST-1)
+  **Tests:** `test/rest.test.ts` — PUT creates note, PUT with If-Match detects conflict, validation errors return 400
+  **Acceptance criteria:**
+  - `curl -X PUT https://api.grove.md/v1/notes/path.md -H "Authorization: Bearer xxx" -d '{"frontmatter":{...},"content":"..."}' ` creates a note
+  - Trail-scoped keys can only write to allowed paths
+  - Write queue serialization preserved (concurrent PUTs don't corrupt)
+  - If-Match with wrong hash returns 409 with current hash in response
+
+- [ ] **REST-3: `GET /v1/status/:mode` endpoints** (`src/proxy.ts`)
+
+  Expose all vault_status modes via REST:
+  ```
+  GET /v1/status/health
+  GET /v1/status/history?since=1+week+ago
+  GET /v1/status/diagnostics
+  GET /v1/status/graph
+  GET /v1/status/digest
+  ```
+
+  Current `/v1/stats` stays for backward compat. These are the full vault_status surface.
+
+  **Files:** `src/proxy.ts` (new routes), `src/rest.ts` (reuse existing vault-status functions)
+
+- [ ] **REST-4: Migrate CLI from MCP to REST** (`src/cli.ts`)
+
+  Replace the MCP handshake (`initialize` → session → `callTool`) with direct HTTP calls:
+  - `grove search "X"` → `GET /v1/search?q=X&limit=10`
+  - `grove read "X"` → `GET /v1/notes/X`
+  - `grove list "X"` → `GET /v1/list?prefix=X`
+  - `grove write "path"` → `PUT /v1/notes/path`
+  - `grove status` → `GET /v1/status/health`
+  - `grove history` → `GET /v1/status/history`
+  - `grove diagnostics` → `GET /v1/status/diagnostics`
+
+  Delete: `initialize()`, `mcpRequest()`, `callTool()`, session ID tracking. Replace with a single `httpRequest(method, path, body?)` helper.
+
+  Each CLI command becomes a single HTTP request instead of a 3-step MCP handshake. Latency drops significantly.
+
+  **Files:** `src/cli.ts` (major refactor — delete MCP code, add HTTP calls)
+  **Tests:** `test/cli.test.ts` — mock HTTP responses instead of MCP responses
+  **Acceptance criteria:**
+  - All existing CLI commands work identically
+  - No MCP session initialization in CLI code
+  - `grove write path.md --content "text"` uses `PUT /v1/notes/path.md`
+  - CLI works from any machine pointing at api.grove.md (no local dependencies for vault ops)
+
+##### REST Execution Strategy
+
+- **Agent A:** REST-1 + REST-2 (service extraction + PUT endpoint) — tightly coupled, same refactor
+- **Agent B:** REST-3 (status endpoints) — independent of Agent A
+
+Merge A first, then B. Then REST-4 (CLI migration) as a follow-up — it depends on the endpoints existing.
+
+REST-4 can be combined with CLI-A1 (--json) since both refactor the CLI command functions. The agent doing CLI-A would handle both the output format change and the MCP→REST migration in one pass.
+
 #### CLI-A: Foundation (before Phase 4b)
 
-These make the CLI agent-usable. Do first.
+These make the CLI agent-usable. Do first. REST-1 through REST-3 should land before or alongside CLI-A (CLI-A4's migration depends on REST endpoints existing).
 
 - [ ] **CLI-A1: `--json` global flag** (`src/cli.ts`)
 
@@ -1047,7 +1211,7 @@ These make the CLI agent-usable. Do first.
 
   Auto-detect non-TTY: `if (!process.stdout.isTTY) flags.json = true`.
 
-  The MCP server returns tool results as text strings in `content[0].text`. The CLI already parses these — search results are JSON inside the text, `get` returns markdown with parsed frontmatter. The `--json` implementation wraps the already-parsed data in the `{"ok": true, ...}` envelope.
+  After REST-4 (CLI migration to REST), command functions receive clean JSON from HTTP responses. The `--json` implementation wraps the response data in the `{"ok": true, ...}` envelope. If REST-4 hasn't landed yet, the MCP text responses need parsing first — but the refactor is cleaner if done together.
 
   **Files:** `src/cli.ts` (modify parseArgs, refactor each command to return data)
   **Tests:** `test/cli.test.ts` — verify JSON output shape for each command, verify non-TTY detection
@@ -1166,7 +1330,7 @@ These make the CLI agent-usable. Do first.
   # Exits 1 with error "conflict" if hash doesn't match
   ```
 
-  **Files:** `src/cli.ts` (pass if_hash to write_note MCP call)
+  **Files:** `src/cli.ts` (pass If-Match header on PUT /v1/notes/)
 
 - [ ] **CLI-B4: `grove whoami`**
 
@@ -1181,7 +1345,7 @@ Split into `src/cli/` directory:
 src/cli/
   index.ts          # parseArgs, dispatch, global flags, main()
   output.ts         # format(), error(), JSON envelope, human formatters
-  client.ts         # Config, loadConfig, mcpRequest, callTool, httpPost
+  client.ts         # Config, loadConfig, httpGet, httpPut, httpPost
   commands/
     search.ts       # cmdSearch
     read.ts         # cmdRead, cmdGet
@@ -1745,7 +1909,9 @@ Decisions made during planning. Reference these when implementing — don't re-l
 | CLI output | Human default, `--json` for machines, auto-detect non-TTY | JSON-only, human-only | Humans and agents use the same tool. Auto-detection means agents get JSON without asking when piped. |
 | CLI taxonomy | Flat verbs + noun-verb for resources | Nested namespaces (grove admin keys list) | Flat is fewer keystrokes. Noun-verb (grove keys create) is natural for CRUD on resources. No deeper nesting. |
 | Destructive CLI ops | Require `--yes` flag, no interactive prompts | Interactive confirmation | Agents can't answer prompts. `--yes` is scriptable and explicit. Without it, command shows what would happen and exits 1. |
-| CLI communication | All ops through server (MCP or HTTP) | Some local (SQLite reads) | Local ops break when CLI runs remotely. Move trails from local SQLite to HTTP (matching keys pattern). Only truly local ops (lint, snapshot) stay local. |
+| CLI communication | All ops through REST HTTP | MCP JSON-RPC, local SQLite | MCP requires stateful session handshake for every CLI invocation. REST is single-request. CLI migrates from MCP to REST. Local ops (lint, snapshot) stay local. |
+| REST API scope | Full read/write (PUT /v1/notes/) | Read-only (GET only) | Writes through MCP require session dance. REST PUT is a single HTTP call. Both call the same service layer — no protocol hop. |
+| REST write method | PUT (client specifies path) | POST (server generates ID) | Notes have user-specified paths. PUT is textbook REST for this. If-Match header for optimistic concurrency. |
 | Graceful shutdown | SIGTERM handler + write queue flush | None (PM2 kills after 1.6s) | PM2 restart was killing in-flight writes. Flush + 15s kill_timeout prevents data loss. |
 | Consumer discovery | `filtered_count` in responses | Hide filtering entirely | Consumers should know results are scoped so they can request broader access. |
 | Portal framework | Next.js on Vercel | Extend node:http server with HTML routes | API server stays minimal (raw node:http). Portal is a separate app with real framework needs (routing, auth middleware, SSR). Vercel deployment is free for this scale. |
