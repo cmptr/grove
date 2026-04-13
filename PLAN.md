@@ -172,83 +172,66 @@ Documentation is a first-class deliverable, not an afterthought. Agents reading 
 - Changing behavior of an existing endpoint/command? Update the relevant docs in the same PR.
 - Don't create docs PRs that are separate from the feature — docs ship with the feature.
 
-### Running Agents in tmux
+### Running Agents
 
-Each batch in an execution strategy has runnable commands. Open a tmux session, split panes for parallel agents, paste the commands.
-
-**Setup: create a tmux session for a batch**
+One command per batch. Launches parallel agents, waits for all to finish, merges in order, runs tests, reports results.
 
 ```bash
-# Example: Phase 4b Batch 1 (4 parallel agents)
-tmux new-session -s grove-4b -n agents
-
-# Split into 4 panes
-tmux split-window -h
-tmux split-window -v
-tmux select-pane -t 0 && tmux split-window -v
-
-# Or just open panes manually — the commands are what matter
+./scripts/run-batch.sh <batch-name>
 ```
 
-**Agent command pattern:**
-
-Each agent runs `claude` with a worktree (isolated branch) and a task prompt that references PLAN.md:
-
+**Available batches:**
 ```bash
-# Pane 1: Agent A
-claude --worktree "Read PLAN.md task P4-API-1. Implement it exactly per spec. Branch: agent/p4-api-1. Run tests before committing."
+./scripts/run-batch.sh --list
 
-# Pane 2: Agent B
-claude --worktree "Read PLAN.md task P4-API-2. Implement it exactly per spec. Branch: agent/p4-api-2. Run tests before committing."
-
-# Pane 3: Agent C
-claude --worktree "Read PLAN.md task P4-API-3. Implement it exactly per spec. Branch: agent/p4-api-3. Run tests before committing."
-
-# Pane 4: Agent D
-claude --worktree "Read PLAN.md task P4-API-4. Implement it exactly per spec. Branch: agent/p4-api-4. Run tests before committing."
+# Output:
+#   p4-prereq  (1 agent)    — CI + graceful shutdown
+#   p4b-1      (4 agents)   — backend APIs
+#   rest       (2 agents)   — REST write + status endpoints
+#   cli-a      (2 agents)   — --json, exit codes, MCP→REST
+#   cli-b      (1 agent)    — trails HTTP, --paths, --if-hash
+#   p5-tag     (1 agent)    — auto-tagging + backfill
+#   p7-1       (2 agents)   — discovery loop + ingest
+#   p7-2       (2 agents)   — extraction + neighbors
+#   p7-3       (2 agents)   — digest + bookmarks
+#   p9-1       (3 agents)   — roles + invite + scoped keys
+#   p9-2       (2 agents)   — user UI + trail sharing
+#   p9-3       (1 agent)    — share-a-note
 ```
 
-**Status pane — monitor progress:**
+**What it does:**
+1. Launches N `claude --worktree` agents in parallel (one per task)
+2. Each agent works in an isolated worktree on its own branch
+3. Waits for all agents to exit
+4. Merges branches in the order specified (lowest-conflict first)
+5. Runs `npm test` on the merged result
+6. Cleans up worktrees and branches
+7. Prints next steps (deploy command)
 
-Add a status pane that watches for agent branches and test results:
-
+**Logs:** Each agent's output goes to `.agents/<batch>_<branch>_<timestamp>.log`. Monitor with:
 ```bash
-# In a separate pane, loop to show branch status
-while true; do
-  clear
-  echo "=== Grove Agent Status $(date +%H:%M:%S) ==="
-  echo ""
-  for branch in $(git branch -a 2>/dev/null | grep "agent/" | sed 's/^[ *]*//' | sort); do
-    commits=$(git log main..$branch --oneline 2>/dev/null | wc -l | tr -d ' ')
-    last=$(git log $branch -1 --format="%s" 2>/dev/null)
-    echo "  $branch  ($commits commits)  $last"
-  done
-  echo ""
-  echo "=== Worktrees ==="
-  git worktree list 2>/dev/null | grep -v "^$(pwd) "
-  echo ""
-  echo "=== Tests ==="
-  npm test 2>&1 | tail -3
-  sleep 30
-done
+tail -f .agents/p4b-1_*.log
 ```
 
-**Merge sequence after a batch completes:**
+**If an agent fails:** The script reports which agent failed and exits. Fix the issue, then re-run the batch (it skips branches that already exist).
 
+**If a merge conflicts:** The script stops at the conflicting branch. Resolve manually (`git merge --continue`), then the script's remaining merges would need to be done by hand — or re-run the batch.
+
+**Execution order (full roadmap):**
 ```bash
-# Merge in order specified by execution strategy
-git checkout main
-git merge agent/p4-api-4   # no-conflict agent first
-git merge agent/p4-api-3
-git merge agent/p4-api-1
-git merge agent/p4-api-2   # highest-conflict-risk last
-npm test                    # verify everything together
-# Deploy manually when satisfied
+./scripts/run-batch.sh p4-prereq   # then deploy
+./scripts/run-batch.sh p4b-1       # then deploy
+./scripts/run-batch.sh rest        # then deploy
+./scripts/run-batch.sh cli-a       # then deploy
+./scripts/run-batch.sh cli-b       # then deploy
+./scripts/run-batch.sh p5-tag      # can run anytime
+./scripts/run-batch.sh p7-1        # then deploy
+./scripts/run-batch.sh p7-2        # then deploy
+./scripts/run-batch.sh p7-3        # then deploy
+./scripts/run-batch.sh p9-1        # then deploy
+./scripts/run-batch.sh p9-2        # then deploy
+./scripts/run-batch.sh p9-3        # then deploy
 ```
-
-**Quick reference — batch commands for each phase:**
-
-Execution strategies in each phase section below include the exact `claude` commands for each agent. Copy-paste into tmux panes.
 
 ---
 
