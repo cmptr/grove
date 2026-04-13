@@ -139,6 +139,51 @@ export function createTrail(opts: {
   return { trail, token: keyResult.token };
 }
 
+export function updateTrail(id: string, updates: {
+  name?: string;
+  description?: string;
+  enabled?: boolean;
+  allow_tags?: string[];
+  deny_tags?: string[];
+  allow_types?: string[];
+  deny_types?: string[];
+  allow_paths?: string[];
+  deny_paths?: string[];
+  rate_limit_reads?: number;
+  rate_limit_writes?: number;
+}): boolean {
+  const db = getDb();
+  const now = new Date().toISOString();
+
+  // Fetch existing row to merge config
+  const row = db.prepare("SELECT * FROM trails WHERE id = ?").get(id) as TrailRow | undefined;
+  if (!row) return false;
+
+  const existing = JSON.parse(row.config_json);
+
+  // Merge config fields
+  const newConfig = {
+    allow_tags: updates.allow_tags ?? existing.allow_tags,
+    deny_tags: updates.deny_tags ?? existing.deny_tags,
+    allow_types: updates.allow_types ?? existing.allow_types,
+    deny_types: updates.deny_types ?? existing.deny_types,
+    allow_paths: updates.allow_paths ?? existing.allow_paths,
+    deny_paths: updates.deny_paths ?? existing.deny_paths,
+    rate_limit_reads: updates.rate_limit_reads ?? existing.rate_limit_reads,
+    rate_limit_writes: updates.rate_limit_writes ?? existing.rate_limit_writes,
+  };
+
+  const newName = updates.name ?? row.name;
+  const newDesc = updates.description ?? row.description;
+  const newEnabled = updates.enabled !== undefined ? (updates.enabled ? 1 : 0) : row.enabled;
+
+  const result = db.prepare(
+    "UPDATE trails SET name = ?, description = ?, enabled = ?, config_json = ?, updated_at = ? WHERE id = ?"
+  ).run(newName, newDesc, newEnabled, JSON.stringify(newConfig), now, id);
+
+  return result.changes > 0;
+}
+
 export function disableTrail(id: string): boolean {
   const db = getDb();
   const result = db.prepare("UPDATE trails SET enabled = 0, updated_at = ? WHERE id = ?").run(new Date().toISOString(), id);
