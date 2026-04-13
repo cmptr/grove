@@ -103,10 +103,7 @@ export function verifyMagicLink(token: string, email: string): VerifyResult | nu
 
   if (!user) return null;
 
-  // Update last login
-  db.prepare("UPDATE users SET last_login_at = ? WHERE id = ?").run(new Date().toISOString(), user.id);
-
-  // Create session
+  // Create session (also updates last_login_at)
   const sessionToken = createSession(user.id);
 
   return { sessionToken, user };
@@ -134,6 +131,10 @@ export function createSession(userId: string): string {
     new Date(now.getTime() + SESSION_ABSOLUTE_TTL_MS).toISOString(),
     now.toISOString(),
   );
+
+  // Track last login for the user (magic link flow does this in verifyMagicLink,
+  // but API key / auth code flows go through createSession directly)
+  db.prepare("UPDATE users SET last_login_at = ? WHERE id = ?").run(now.toISOString(), userId);
 
   return token;
 }

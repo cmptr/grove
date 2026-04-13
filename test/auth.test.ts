@@ -218,6 +218,19 @@ describe("auth", () => {
       expect(user!.email).toBe("admin@example.com");
     });
 
+    it("updates last_login_at on the user", () => {
+      const db = getDb();
+      const before = db.prepare("SELECT last_login_at FROM users WHERE id = 'user_00000000'").get() as any;
+      expect(before.last_login_at).toBeNull();
+
+      createSession("user_00000000");
+
+      const after = db.prepare("SELECT last_login_at FROM users WHERE id = 'user_00000000'").get() as any;
+      expect(after.last_login_at).not.toBeNull();
+      const loginTime = new Date(after.last_login_at).getTime();
+      expect(Math.abs(loginTime - Date.now())).toBeLessThan(5000);
+    });
+
     it("rejects expired session", () => {
       const db = getDb();
       const token = randomBytes(32).toString("hex");

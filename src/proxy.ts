@@ -1007,6 +1007,19 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // ── Admin endpoints (session cookie or Bearer) ──
+    if (url.pathname === "/v1/admin/users" && req.method === "GET") {
+      const admin = adminAuth(req);
+      if (!admin) { sendJson(res, 401, { error: "unauthorized" }); return; }
+
+      const db = getDb();
+      const users = db.prepare("SELECT id, username, email, created_at, last_login_at FROM users").all() as {
+        id: string; username: string | null; email: string | null; created_at: string; last_login_at: string | null;
+      }[];
+      sendJson(res, 200, { users });
+      return;
+    }
+
     // Auth — Bearer token required
     const restAuth = req.headers.authorization;
     const restToken = restAuth?.startsWith("Bearer ") ? restAuth.slice(7) : null;
