@@ -141,6 +141,7 @@ echo ""
 
 # ── Launch agents ─────────────────────────────────────────────────
 
+START_TIME=$(date +%s)
 PIDS=()
 LOGFILES=()
 for i in "${!BRANCHES[@]}"; do
@@ -151,9 +152,9 @@ for i in "${!BRANCHES[@]}"; do
   log "Launching agent $((i+1))/$AGENT_COUNT: $branch"
 
   # Launch claude in worktree mode, backgrounded.
-  # Use `script` to allocate a PTY so output streams unbuffered
-  # and `tail -f` on the logfile works in real-time.
-  script -q "$logfile" claude --worktree --print "$prompt" &
+  # Output is buffered (appears when agent finishes), but the progress
+  # monitor below polls log file sizes to show liveness.
+  claude --worktree --print "$prompt" > "$logfile" 2>&1 &
   PIDS+=($!)
   LOGFILES+=("$logfile")
 done
@@ -173,24 +174,54 @@ progress() {
 
     # Check if still running
     if kill -0 "$pid" 2>/dev/null; then
-      status="⏳"
+      status="⏳ running"
     else
-      status="✓"
+      wait "$pid" 2>/dev/null && status="✅ done" || status="❌ failed"
     fi
 
-    # Get log size (human-readable)
-    size="0"
+    # Get log size
+    size="0B"
     if [[ -f "$logfile" ]]; then
-      size=$(du -h "$logfile" 2>/dev/null | cut -f1 | tr -d ' ')
+      bytes=$(wc -c < "$logfile" 2>/dev/null | tr -d ' ')
+      if [[ "$bytes" -gt 1048576 ]]; then
+        size="$((bytes / 1048576))MB"
+      elif [[ "$bytes" -gt 1024 ]]; then
+        size="$((bytes / 1024))KB"
+      else
+        size="${bytes}B"
+      fi
     fi
 
-    # Get last meaningful line (strip control codes, blanks)
-    last=""
-    if [[ -f "$logfile" ]]; then
-      last=$(cat "$logfile" 2>/dev/null | col -b 2>/dev/null | sed 's/^[[:space:]]*//' | grep -v '^$' | tail -1 | cut -c1-80)
-    fi
+    # Check for worktree activity as a secondary progress signal
+    detail=""
+    # Look for any worktree that has commits (agent is working)
+    for wt_dir in "$REPO_DIR"/.claude/worktrees/*/; do
+      if [[ -d "$wt_dir" ]]; then
+        wt_branch=$(git -C "$wt_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+        if [[ -n "$wt_branch" ]]; then
+          commits=$(git -C "$wt_dir" log --oneline main..HEAD 2>/dev/null | wc -l | tr -d ' ')
+          if [[ "$commits" -gt 0 ]]; then
+            last_msg=$(git -C "$wt_dir" log -1 --format="%s" 2>/dev/null | cut -c1-60)
+            detail="$commits commit(s): $last_msg"
+          else
+            changed=$(git -C "$wt_dir" diff --stat 2>/dev/null | tail -1 | tr -d ' ')
+            if [[ -n "$changed" ]]; then
+              detail="editing: $changed"
+            else
+              detail="worktree active"
+            fi
+          fi
+        fi
+      fi
+    done
 
-    echo "  $status $branch  ($size)  ${last:-<starting...>}"
+    # Elapsed time for this agent
+    now=$(date +%s)
+    elapsed=$(( now - START_TIME ))
+    mins=$(( elapsed / 60 ))
+    secs=$(( elapsed % 60 ))
+
+    echo "  $status  ${mins}m${secs}s  log:${size}  ${detail:-<starting...>}"
   done
 }
 
