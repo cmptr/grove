@@ -424,7 +424,7 @@ export async function handleSearch(query: string, limit: number = 10, trail?: Tr
   return filtered.slice(0, limit).map(({ vault_path: _, real_path: _rp, ...rest }) => rest);
 }
 
-const VALID_STATS_SECTIONS = new Set(["vault", "freshness", "graph", "index", "lifecycle", "search", "server"]);
+const VALID_STATS_SECTIONS = new Set(["vault", "freshness", "graph", "index", "lifecycle", "git", "search", "server"]);
 
 /**
  * Get precomputed vault statistics, optionally filtered by section.
@@ -455,6 +455,7 @@ export function handleStats(
   if (include("graph")) result.graph = stats.graph;
   if (include("index")) result.index = stats.index;
   if (include("lifecycle")) result.lifecycle = stats.lifecycle;
+  if (include("git")) result.git = stats.git;
 
   // Search stats are admin-only
   if (include("search") && isAdmin) {

@@ -5,6 +5,7 @@ import {
   mkdirSync,
   rmSync,
 } from "node:fs";
+import { execSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -88,6 +89,7 @@ describe("computeVaultStats", () => {
     expect(stats).toHaveProperty("graph");
     expect(stats).toHaveProperty("index");
     expect(stats).toHaveProperty("lifecycle");
+    expect(stats).toHaveProperty("git");
     expect(stats).toHaveProperty("computed_at");
     expect(typeof stats.computed_at).toBe("string");
   });
@@ -135,6 +137,53 @@ describe("computeVaultStats", () => {
     expect(index.vault_docs).toBe(7);
     expect(index.drift).toBe(7);
     expect(index.last_reindex).toBeNull();
+  });
+
+  it("git section returns null for non-git directory", () => {
+    expect(stats.git).toBeNull();
+  });
+});
+
+describe("git section", () => {
+  let gitVault: string;
+  let gitStats: VaultStats;
+
+  beforeAll(async () => {
+    gitVault = mkdtempSync(join(tmpdir(), "grove-git-test-"));
+
+    // Initialize a git repo with a commit
+    const opts = { cwd: gitVault };
+    execSync("git init -b main", opts);
+    execSync("git config user.email test@test.com", opts);
+    execSync("git config user.name Test", opts);
+
+    const notePath = join(gitVault, "note.md");
+    writeFileSync(notePath, "---\ntype: concept\ntags: [test]\n---\n# Test\n");
+    execSync("git add .", opts);
+    execSync('git commit -m "initial commit"', opts);
+
+    gitStats = await computeVaultStats(gitVault);
+  });
+
+  afterAll(() => {
+    rmSync(gitVault, { recursive: true, force: true });
+  });
+
+  it("returns git info for a git-tracked vault", () => {
+    expect(gitStats.git).not.toBeNull();
+    const git = gitStats.git!;
+    expect(git.branch).toBe("main");
+    expect(git.last_commit_msg).toBe("initial commit");
+    expect(git.uncommitted_changes).toBe(0);
+    // ISO 8601 date
+    expect(git.last_commit_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it("counts uncommitted changes", async () => {
+    writeFileSync(join(gitVault, "dirty.md"), "# Dirty\n");
+    const fresh = await computeVaultStats(gitVault);
+    expect(fresh.git).not.toBeNull();
+    expect(fresh.git!.uncommitted_changes).toBeGreaterThanOrEqual(1);
   });
 });
 
