@@ -144,6 +144,16 @@ CREATE TABLE IF NOT EXISTS auth_codes (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS shared_links (
+  id TEXT PRIMARY KEY,
+  note_path TEXT NOT NULL,
+  created_by TEXT NOT NULL REFERENCES users(id),
+  expires_at TEXT NOT NULL,
+  max_views INTEGER DEFAULT 100,
+  view_count INTEGER DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS discovery_queue (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   path TEXT NOT NULL,

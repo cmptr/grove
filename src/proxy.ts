@@ -52,6 +52,7 @@ import {
 } from "./rest.js";
 import { startStatsTimer } from "./vault-stats.js";
 import { inviteUser } from "./invite.js";
+import { createShareLink, resolveShareLink } from "./share.js";
 
 const QMD_PORT = Number(process.env.QMD_PORT ?? 8181);
 const GROVE_SERVER_PORT = Number(process.env.GROVE_SERVER_PORT ?? 8190);
@@ -1119,6 +1120,70 @@ const server = createServer(async (req, res) => {
           sendJson(res, 500, { error: msg });
         }
       }
+      return;
+    }
+
+    // POST /v1/admin/share — create a share-a-note link (admin only)
+    if (url.pathname === "/v1/admin/share" && req.method === "POST") {
+      const admin = adminAuth(req);
+      if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
+
+      let body: string;
+      try { body = await readBody(req); } catch {
+        sendJson(res, 400, { error: "read error" });
+        return;
+      }
+      let parsed: any;
+      try { parsed = JSON.parse(body); } catch {
+        sendJson(res, 400, { error: "invalid json" });
+        return;
+      }
+
+      const { note_path, ttl_days, max_views } = parsed;
+      if (!note_path || typeof note_path !== "string") {
+        sendJson(res, 400, { error: "note_path is required" });
+        return;
+      }
+
+      const result = createShareLink(note_path, admin.userId, GROVE_URL, {
+        ttl_days: typeof ttl_days === "number" ? ttl_days : undefined,
+        max_views: typeof max_views === "number" ? max_views : undefined,
+      });
+      sendJson(res, 200, result);
+      return;
+    }
+
+    // GET /v1/share/:id — resolve a share link (returns note_path + allowed backlinks)
+    // Requires session auth (the viewer must be signed in)
+    const shareMatch = url.pathname.match(/^\/v1\/share\/([^/]+)$/);
+    if (shareMatch && req.method === "GET") {
+      // Session auth — viewer must be signed in
+      const sessionToken = getSessionFromCookie(req);
+      const restAuth2 = req.headers.authorization;
+      const restToken2 = restAuth2?.startsWith("Bearer ") ? restAuth2.slice(7) : null;
+
+      const hasSession = sessionToken ? !!validateSession(sessionToken) : false;
+      const hasBearer = restToken2 ? !!validateToken(restToken2) : false;
+
+      if (!hasSession && !hasBearer) {
+        sendJson(res, 401, { error: "sign in required to view shared notes" });
+        return;
+      }
+
+      const shareId = decodeURIComponent(shareMatch[1]);
+      const link = resolveShareLink(shareId);
+      if (!link) {
+        sendJson(res, 404, { error: "This link has expired or is no longer available" });
+        return;
+      }
+
+      sendJson(res, 200, {
+        id: link.id,
+        note_path: link.note_path,
+        expires_at: link.expires_at,
+        view_count: link.view_count,
+        max_views: link.max_views,
+      });
       return;
     }
 
