@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 /**
- * Grove CLI — talk to the Grove MCP server from the terminal.
+ * Grove CLI — talk to the Grove knowledge API from the terminal.
  *
  * Usage:
  *   grove search "taste graph"
@@ -10,6 +10,9 @@
  *   grove status
  *   grove diagnostics
  *   grove write "Inbox/idea.md" --type concept
+ *
+ * Flags:
+ *   --json   Force JSON output (auto-enabled when stdout is not a TTY)
  */
 
 import { request as httpsRequest } from "node:https";
@@ -32,23 +35,44 @@ interface Config {
 }
 
 function loadConfig(): Config {
+  const envServer = process.env.GROVE_SERVER;
+  const envToken = process.env.GROVE_TOKEN;
+  if (envServer && envToken) return { server: envServer, token: envToken };
+
   const path = join(homedir(), ".grove", "cli.json");
   try {
-    return JSON.parse(readFileSync(path, "utf-8"));
+    const file = JSON.parse(readFileSync(path, "utf-8"));
+    return {
+      server: envServer ?? file.server,
+      token: envToken ?? file.token,
+    };
   } catch {
-    // Missing or invalid config file — can't proceed without server/token
-    console.error(`Config not found: ${path}`);
-    console.error(`Create it with: { "server": "https://api.grove.md", "token": "grove_live_..." }`);
-    process.exit(1);
+    throw new CliError("config_missing", `Config not found: ${path}\nCreate it with: { "server": "https://api.grove.md", "token": "grove_live_..." }`, 2);
   }
 }
 
+// ── CliError ────────────────────────────────────────────────────
+
+export class CliError extends Error {
+  constructor(public code: string, message: string, public exitCode: number = 1) {
+    super(message);
+  }
+}
+
+// Exit codes:
+//   0 = success
+//   1 = not_found, bad_request, usage errors
+//   2 = auth_error, config_missing
+//   3 = server_error, connection_refused
+
 // ── HTTP helpers ─────────────────────────────────────────────────
 
-let sessionId: string | undefined;
-
-function post(url: URL, body: unknown, headers: Record<string, string> = {}): Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: string }> {
-  const data = JSON.stringify(body);
+function httpDo(
+  method: string,
+  url: URL,
+  headers: Record<string, string>,
+  body?: string,
+): Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: string }> {
   const isHttps = url.protocol === "https:";
   const doRequest = isHttps ? httpsRequest : httpRequest;
 
@@ -57,12 +81,11 @@ function post(url: URL, body: unknown, headers: Record<string, string> = {}): Pr
       {
         hostname: url.hostname,
         port: url.port || (isHttps ? 443 : 80),
-        path: url.pathname,
-        method: "POST",
+        path: url.pathname + url.search,
+        method,
         headers: {
-          "Content-Type": "application/json",
-          "Content-Length": Buffer.byteLength(data),
-          "Accept": "application/json, text/event-stream",
+          ...(body != null ? { "Content-Type": "application/json", "Content-Length": String(Buffer.byteLength(body)) } : {}),
+          "Accept": "application/json",
           ...headers,
         },
       },
@@ -78,45 +101,70 @@ function post(url: URL, body: unknown, headers: Record<string, string> = {}): Pr
         });
       },
     );
-    req.on("error", reject);
-    req.write(data);
+    req.on("error", (err: NodeJS.ErrnoException) => {
+      if (err.code === "ECONNREFUSED") {
+        reject(new CliError("connection_refused", `Cannot connect to ${url.origin} — is the server running?`, 3));
+      } else {
+        reject(new CliError("server_error", err.message, 3));
+      }
+    });
+    if (body != null) req.write(body);
     req.end();
   });
 }
 
-// ── MCP JSON-RPC ─────────────────────────────────────────────────
+function handleHttpStatus(res: { status: number; body: string }): never | void {
+  if (res.status === 401) throw new CliError("auth_error", "Authentication failed. Check your token in ~/.grove/cli.json", 2);
+  if (res.status === 403) throw new CliError("auth_error", "Permission denied.", 2);
+  if (res.status === 404) {
+    const msg = tryParseJson(res.body)?.error ?? "Not found";
+    throw new CliError("not_found", msg, 1);
+  }
+  if (res.status === 429) throw new CliError("rate_limited", "Rate limited. Try again shortly.", 1);
+  if (res.status >= 500) throw new CliError("server_error", `Server error (${res.status})`, 3);
+}
 
+function tryParseJson(s: string): any {
+  try { return JSON.parse(s); } catch { return null; }
+}
+
+// ── REST API client ─────────────────────────────────────────────
+
+async function restGet(config: Config, path: string): Promise<any> {
+  const url = new URL(path, config.server);
+  const res = await httpDo("GET", url, { Authorization: `Bearer ${config.token}` });
+  handleHttpStatus(res);
+  const data = tryParseJson(res.body);
+  if (data == null) throw new CliError("server_error", `Unexpected response (${res.status}): ${res.body.slice(0, 200)}`, 3);
+  return data;
+}
+
+// ── MCP JSON-RPC (fallback for endpoints without REST routes) ───
+
+let sessionId: string | undefined;
 let rpcId = 0;
 
 async function mcpRequest(config: Config, method: string, params: Record<string, unknown> = {}): Promise<any> {
   const url = new URL("/mcp", config.server);
   const headers: Record<string, string> = {
-    "Authorization": `Bearer ${config.token}`,
+    Authorization: `Bearer ${config.token}`,
+    Accept: "application/json, text/event-stream",
   };
   if (sessionId) headers["mcp-session-id"] = sessionId;
 
-  const body = { jsonrpc: "2.0", id: ++rpcId, method, params };
-  const res = await post(url, body, headers);
+  const body = JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method, params });
+  const res = await httpDo("POST", url, headers, body);
+  handleHttpStatus(res);
 
-  if (res.status === 401) {
-    console.error("Authentication failed. Check your token in ~/.grove/cli.json");
-    process.exit(1);
-  }
-
-  // Capture session ID from response
   const sid = res.headers["mcp-session-id"];
   if (sid) sessionId = Array.isArray(sid) ? sid[0] : sid;
 
-  try {
-    return JSON.parse(res.body);
-  } catch {
-    // Server returned non-JSON (likely HTML error page or empty response)
-    console.error(`Unexpected response (${res.status}): ${res.body.slice(0, 200)}`);
-    process.exit(1);
-  }
+  const data = tryParseJson(res.body);
+  if (data == null) throw new CliError("server_error", `Unexpected response (${res.status}): ${res.body.slice(0, 200)}`, 3);
+  return data;
 }
 
-async function initialize(config: Config): Promise<void> {
+async function mcpInitialize(config: Config): Promise<void> {
   await mcpRequest(config, "initialize", {
     protocolVersion: "2025-03-26",
     capabilities: {},
@@ -124,23 +172,18 @@ async function initialize(config: Config): Promise<void> {
   });
 }
 
-async function callTool(config: Config, name: string, args: Record<string, unknown>): Promise<string> {
-  const res = await mcpRequest(config, "tools/call", { name, arguments: args });
-  if (res.error) {
-    console.error(`Error: ${res.error.message ?? JSON.stringify(res.error)}`);
-    process.exit(1);
-  }
+async function mcpCall(config: Config, tool: string, args: Record<string, unknown>): Promise<string> {
+  if (!sessionId) await mcpInitialize(config);
+  const res = await mcpRequest(config, "tools/call", { name: tool, arguments: args });
+  if (res.error) throw new CliError("server_error", res.error.message ?? JSON.stringify(res.error), 3);
   const content = res.result?.content?.[0]?.text;
-  if (content == null) {
-    console.error("No content in response");
-    process.exit(1);
-  }
+  if (content == null) throw new CliError("server_error", "No content in response", 3);
   return content;
 }
 
 // ── Argument parsing ─────────────────────────────────────────────
 
-function parseArgs(argv: string[]): { command: string; positional: string; flags: Record<string, string | boolean> } {
+export function parseArgs(argv: string[]): { command: string; positional: string; flags: Record<string, string | boolean> } {
   const command = argv[0] ?? "help";
   let positional = "";
   const flags: Record<string, string | boolean> = {};
@@ -170,214 +213,140 @@ function parseArgs(argv: string[]): { command: string; positional: string; flags
     }
   }
 
+  // Auto-detect non-TTY → JSON mode
+  if (!process.stdout.isTTY) flags.json = true;
+
   return { command, positional, flags };
 }
 
-// ── Output formatters ────────────────────────────────────────────
+// ── Human-readable formatters ───────────────────────────────────
 
-function formatSearch(raw: string): string {
-  // The query tool returns pre-formatted text from formatResults
-  return raw;
+function formatSearch(data: { results: any[]; count: number }): string {
+  if (data.results.length === 0) return "No results.";
+  const lines: string[] = [];
+  for (const r of data.results) {
+    lines.push(`${r.path}`);
+    if (r.snippet) lines.push(`  ${r.snippet.slice(0, 120)}`);
+    lines.push("");
+  }
+  lines.push(`${data.count} result${data.count === 1 ? "" : "s"}`);
+  return lines.join("\n");
 }
 
-function formatRead(raw: string): string {
-  try {
-    const data = JSON.parse(raw);
-    if (data.error || raw.startsWith("Note not found")) return raw;
-    const lines: string[] = [];
-    if (data.resolved_from) lines.push(`(resolved from "${data.resolved_from}")`);
-    lines.push(`path: ${data.path}`);
-    if (data.content_hash) lines.push(`hash: ${data.content_hash}`);
+function formatRead(data: { path: string; frontmatter: Record<string, unknown>; content: string; content_hash: string; resolved_from?: string }): string {
+  const lines: string[] = [];
+  if (data.resolved_from) lines.push(`(resolved from "${data.resolved_from}")`);
+  lines.push(`path: ${data.path}`);
+  if (data.content_hash) lines.push(`hash: ${data.content_hash}`);
+  lines.push("---");
+  if (data.frontmatter && Object.keys(data.frontmatter).length > 0) {
     lines.push("---");
-    // Reconstruct frontmatter + body
-    if (data.frontmatter && Object.keys(data.frontmatter).length > 0) {
-      lines.push("---");
-      for (const [k, v] of Object.entries(data.frontmatter)) {
-        lines.push(`${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`);
+    for (const [k, v] of Object.entries(data.frontmatter)) {
+      lines.push(`${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`);
+    }
+    lines.push("---");
+  }
+  if (data.content) lines.push(data.content);
+  return lines.join("\n");
+}
+
+function formatList(data: { count: number; entries: any[] }): string {
+  const entries = data.entries;
+  if (entries.length === 0) return "No notes found.";
+
+  const lines = [`${data.count} notes\n`];
+  const pathW = Math.min(60, Math.max(...entries.map((n: any) => (n.path as string).length)));
+  for (const n of entries) {
+    const path = (n.path as string).padEnd(pathW);
+    const type = (n.type ?? "-").padEnd(10);
+    const mod = n.modified_at ? new Date(n.modified_at).toISOString().slice(0, 10) : "-";
+    let line = `  ${path}  ${type}  ${mod}`;
+    if (n.aliases?.length) line += `  (${n.aliases.join(", ")})`;
+    lines.push(line);
+  }
+  return lines.join("\n");
+}
+
+function formatHistory(data: { entries: any[] }): string {
+  const entries = data.entries;
+  if (entries.length === 0) return "No recent changes.";
+
+  const lines: string[] = [];
+  for (const e of entries) {
+    const date = e.date ? new Date(e.date).toISOString().slice(0, 16).replace("T", " ") : "-";
+    const msg = e.message ?? "";
+    const files = (e.files ?? []).slice(0, 3).join(", ");
+    lines.push(`  ${date}  ${msg}`);
+    if (files) lines.push(`             ${files}`);
+  }
+  return lines.join("\n");
+}
+
+function formatStatus(data: Record<string, unknown>): string {
+  const lines: string[] = [];
+  for (const [k, v] of Object.entries(data)) {
+    if (typeof v === "object" && v !== null) {
+      lines.push(`${k}:`);
+      for (const [k2, v2] of Object.entries(v as Record<string, unknown>)) {
+        lines.push(`  ${k2}: ${v2}`);
       }
-      lines.push("---");
+    } else {
+      lines.push(`${k}: ${v}`);
     }
-    if (data.content) lines.push(data.content);
-    return lines.join("\n");
-  } catch {
-    // Response isn't structured JSON — show raw text as-is
-    return raw;
   }
+  return lines.join("\n");
 }
 
-function formatList(raw: string): string {
-  try {
-    const data = JSON.parse(raw);
-    const notes = data.notes ?? [];
-    if (notes.length === 0) return "No notes found.";
+function formatDiagnostics(data: Record<string, unknown>): string {
+  const lines: string[] = [];
+  lines.push(`Total notes: ${data.total_notes}\n`);
 
-    const lines = [`${data.count} notes\n`];
-    const pathW = Math.min(60, Math.max(...notes.map((n: any) => (n.path as string).length)));
-    for (const n of notes) {
-      const path = (n.path as string).padEnd(pathW);
-      const type = (n.type ?? "-").padEnd(10);
-      const mod = n.modified_at ? new Date(n.modified_at).toISOString().slice(0, 10) : "-";
-      let line = `  ${path}  ${type}  ${mod}`;
-      if (n.aliases?.length) line += `  (${n.aliases.join(", ")})`;
-      lines.push(line);
+  for (const category of ["orphans", "broken_links", "missing_frontmatter", "stale_inbox"] as const) {
+    const section = data[category] as any;
+    if (!section) continue;
+    const label = category.replace(/_/g, " ");
+    lines.push(`${label}: ${section.count}`);
+    const items = section.notes ?? section.links ?? [];
+    for (const item of items.slice(0, 5)) {
+      lines.push(`  - ${item}`);
     }
-    return lines.join("\n");
-  } catch {
-    // Response isn't structured JSON — show raw text as-is
-    return raw;
+    if (items.length > 5) lines.push(`  ... and ${items.length - 5} more`);
+    lines.push("");
   }
+  return lines.join("\n");
 }
 
-function formatHistory(raw: string): string {
-  try {
-    const data = JSON.parse(raw);
-    const entries = data.entries ?? [];
-    if (entries.length === 0) return "No recent changes.";
+// ── Commands (return structured data) ───────────────────────────
 
-    const lines: string[] = [];
-    for (const e of entries) {
-      const date = e.date ? new Date(e.date).toISOString().slice(0, 16).replace("T", " ") : "-";
-      const msg = e.message ?? "";
-      const files = (e.files ?? []).slice(0, 3).join(", ");
-      lines.push(`  ${date}  ${msg}`);
-      if (files) lines.push(`             ${files}`);
-    }
-    return lines.join("\n");
-  } catch {
-    // Response isn't structured JSON — show raw text as-is
-    return raw;
-  }
+interface CmdResult {
+  ok: true;
+  [key: string]: unknown;
+  _fmt?: (data: any) => string;
 }
 
-function formatStatus(raw: string): string {
-  try {
-    const data = JSON.parse(raw);
-    const lines: string[] = [];
-    for (const [k, v] of Object.entries(data)) {
-      if (typeof v === "object" && v !== null) {
-        lines.push(`${k}:`);
-        for (const [k2, v2] of Object.entries(v as Record<string, unknown>)) {
-          lines.push(`  ${k2}: ${v2}`);
-        }
-      } else {
-        lines.push(`${k}: ${v}`);
-      }
-    }
-    return lines.join("\n");
-  } catch {
-    // Response isn't structured JSON — show raw text as-is
-    return raw;
-  }
-}
-
-function formatDiagnostics(raw: string): string {
-  try {
-    const data = JSON.parse(raw);
-    const lines: string[] = [];
-    lines.push(`Total notes: ${data.total_notes}\n`);
-
-    for (const category of ["orphans", "broken_links", "missing_frontmatter", "stale_inbox"] as const) {
-      const section = data[category];
-      if (!section) continue;
-      const label = category.replace(/_/g, " ");
-      lines.push(`${label}: ${section.count}`);
-      const items = section.notes ?? section.links ?? [];
-      for (const item of items.slice(0, 5)) {
-        lines.push(`  - ${item}`);
-      }
-      if (items.length > 5) lines.push(`  ... and ${items.length - 5} more`);
-      lines.push("");
-    }
-    return lines.join("\n");
-  } catch {
-    // Response isn't structured JSON — show raw text as-is
-    return raw;
-  }
-}
-
-// ── Key management (remote, via /keys API) ──────────────────
-
-function keysPost(config: Config, body: unknown): Promise<{ status: number; body: string }> {
-  const url = new URL("/keys", config.server);
-  return post(url, body, { "Authorization": `Bearer ${config.token}` });
-}
-
-async function cmdKeysList(config: Config) {
-  const res = await keysPost(config, { action: "list" });
-  if (res.status === 401) { console.error("Unauthorized. Check your token in ~/.grove/cli.json"); process.exit(1); }
-  const data = JSON.parse(res.body);
-  const keys = data.keys ?? [];
-  if (keys.length === 0) { console.log("No keys."); return; }
-
-  console.log("\nID            Name                Scopes          Vault   Created      Last used");
-  console.log("─".repeat(90));
-  for (const k of keys) {
-    const created = k.created_at?.slice(0, 10) ?? "-";
-    const lastUsed = k.last_used_at?.slice(0, 10) ?? "never";
-    console.log(
-      `${(k.id ?? "").padEnd(14)}${(k.name ?? "").padEnd(20)}${(k.scopes?.join(",") ?? "").padEnd(16)}${(k.vault_id ?? "").padEnd(8)}${created.padEnd(13)}${lastUsed}`
-    );
-  }
-  console.log();
-}
-
-async function cmdKeysCreate(config: Config, name: string) {
-  if (!name) { console.error("Usage: grove keys create <name>"); process.exit(1); }
-  const res = await keysPost(config, { action: "create", name });
-  if (res.status === 401) { console.error("Unauthorized. Check your token in ~/.grove/cli.json"); process.exit(1); }
-  const data = JSON.parse(res.body);
-  console.log(`\nKey created: ${data.id}`);
-  console.log(`Name:        ${data.name}`);
-  console.log(`\nToken (shown once, save it now):\n`);
-  console.log(`  ${data.token}\n`);
-}
-
-async function cmdKeysRevoke(config: Config, id: string) {
-  if (!id) { console.error("Usage: grove keys revoke <key-id>"); process.exit(1); }
-  const res = await keysPost(config, { action: "revoke", id });
-  if (res.status === 401) { console.error("Unauthorized. Check your token in ~/.grove/cli.json"); process.exit(1); }
-  const data = JSON.parse(res.body);
-  if (data.revoked) {
-    console.log(`Revoked key: ${data.revoked}`);
-  } else {
-    console.error(`Failed to revoke: ${JSON.stringify(data)}`);
-    process.exit(1);
-  }
-}
-
-// ── Commands ─────────────────────────────────────────────────────
-
-async function cmdSearch(config: Config, query: string, flags: Record<string, string | boolean>) {
-  if (!query) { console.error("Usage: grove search <query> [-n limit]"); process.exit(1); }
+async function cmdSearch(config: Config, query: string, flags: Record<string, string | boolean>): Promise<CmdResult> {
+  if (!query) throw new CliError("bad_request", "Usage: grove search <query> [-n limit]", 1);
   const limit = Number(flags.n) || 10;
-  const raw = await callTool(config, "query", {
-    searches: [
-      { type: "lex", query },
-      { type: "vec", query },
-    ],
-    intent: query,
-    limit,
-  });
-  console.log(formatSearch(raw));
+  const data = await restGet(config, `/v1/search?q=${encodeURIComponent(query)}&limit=${limit}`);
+  const results = data.results ?? [];
+  return { ok: true, results, count: results.length, _fmt: formatSearch };
 }
 
-async function cmdRead(config: Config, file: string) {
-  if (!file) { console.error("Usage: grove read <path-or-title>"); process.exit(1); }
-  const raw = await callTool(config, "get", { file });
-  console.log(formatRead(raw));
+async function cmdRead(config: Config, file: string): Promise<CmdResult> {
+  if (!file) throw new CliError("bad_request", "Usage: grove read <path-or-title>", 1);
+  const data = await restGet(config, `/v1/notes/${encodeURIComponent(file)}`);
+  return { ok: true, ...data, _fmt: formatRead };
 }
 
-async function cmdList(config: Config, pattern: string, flags: Record<string, string | boolean>) {
-  if (!pattern) { console.error("Usage: grove list <glob-pattern> [--aliases]"); process.exit(1); }
-  const raw = await callTool(config, "list_notes", {
-    pattern,
-    include_aliases: !!flags.aliases,
-  });
-  console.log(formatList(raw));
+async function cmdList(config: Config, pattern: string, flags: Record<string, string | boolean>): Promise<CmdResult> {
+  if (!pattern) throw new CliError("bad_request", "Usage: grove list <glob-pattern> [--aliases]", 1);
+  const data = await restGet(config, `/v1/list?prefix=${encodeURIComponent(pattern)}`);
+  const entries = data.entries ?? [];
+  return { ok: true, entries, count: entries.length, _fmt: formatList };
 }
 
-async function cmdWrite(config: Config, path: string, flags: Record<string, string | boolean>) {
-  if (!path) { console.error("Usage: grove write <path> --type <type> [--tags tag1,tag2]"); process.exit(1); }
+async function cmdWrite(config: Config, path: string, flags: Record<string, string | boolean>): Promise<CmdResult> {
+  if (!path) throw new CliError("bad_request", "Usage: grove write <path> --type <type> [--tags tag1,tag2]", 1);
   const type = (flags.type as string) ?? "concept";
   const tags = flags.tags
     ? (flags.tags as string).split(",").map((t) => t.trim())
@@ -389,136 +358,186 @@ async function cmdWrite(config: Config, path: string, flags: Record<string, stri
   await new Promise<void>((resolve) => process.stdin.on("end", resolve));
   const content = Buffer.concat(chunks).toString().trim();
 
-  if (!content) { console.error("No content provided on stdin."); process.exit(1); }
+  if (!content) throw new CliError("bad_request", "No content provided on stdin.", 1);
 
-  const raw = await callTool(config, "write_note", {
+  // Write still uses MCP (no PUT /v1/notes endpoint yet)
+  const raw = await mcpCall(config, "write_note", {
     path,
     frontmatter: JSON.stringify({ type, tags }),
     content,
   });
-  console.log(formatStatus(raw));
+  const data = tryParseJson(raw) ?? { message: raw };
+  return { ok: true, ...data, _fmt: formatStatus };
 }
 
-async function cmdHistory(config: Config, flags: Record<string, string | boolean>) {
+async function cmdHistory(config: Config, flags: Record<string, string | boolean>): Promise<CmdResult> {
   const since = (flags.since as string) ?? "1 week ago";
-  const raw = await callTool(config, "vault_status", { mode: "history", since });
-  console.log(formatHistory(raw));
+  // History still uses MCP (no REST endpoint yet)
+  const raw = await mcpCall(config, "vault_status", { mode: "history", since });
+  const data = tryParseJson(raw) ?? { entries: [] };
+  return { ok: true, ...data, _fmt: formatHistory };
 }
 
-async function cmdStatus(config: Config) {
-  const raw = await callTool(config, "vault_status", { mode: "health" });
-  console.log(formatStatus(raw));
+async function cmdStatus(config: Config): Promise<CmdResult> {
+  const data = await restGet(config, "/v1/stats");
+  return { ok: true, ...data, _fmt: formatStatus };
 }
 
-async function cmdDiagnostics(config: Config) {
-  const raw = await callTool(config, "vault_status", { mode: "diagnostics" });
-  console.log(formatDiagnostics(raw));
+async function cmdDiagnostics(config: Config): Promise<CmdResult> {
+  // Diagnostics still uses MCP (no REST endpoint yet)
+  const raw = await mcpCall(config, "vault_status", { mode: "diagnostics" });
+  const data = tryParseJson(raw) ?? {};
+  return { ok: true, ...data, _fmt: formatDiagnostics };
 }
 
-async function cmdSync(config: Config, dir: string, flags: Record<string, string | boolean>) {
-  if (!dir) { console.error("Usage: grove sync <archive-sources-dir> [--dry-run]"); process.exit(1); }
+async function cmdSync(config: Config, dir: string, flags: Record<string, string | boolean>): Promise<CmdResult> {
+  if (!dir) throw new CliError("bad_request", "Usage: grove sync <archive-sources-dir> [--dry-run]", 1);
   const dryRun = !!flags["dry-run"];
 
   // Read local archive
-  console.log(`Reading archive: ${dir}`);
   const local = readArchiveSources(dir);
-  console.log(`Found ${local.length} source notes locally`);
 
-  // List existing sources on Grove
-  const listRaw = await callTool(config, "list_notes", { pattern: "Sources/*" });
-  const listData = JSON.parse(listRaw);
-  const existingPaths = new Set<string>((listData.notes ?? []).map((n: any) => n.path));
-  console.log(`Found ${existingPaths.size} source notes on Grove`);
+  // List existing sources via REST
+  const listData = await restGet(config, `/v1/list?prefix=${encodeURIComponent("Sources")}`);
+  const existingPaths = new Set<string>((listData.entries ?? []).map((n: any) => n.path));
 
   // Plan
   const plan = planSync(local, existingPaths);
-  console.log(`\nSync plan:`);
-  console.log(`  Create: ${plan.toCreate.length}`);
-  console.log(`  Skip:   ${plan.skipped.length}`);
 
   if (plan.toCreate.length === 0) {
-    console.log("\nNothing to sync.");
-    return;
+    return { ok: true, action: "sync", created: 0, skipped: plan.skipped.length, message: "Nothing to sync." };
   }
 
   if (dryRun) {
-    console.log("\n[dry-run] Would create:");
-    for (const note of plan.toCreate) console.log(`  ${note.path}`);
-    return;
+    return { ok: true, action: "sync_dry_run", would_create: plan.toCreate.map((n: any) => n.path), skipped: plan.skipped.length };
   }
 
-  // Execute
+  // Execute writes via MCP (no PUT endpoint yet)
   let ok = 0;
   let fail = 0;
+  const results: { path: string; status: string }[] = [];
   for (const note of plan.toCreate) {
     try {
-      const raw = await callTool(config, "write_note", {
+      const raw = await mcpCall(config, "write_note", {
         path: note.path,
         frontmatter: JSON.stringify(note.frontmatter),
         content: note.content,
       });
-      const result = JSON.parse(raw);
-      console.log(`  ✓ ${result.action} ${result.path}`);
+      const result = tryParseJson(raw) ?? {};
+      results.push({ path: result.path ?? note.path, status: result.action ?? "created" });
       ok++;
     } catch (err: any) {
-      console.error(`  ✗ ${note.path}: ${err.message ?? err}`);
+      results.push({ path: note.path, status: `error: ${err.message ?? err}` });
       fail++;
     }
   }
 
-  console.log(`\nDone: ${ok} created, ${fail} failed, ${plan.skipped.length} skipped`);
+  return {
+    ok: true,
+    action: "sync",
+    created: ok,
+    failed: fail,
+    skipped: plan.skipped.length,
+    results,
+    _fmt: () => {
+      const lines: string[] = [];
+      lines.push(`Reading archive: ${dir}`);
+      lines.push(`Found ${local.length} source notes locally`);
+      lines.push(`Found ${existingPaths.size} source notes on Grove`);
+      lines.push(`\nSync plan:`);
+      lines.push(`  Create: ${plan.toCreate.length}`);
+      lines.push(`  Skip:   ${plan.skipped.length}`);
+      lines.push("");
+      for (const r of results) {
+        const icon = r.status.startsWith("error") ? "✗" : "✓";
+        lines.push(`  ${icon} ${r.status} ${r.path}`);
+      }
+      lines.push(`\nDone: ${ok} created, ${fail} failed, ${plan.skipped.length} skipped`);
+      return lines.join("\n");
+    },
+  };
 }
 
-function cmdLint(dir: string, flags: Record<string, string | boolean>) {
-  if (!dir) { console.error("Usage: grove lint <dir> [--dry-run]"); process.exit(1); }
-  const dryRun = !!flags["dry-run"];
+// ── Key management (remote, via /keys API) ──────────────────
 
-  if (dryRun) {
-    // Dry run: report what would change without writing
-    const { readdirSync, readFileSync } = require("node:fs");
-    const { join } = require("node:path");
-    const { normalizeNote } = require("./sync-sources.js");
-    const entries = readdirSync(dir, { withFileTypes: true });
-    let wouldChange = 0;
-    for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
-      const raw = readFileSync(join(dir, entry.name), "utf-8");
-      if (raw !== normalizeNote(raw)) {
-        console.log(`  would normalize: ${entry.name}`);
-        wouldChange++;
+function keysPost(config: Config, body: unknown): Promise<{ status: number; body: string }> {
+  const url = new URL("/keys", config.server);
+  return httpDo("POST", url, { Authorization: `Bearer ${config.token}` }, JSON.stringify(body));
+}
+
+async function cmdKeysList(config: Config): Promise<CmdResult> {
+  const res = await keysPost(config, { action: "list" });
+  handleHttpStatus(res);
+  const data = tryParseJson(res.body) ?? {};
+  const keys = data.keys ?? [];
+  return {
+    ok: true,
+    keys,
+    _fmt: () => {
+      if (keys.length === 0) return "No keys.";
+      const lines: string[] = [];
+      lines.push("\nID            Name                Scopes          Vault   Created      Last used");
+      lines.push("─".repeat(90));
+      for (const k of keys) {
+        const created = k.created_at?.slice(0, 10) ?? "-";
+        const lastUsed = k.last_used_at?.slice(0, 10) ?? "never";
+        lines.push(
+          `${(k.id ?? "").padEnd(14)}${(k.name ?? "").padEnd(20)}${(k.scopes?.join(",") ?? "").padEnd(16)}${(k.vault_id ?? "").padEnd(8)}${created.padEnd(13)}${lastUsed}`,
+        );
       }
-    }
-    console.log(`\n${wouldChange} file(s) would be normalized`);
-    return;
-  }
+      lines.push("");
+      return lines.join("\n");
+    },
+  };
+}
 
-  const { changed, total } = normalizeDir(dir);
-  if (changed.length === 0) {
-    console.log(`All ${total} files already normalized.`);
-  } else {
-    for (const f of changed) console.log(`  normalized: ${f}`);
-    console.log(`\n${changed.length}/${total} file(s) normalized.`);
-  }
+async function cmdKeysCreate(config: Config, name: string): Promise<CmdResult> {
+  if (!name) throw new CliError("bad_request", "Usage: grove keys create <name>", 1);
+  const res = await keysPost(config, { action: "create", name });
+  handleHttpStatus(res);
+  const data = tryParseJson(res.body) ?? {};
+  return {
+    ok: true,
+    ...data,
+    _fmt: () => `\nKey created: ${data.id}\nName:        ${data.name}\n\nToken (shown once, save it now):\n\n  ${data.token}\n`,
+  };
+}
+
+async function cmdKeysRevoke(config: Config, id: string): Promise<CmdResult> {
+  if (!id) throw new CliError("bad_request", "Usage: grove keys revoke <key-id>", 1);
+  const res = await keysPost(config, { action: "revoke", id });
+  handleHttpStatus(res);
+  const data = tryParseJson(res.body) ?? {};
+  if (!data.revoked) throw new CliError("not_found", `Failed to revoke: ${JSON.stringify(data)}`, 1);
+  return { ok: true, revoked: data.revoked, _fmt: () => `Revoked key: ${data.revoked}` };
 }
 
 // ── Trail management (local, via trails.json) ──────────────
 
-function cmdTrailsList() {
+function cmdTrailsList(): CmdResult {
   const trails = loadTrails();
-  if (trails.length === 0) { console.log("No trails. Create one with: grove trails create <name> --allow-tags tag1,tag2"); return; }
-  console.log("\nID              Name                Status    Tags                    Paths");
-  console.log("─".repeat(90));
-  for (const t of trails) {
-    const status = t.enabled ? "active" : "disabled";
-    const tags = t.allow_tags.length > 0 ? t.allow_tags.join(",") : "(all)";
-    const paths = t.allow_paths.length > 0 ? t.allow_paths.join(",") : "(all)";
-    console.log(`${t.id.padEnd(16)}${t.name.padEnd(20)}${status.padEnd(10)}${tags.padEnd(24)}${paths}`);
-  }
-  console.log();
+  return {
+    ok: true,
+    trails,
+    _fmt: () => {
+      if (trails.length === 0) return "No trails. Create one with: grove trails create <name> --allow-tags tag1,tag2";
+      const lines: string[] = [];
+      lines.push("\nID              Name                Status    Tags                    Paths");
+      lines.push("─".repeat(90));
+      for (const t of trails) {
+        const status = t.enabled ? "active" : "disabled";
+        const tags = t.allow_tags.length > 0 ? t.allow_tags.join(",") : "(all)";
+        const paths = t.allow_paths.length > 0 ? t.allow_paths.join(",") : "(all)";
+        lines.push(`${t.id.padEnd(16)}${t.name.padEnd(20)}${status.padEnd(10)}${tags.padEnd(24)}${paths}`);
+      }
+      lines.push("");
+      return lines.join("\n");
+    },
+  };
 }
 
-function cmdTrailCreate(name: string, flags: Record<string, string | boolean>) {
-  if (!name) { console.error("Usage: grove trails create <name> [--allow-tags t1,t2] [--deny-tags t1,t2] [--allow-types t1,t2] [--allow-paths p1,p2]"); process.exit(1); }
+function cmdTrailCreate(name: string, flags: Record<string, string | boolean>): CmdResult {
+  if (!name) throw new CliError("bad_request", "Usage: grove trails create <name> [--allow-tags t1,t2] [--deny-tags t1,t2] [--allow-types t1,t2] [--allow-paths p1,p2]", 1);
   const splitFlag = (f: string | boolean | undefined) => typeof f === "string" ? f.split(",").map((s) => s.trim()).filter(Boolean) : [];
   const { trail, token } = createTrail({
     name,
@@ -530,81 +549,129 @@ function cmdTrailCreate(name: string, flags: Record<string, string | boolean>) {
     allow_paths: splitFlag(flags["allow-paths"]),
     deny_paths: splitFlag(flags["deny-paths"]),
   });
-  console.log(`\nTrail created: ${trail.id}`);
-  console.log(`Name:          ${trail.name}`);
-  console.log(`Key:           ${trail.key_id}`);
-  console.log(`\nToken (shown once, give to consumer):\n`);
-  console.log(`  ${token}\n`);
+  return {
+    ok: true,
+    id: trail.id,
+    name: trail.name,
+    key_id: trail.key_id,
+    token,
+    _fmt: () => `\nTrail created: ${trail.id}\nName:          ${trail.name}\nKey:           ${trail.key_id}\n\nToken (shown once, give to consumer):\n\n  ${token}\n`,
+  };
 }
 
-function cmdTrailDisable(id: string) {
-  if (!id) { console.error("Usage: grove trails disable <trail-id>"); process.exit(1); }
-  if (disableTrail(id)) { console.log(`Disabled trail: ${id}`); }
-  else { console.error(`Trail not found: ${id}`); process.exit(1); }
+function cmdTrailDisable(id: string): CmdResult {
+  if (!id) throw new CliError("bad_request", "Usage: grove trails disable <trail-id>", 1);
+  if (!disableTrail(id)) throw new CliError("not_found", `Trail not found: ${id}`, 1);
+  return { ok: true, disabled: id, _fmt: () => `Disabled trail: ${id}` };
 }
 
-function cmdTrailDelete(id: string) {
-  if (!id) { console.error("Usage: grove trails delete <trail-id>"); process.exit(1); }
-  if (deleteTrail(id)) { console.log(`Deleted trail: ${id}`); }
-  else { console.error(`Trail not found: ${id}`); process.exit(1); }
+function cmdTrailDelete(id: string): CmdResult {
+  if (!id) throw new CliError("bad_request", "Usage: grove trails delete <trail-id>", 1);
+  if (!deleteTrail(id)) throw new CliError("not_found", `Trail not found: ${id}`, 1);
+  return { ok: true, deleted: id, _fmt: () => `Deleted trail: ${id}` };
 }
 
 // ── Snapshot / Rollback (local vault git operations) ─────────
 
-function cmdSnapshot(args: string[]) {
+function cmdSnapshot(args: string[]): CmdResult {
   const subcommand = args[1];
 
   if (subcommand === "list") {
     const result = execSync("git tag -l 'grove-snapshot-*' --sort=-creatordate", { cwd: VAULT_PATH, encoding: "utf-8" });
     const tags = result.trim().split("\n").filter(Boolean).slice(0, 10);
-    if (tags.length === 0) {
-      console.log("No snapshots found.");
-    } else {
-      console.log("Snapshots (most recent first):");
-      for (const tag of tags) {
-        console.log(`  ${tag}`);
-      }
-    }
-  } else {
-    const name = subcommand ?? "";
-    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const tagName = `grove-snapshot-${timestamp}`;
-    const msgArgs = name ? ["-m", name] : [];
-    execSync(`git tag ${tagName} ${msgArgs.map(a => `"${a}"`).join(" ")}`.trim(), { cwd: VAULT_PATH });
-    console.log(`Snapshot created: ${tagName}`);
-    if (name) console.log(`  Message: ${name}`);
+    return {
+      ok: true,
+      snapshots: tags,
+      _fmt: () => {
+        if (tags.length === 0) return "No snapshots found.";
+        return "Snapshots (most recent first):\n" + tags.map((t) => `  ${t}`).join("\n");
+      },
+    };
   }
+
+  const name = subcommand ?? "";
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const tagName = `grove-snapshot-${timestamp}`;
+  const msgArgs = name ? ["-m", name] : [];
+  execSync(`git tag ${tagName} ${msgArgs.map((a) => `"${a}"`).join(" ")}`.trim(), { cwd: VAULT_PATH });
+  return {
+    ok: true,
+    tag: tagName,
+    message: name || undefined,
+    _fmt: () => {
+      let out = `Snapshot created: ${tagName}`;
+      if (name) out += `\n  Message: ${name}`;
+      return out;
+    },
+  };
 }
 
-function cmdRollback(tag: string) {
-  if (!tag) {
-    console.error("Usage: grove rollback <tag>");
-    console.error("  List snapshots: grove snapshot list");
-    process.exit(1);
-  }
+function cmdRollback(tag: string): CmdResult {
+  if (!tag) throw new CliError("bad_request", "Usage: grove rollback <tag>\n  List snapshots: grove snapshot list", 1);
 
-  // Verify tag exists
   try {
     execSync(`git rev-parse ${tag}`, { cwd: VAULT_PATH, stdio: "pipe" });
   } catch {
-    console.error(`Tag not found: ${tag}`);
-    process.exit(1);
+    throw new CliError("not_found", `Tag not found: ${tag}`, 1);
   }
 
-  // Restore files to the tag's state
   execSync(`git checkout ${tag} -- .`, { cwd: VAULT_PATH });
-
-  // Commit the rollback
   execSync(`git add -A && git commit -m "grove (admin): rollback to ${tag}"`, {
     cwd: VAULT_PATH,
     shell: "/bin/sh",
   });
-  console.log(`Rolled back to: ${tag}`);
-  console.log("Files restored and committed. Reindex may be needed.");
+  return {
+    ok: true,
+    rolled_back_to: tag,
+    _fmt: () => `Rolled back to: ${tag}\nFiles restored and committed. Reindex may be needed.`,
+  };
 }
 
-function printUsage() {
-  console.log(`grove — CLI client for the Grove knowledge API
+function cmdLint(dir: string, flags: Record<string, string | boolean>): CmdResult {
+  if (!dir) throw new CliError("bad_request", "Usage: grove lint <dir> [--dry-run]", 1);
+  const dryRun = !!flags["dry-run"];
+
+  if (dryRun) {
+    const { readdirSync, readFileSync } = require("node:fs");
+    const { join } = require("node:path");
+    const { normalizeNote } = require("./sync-sources.js");
+    const entries = readdirSync(dir, { withFileTypes: true });
+    const wouldChange: string[] = [];
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
+      const raw = readFileSync(join(dir, entry.name), "utf-8");
+      if (raw !== normalizeNote(raw)) wouldChange.push(entry.name);
+    }
+    return {
+      ok: true,
+      dry_run: true,
+      would_change: wouldChange,
+      _fmt: () => {
+        const lines = wouldChange.map((f) => `  would normalize: ${f}`);
+        lines.push(`\n${wouldChange.length} file(s) would be normalized`);
+        return lines.join("\n");
+      },
+    };
+  }
+
+  const { changed, total } = normalizeDir(dir);
+  return {
+    ok: true,
+    changed,
+    total,
+    _fmt: () => {
+      if (changed.length === 0) return `All ${total} files already normalized.`;
+      const lines = changed.map((f: string) => `  normalized: ${f}`);
+      lines.push(`\n${changed.length}/${total} file(s) normalized.`);
+      return lines.join("\n");
+    },
+  };
+}
+
+// ── Usage ───────────────────────────────────────────────────────
+
+function printUsage(): string {
+  return `grove — CLI client for the Grove knowledge API
 
 Usage:
   grove search <query> [-n limit]       Search notes
@@ -627,82 +694,119 @@ Usage:
   grove status                          Vault health
   grove diagnostics                     Run diagnostics
 
+Flags:
+  --json                                Force JSON output (auto-enabled when piped)
+
 Config: ~/.grove/cli.json
   { "server": "https://api.grove.md", "token": "grove_live_..." }
 
 New device setup:
   1. On an existing device:  grove keys create <device-name>
   2. Copy the token
-  3. On the new device:      mkdir -p ~/.grove && echo '{"server":"https://api.grove.md","token":"grove_live_..."}' > ~/.grove/cli.json`);
+  3. On the new device:      mkdir -p ~/.grove && echo '{"server":"https://api.grove.md","token":"grove_live_..."}' > ~/.grove/cli.json`;
+}
+
+// ── Output dispatcher ───────────────────────────────────────────
+
+function emitResult(result: CmdResult, json: boolean): void {
+  if (json) {
+    // Strip internal _fmt before serializing
+    const { _fmt, ...data } = result;
+    process.stdout.write(JSON.stringify(data) + "\n");
+  } else {
+    const fmt = result._fmt;
+    if (fmt) {
+      process.stdout.write(fmt(result) + "\n");
+    } else {
+      const { _fmt, ...data } = result;
+      process.stdout.write(JSON.stringify(data, null, 2) + "\n");
+    }
+  }
+}
+
+function emitError(err: CliError, json: boolean): void {
+  const payload = { ok: false, error: err.code, message: err.message };
+  if (json) {
+    process.stderr.write(JSON.stringify(payload) + "\n");
+  } else {
+    process.stderr.write(err.message + "\n");
+  }
 }
 
 // ── Main ─────────────────────────────────────────────────────────
 
 async function main() {
   const { command, positional, flags } = parseArgs(process.argv.slice(2));
+  const json = !!flags.json;
 
   if (command === "help" || command === "--help" || command === "-h") {
-    printUsage();
+    process.stdout.write(printUsage() + "\n");
     return;
   }
 
-  // Local-only commands (no server needed)
-  if (command === "snapshot") { cmdSnapshot(process.argv.slice(3)); return; }
-  if (command === "rollback") { cmdRollback(positional); return; }
-  if (command === "lint") { cmdLint(positional, flags); return; }
-  if (command === "trails") {
-    const sub = positional || "list";
-    const subArg = process.argv.slice(4)[0] ?? "";
-    switch (sub) {
-      case "list":    cmdTrailsList(); break;
-      case "create":  cmdTrailCreate(subArg, flags); break;
-      case "disable": cmdTrailDisable(subArg); break;
-      case "delete":  cmdTrailDelete(subArg); break;
-      default:
-        console.error(`Unknown trails subcommand: ${sub}`);
-        console.error("Usage: grove trails [list|create|disable|delete]");
-        process.exit(1);
+  try {
+    let result: CmdResult;
+
+    // Local-only commands (no server needed)
+    if (command === "snapshot") { result = cmdSnapshot(process.argv.slice(3)); emitResult(result, json); return; }
+    if (command === "rollback") { result = cmdRollback(positional); emitResult(result, json); return; }
+    if (command === "lint") { result = cmdLint(positional, flags); emitResult(result, json); return; }
+    if (command === "trails") {
+      const sub = positional || "list";
+      const subArg = process.argv.slice(4)[0] ?? "";
+      switch (sub) {
+        case "list":    result = cmdTrailsList(); break;
+        case "create":  result = cmdTrailCreate(subArg, flags); break;
+        case "disable": result = cmdTrailDisable(subArg); break;
+        case "delete":  result = cmdTrailDelete(subArg); break;
+        default:
+          throw new CliError("bad_request", `Unknown trails subcommand: ${sub}\nUsage: grove trails [list|create|disable|delete]`, 1);
+      }
+      emitResult(result, json);
+      return;
     }
-    return;
-  }
 
-  const config = loadConfig();
+    const config = loadConfig();
 
-  // Key management doesn't need MCP session
-  if (command === "keys") {
-    const sub = positional || "list";
-    const subArg = process.argv.slice(4)[0] ?? "";
-    switch (sub) {
-      case "list":   await cmdKeysList(config); break;
-      case "create": await cmdKeysCreate(config, subArg); break;
-      case "revoke": await cmdKeysRevoke(config, subArg); break;
-      default:
-        console.error(`Unknown keys subcommand: ${sub}`);
-        console.error("Usage: grove keys [list|create|revoke]");
-        process.exit(1);
+    // Key management
+    if (command === "keys") {
+      const sub = positional || "list";
+      const subArg = process.argv.slice(4)[0] ?? "";
+      switch (sub) {
+        case "list":   result = await cmdKeysList(config); break;
+        case "create": result = await cmdKeysCreate(config, subArg); break;
+        case "revoke": result = await cmdKeysRevoke(config, subArg); break;
+        default:
+          throw new CliError("bad_request", `Unknown keys subcommand: ${sub}\nUsage: grove keys [list|create|revoke]`, 1);
+      }
+      emitResult(result, json);
+      return;
     }
-    return;
-  }
 
-  await initialize(config);
-
-  switch (command) {
-    case "search":  await cmdSearch(config, positional, flags); break;
-    case "read":    await cmdRead(config, positional); break;
-    case "list":    await cmdList(config, positional, flags); break;
-    case "write":   await cmdWrite(config, positional, flags); break;
-    case "sync":    await cmdSync(config, positional, flags); break;
-    case "history": await cmdHistory(config, flags); break;
-    case "status":  await cmdStatus(config); break;
-    case "diagnostics": await cmdDiagnostics(config); break;
-    default:
-      console.error(`Unknown command: ${command}`);
-      printUsage();
-      process.exit(1);
+    // Server commands (REST or MCP)
+    switch (command) {
+      case "search":      result = await cmdSearch(config, positional, flags); break;
+      case "read":        result = await cmdRead(config, positional); break;
+      case "list":        result = await cmdList(config, positional, flags); break;
+      case "write":       result = await cmdWrite(config, positional, flags); break;
+      case "sync":        result = await cmdSync(config, positional, flags); break;
+      case "history":     result = await cmdHistory(config, flags); break;
+      case "status":      result = await cmdStatus(config); break;
+      case "diagnostics": result = await cmdDiagnostics(config); break;
+      default:
+        throw new CliError("bad_request", `Unknown command: ${command}`, 1);
+    }
+    emitResult(result, json);
+  } catch (err) {
+    if (err instanceof CliError) {
+      emitError(err, json);
+      process.exit(err.exitCode);
+    }
+    // Unexpected error
+    const msg = err instanceof Error ? err.message : String(err);
+    emitError(new CliError("server_error", msg, 3), json);
+    process.exit(3);
   }
 }
 
-main().catch((err) => {
-  console.error(err.message ?? err);
-  process.exit(1);
-});
+main();
