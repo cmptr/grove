@@ -43,7 +43,7 @@ import {
 import { generateRequestId, log as structuredLog, auditRead, auditWrite } from "./logger.js";
 import { metrics, searchMetrics } from "./metrics.js";
 import { resolveTrail, loadTrails, createTrail, updateTrail, disableTrail, deleteTrail, type TrailConfig } from "./trails.js";
-import { handleGetNote, handleSearch, handleListNotes, handleStats } from "./rest.js";
+import { handleGetNote, handleSearch, handleListNotes, handleStats, handleWriteNote } from "./rest.js";
 import { startStatsTimer } from "./vault-stats.js";
 
 const QMD_PORT = Number(process.env.QMD_PORT ?? 8181);
@@ -999,8 +999,8 @@ const server = createServer(async (req, res) => {
     if (req.method === "OPTIONS") {
       res.writeHead(204, {
         "Access-Control-Allow-Origin": REST_CORS_ORIGIN,
-        "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        "Access-Control-Allow-Methods": "GET, PUT, POST, PATCH, DELETE, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, If-Match",
         "Access-Control-Max-Age": "86400",
       });
       res.end();
@@ -1035,14 +1035,15 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // Rate limit (REST bucket, higher limits for owner)
-    const restRateResult = rateLimiter.check(restKey.id, "read");
+    // Rate limit (REST bucket — write bucket for PUT, read bucket otherwise)
+    const restRateBucket = req.method === "PUT" ? "write" as const : "read" as const;
+    const restRateResult = rateLimiter.check(restKey.id, restRateBucket);
     if (!restRateResult.allowed) {
       res.writeHead(429, { "Content-Type": "application/json", "Access-Control-Allow-Origin": REST_CORS_ORIGIN });
       res.end(JSON.stringify({ error: "rate_limited", retry_after_ms: restRateResult.retryAfterMs }));
       return;
     }
-    rateLimiter.record(restKey.id, "read");
+    rateLimiter.record(restKey.id, restRateBucket);
 
     const restHeaders = { "Content-Type": "application/json", "Access-Control-Allow-Origin": REST_CORS_ORIGIN };
 
@@ -1072,6 +1073,72 @@ const server = createServer(async (req, res) => {
         console.error("[rest] get_note error:", err);
         res.writeHead(500, restHeaders);
         res.end(JSON.stringify({ error: "internal error" }));
+      }
+      return;
+    }
+
+    // PUT /v1/notes/* — create or update a note
+    if (url.pathname.startsWith("/v1/notes/") && req.method === "PUT") {
+      const notePath = decodeURIComponent(url.pathname.slice("/v1/notes/".length));
+      if (!notePath || notePath.includes("..")) {
+        res.writeHead(400, restHeaders);
+        res.end(JSON.stringify({ error: "invalid path" }));
+        return;
+      }
+
+      // Read and parse JSON body
+      let body: string;
+      try { body = await readBody(req); } catch (err: unknown) {
+        if ((err as Error).message === "payload too large") {
+          res.writeHead(413, restHeaders);
+          res.end(JSON.stringify({ error: "payload too large" }));
+          return;
+        }
+        res.writeHead(400, restHeaders);
+        res.end(JSON.stringify({ error: "read error" }));
+        return;
+      }
+      let parsed: { frontmatter?: Record<string, unknown>; content?: string };
+      try { parsed = JSON.parse(body); } catch {
+        res.writeHead(400, restHeaders);
+        res.end(JSON.stringify({ error: "invalid json" }));
+        return;
+      }
+      if (!parsed.frontmatter || typeof parsed.frontmatter !== "object" || typeof parsed.content !== "string") {
+        res.writeHead(400, restHeaders);
+        res.end(JSON.stringify({ error: "body must have frontmatter (object) and content (string)" }));
+        return;
+      }
+
+      // If-Match header → optimistic concurrency (strip quotes per HTTP ETag spec)
+      const ifMatchRaw = req.headers["if-match"];
+      const ifMatch = typeof ifMatchRaw === "string" ? ifMatchRaw.replace(/^"|"$/g, "") : undefined;
+
+      structuredLog("info", "rest.put_note", rid, { key_id: restKey.id, key_name: restKey.name, path: notePath });
+      try {
+        const result = await handleWriteNote(notePath, parsed.frontmatter, parsed.content, {
+          ifHash: ifMatch,
+          trail: restTrail,
+          keyName: restKey.name,
+        });
+        const status = result.action === "create" ? 201 : 200;
+        res.writeHead(status, { ...restHeaders, "ETag": `"${result.content_hash}"` });
+        res.end(JSON.stringify(result));
+      } catch (err: any) {
+        if (err.code === "TRAIL_DENIED") {
+          res.writeHead(403, restHeaders);
+          res.end(JSON.stringify({ error: err.message }));
+        } else if (err.code === "CONFLICT") {
+          res.writeHead(409, restHeaders);
+          res.end(JSON.stringify({ error: err.message, current_hash: err.currentHash }));
+        } else if (err.code === "VALIDATION") {
+          res.writeHead(400, restHeaders);
+          res.end(JSON.stringify({ error: err.message, errors: err.errors }));
+        } else {
+          console.error("[rest] put_note error:", err);
+          res.writeHead(500, restHeaders);
+          res.end(JSON.stringify({ error: "internal error" }));
+        }
       }
       return;
     }

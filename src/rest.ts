@@ -6,17 +6,36 @@
  * designed for Next.js SSR fetching from grove-www.
  */
 
-import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
-import { join, relative, resolve, basename } from "node:path";
+import { readFileSync, existsSync, readdirSync, statSync, writeFileSync, mkdirSync } from "node:fs";
+import { join, relative, resolve, basename, dirname } from "node:path";
 import { homedir } from "node:os";
 import { hybridSearch, bm25Search } from "./hybrid-search.js";
-import { listNotes } from "./vault-ops.js";
-import { parseNote, contentHash } from "./notes-validate.js";
-import { filterByTrail, type TrailConfig, type NoteMetadata } from "./trails.js";
-import { getStats } from "./vault-stats.js";
+import { listNotes, gitCommit, qmdReindex, gitPush } from "./vault-ops.js";
+import { validatePath, validateNote, parseNote, serializeNote, contentHash } from "./notes-validate.js";
+import { filterByTrail, trailAllowsWrite, type TrailConfig, type NoteMetadata } from "./trails.js";
+import { getStats, refreshStats } from "./vault-stats.js";
 import { searchMetrics, metrics } from "./metrics.js";
+import { WriteQueue } from "./write-queue.js";
+import { embedFile } from "./embed-single.js";
 
 const VAULT_PATH = process.env.GROVE_VAULT ?? join(homedir(), "life");
+
+// ── Shared write queue (serializes all writes within this process) ──
+
+const writeQueue = new WriteQueue();
+writeQueue.schedulePush(() => gitPush(VAULT_PATH));
+
+/** Flush pending writes and push — call on graceful shutdown. */
+export async function flushWriteQueue(): Promise<void> {
+  await writeQueue.flush();
+}
+
+/** Encode a vault path as a valid URL (encode each segment, preserve slashes) */
+function noteUrl(vaultPath: string): string {
+  const stripped = vaultPath.replace(/\.md$/, "");
+  const encoded = stripped.split("/").map(encodeURIComponent).join("/");
+  return `https://grove.md/${encoded}`;
+}
 
 // ── Path traversal guard (same as server.ts) ────────────────────────
 
@@ -472,6 +491,94 @@ export function handleStats(
       error_rate: m.error_rate,
     };
   }
+
+  return result;
+}
+
+// ── Write ──────────────────────────────────────────────────────────
+
+export interface WriteNoteResult {
+  path: string;
+  action: string;
+  content_hash: string;
+  commit: string;
+  url: string;
+}
+
+/**
+ * Create or update a note with validated frontmatter.
+ * Serializes through the write queue, commits to git, reindexes, and re-embeds.
+ *
+ * Throws on validation errors (caller should catch and return 400).
+ * Returns a conflict object on hash mismatch (caller should return 409).
+ */
+export async function handleWriteNote(
+  notePath: string,
+  frontmatter: Record<string, unknown>,
+  content: string,
+  options: { ifHash?: string; trail?: TrailConfig | null; keyName?: string },
+): Promise<WriteNoteResult> {
+  // Trail write scope check
+  if (options.trail) {
+    if (!trailAllowsWrite(options.trail, notePath)) {
+      throw Object.assign(new Error("Write not allowed: path outside trail scope"), { code: "TRAIL_DENIED" });
+    }
+  }
+
+  // Validate path
+  let absPath: string;
+  try {
+    absPath = validatePath(VAULT_PATH, notePath);
+  } catch (err: any) {
+    throw Object.assign(new Error(`Path error: ${err.message}`), { code: "VALIDATION", errors: [err.message] });
+  }
+  const relPath = relative(VAULT_PATH, absPath);
+
+  // Validate note structure
+  const { errors } = validateNote(relPath, frontmatter, content);
+  if (errors.length > 0) {
+    throw Object.assign(new Error(`Validation errors:\n${errors.map((e) => `- ${e}`).join("\n")}`), { code: "VALIDATION", errors });
+  }
+
+  // Optimistic concurrency check
+  if (options.ifHash && existsSync(absPath)) {
+    const currentRaw = readFileSync(absPath, "utf-8");
+    const currentHash = contentHash(currentRaw);
+    if (currentHash !== options.ifHash) {
+      throw Object.assign(new Error("Conflict: note was modified"), { code: "CONFLICT", currentHash });
+    }
+  }
+
+  // Enqueue the write
+  const result = await writeQueue.enqueue(async () => {
+    const serialized = serializeNote(frontmatter, content);
+    const dir = dirname(absPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(absPath, serialized, "utf-8");
+
+    const isNew = !options.ifHash;
+    const action = isNew ? "create" : "update";
+    const who = options.keyName ? `grove (${options.keyName})` : "grove (api)";
+    const commitMsg = `${who}: ${action} ${relPath}`;
+    const sha = await gitCommit(VAULT_PATH, relPath, commitMsg);
+    await qmdReindex(relPath);
+
+    // Refresh stats cache (fire-and-forget)
+    refreshStats(VAULT_PATH).catch(() => {});
+
+    return {
+      path: relPath,
+      action,
+      content_hash: contentHash(serialized),
+      commit: sha,
+      url: noteUrl(relPath),
+    };
+  });
+
+  // Fire-and-forget: re-embed the changed file
+  embedFile(VAULT_PATH, result.path).catch((err) =>
+    console.error(`[grove] embed-single failed for ${result.path}:`, err.message),
+  );
 
   return result;
 }

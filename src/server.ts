@@ -11,8 +11,8 @@
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, lstatSync } from "node:fs";
-import { join, relative, dirname, resolve } from "node:path";
+import { readFileSync, existsSync, lstatSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -27,15 +27,14 @@ function noteUrl(vaultPath: string): string {
   return `https://grove.md/${encoded}`;
 }
 
-import { embedFile } from "./embed-single.js";
-import { WriteQueue } from "./write-queue.js";
-import { gitCommit, gitPush, gitLog, startupRecovery, qmdReindex, listNotes } from "./vault-ops.js";
-import { validatePath, validateNote, parseNote, serializeNote, contentHash } from "./notes-validate.js";
+import { gitLog, startupRecovery, listNotes } from "./vault-ops.js";
+import { parseNote, contentHash } from "./notes-validate.js";
+import { handleWriteNote, flushWriteQueue } from "./rest.js";
 import { analyzeGraph, computeDigest } from "./vault-graph.js";
-import { getStats, startStatsTimer, refreshStats } from "./vault-stats.js";
+import { getStats, startStatsTimer } from "./vault-stats.js";
 import { RateLimiter, IdempotencyCache } from "./rate-limit.js";
 import { log as structuredLog, auditRead } from "./logger.js";
-import { filterByTrail, trailAllowsWrite, logTrailAccess, type TrailConfig, type NoteMetadata } from "./trails.js";
+import { filterByTrail, logTrailAccess, type TrailConfig, type NoteMetadata } from "./trails.js";
 import { runMigration } from "./db.js";
 
 // ── Path traversal guard ─────────────────────────────────────────
@@ -58,10 +57,8 @@ function sanitizePath(vaultRoot: string, filePath: string): string | null {
 const VAULT_PATH = process.env.GROVE_VAULT ?? join(homedir(), "life");
 const PORT = Number(process.env.GROVE_SERVER_PORT ?? 8190);
 
-const writeQueue = new WriteQueue();
 const rateLimiter = new RateLimiter({ reads: 120, writes: 20, windowMs: 60_000 });
 const idempotencyCache = new IdempotencyCache(1000, 3_600_000);
-writeQueue.schedulePush(() => gitPush(VAULT_PATH));
 
 // ── Server instructions (what Claude.ai sees) ─────────────────────
 
@@ -365,13 +362,6 @@ After writing, present the url field from the response to the user.`,
       },
     },
     async ({ path: notePath, frontmatter: fmInput, content, if_hash }) => {
-      // Trail write scope check — constrain writes to trail scope
-      if (activeTrail) {
-        if (!trailAllowsWrite(activeTrail, notePath)) {
-          return { content: [{ type: "text" as const, text: `Write not allowed: path outside trail scope` }], isError: true };
-        }
-      }
-
       // Parse frontmatter from JSON string
       let frontmatter: Record<string, unknown>;
       try {
@@ -380,66 +370,15 @@ After writing, present the url field from the response to the user.`,
         return { content: [{ type: "text" as const, text: "Invalid frontmatter JSON" }], isError: true };
       }
 
-      // Validate path
-      let absPath: string;
       try {
-        absPath = validatePath(VAULT_PATH, notePath);
+        const result = await handleWriteNote(notePath, frontmatter, content, {
+          ifHash: if_hash,
+          trail: activeTrail,
+        });
+        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
       } catch (err: any) {
-        return { content: [{ type: "text" as const, text: `Path error: ${err.message}` }], isError: true };
+        return { content: [{ type: "text" as const, text: err.message }], isError: true };
       }
-
-      // Validate note
-      const relPath = relative(VAULT_PATH, absPath);
-      const { errors } = validateNote(relPath, frontmatter, content);
-      if (errors.length > 0) {
-        return { content: [{ type: "text" as const, text: `Validation errors:\n${errors.map((e) => `- ${e}`).join("\n")}` }], isError: true };
-      }
-
-      // Optimistic concurrency check
-      if (if_hash && existsSync(absPath)) {
-        const currentRaw = readFileSync(absPath, "utf-8");
-        const currentHash = contentHash(currentRaw);
-        if (currentHash !== if_hash) {
-          return {
-            content: [{ type: "text" as const, text: `Conflict: note was modified. Current hash: ${currentHash}` }],
-            isError: true,
-          };
-        }
-      }
-
-      // Enqueue the write
-      const result = await writeQueue.enqueue(async () => {
-        const serialized = serializeNote(frontmatter, content);
-        const dir = dirname(absPath);
-        if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-        writeFileSync(absPath, serialized, "utf-8");
-
-        const isNew = !if_hash;
-        const action = isNew ? "create" : "update";
-        const commitMsg = `grove (api): ${action} ${relPath}`;
-        const sha = await gitCommit(VAULT_PATH, relPath, commitMsg);
-        await qmdReindex(relPath);
-
-        // Refresh stats cache after write (fire-and-forget)
-        refreshStats(VAULT_PATH).catch(() => {});
-
-        return {
-          path: relPath,
-          action,
-          content_hash: contentHash(serialized),
-          commit: sha,
-          url: noteUrl(relPath),
-        };
-      });
-
-      // Fire-and-forget: re-embed the changed file
-      embedFile(VAULT_PATH, result.path).catch((err) =>
-        console.error(`[grove] embed-single failed for ${result.path}:`, err.message),
-      );
-
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
-      };
     },
   );
 
@@ -826,7 +765,7 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`[grove] ${signal} received, flushing write queue...`);
-    await writeQueue.flush();
+    await flushWriteQueue();
     httpServer.close(() => process.exit(0));
     setTimeout(() => process.exit(1), 15_000);
   });
