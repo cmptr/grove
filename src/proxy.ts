@@ -176,6 +176,18 @@ function decryptForOAuth(encoded: string): string {
 function handleOAuth(req: IncomingMessage, res: ServerResponse, url: URL): boolean {
   const path = url.pathname;
 
+  // Protected Resource Metadata (RFC 9728) — required by MCP spec
+  // Serves at both /mcp-scoped and root paths so clients discover auth regardless of path
+  if (path === "/.well-known/oauth-protected-resource" || path === "/.well-known/oauth-protected-resource/mcp") {
+    sendJson(res, 200, {
+      resource: `${GROVE_URL}/mcp`,
+      authorization_servers: [GROVE_URL],
+      bearer_methods_supported: ["header"],
+      scopes_supported: ["read", "write"],
+    });
+    return true;
+  }
+
   // OAuth server metadata (RFC 8414)
   if (path === "/.well-known/oauth-authorization-server") {
     sendJson(res, 200, {
@@ -1128,14 +1140,22 @@ const server = createServer(async (req, res) => {
 
   if (!token) {
     structuredLog("warn", "auth.missing", rid, { method: req.method, path: req.url, status: 401 });
-    sendJson(res, 401, { error: "unauthorized" });
+    res.writeHead(401, {
+      "Content-Type": "application/json",
+      "WWW-Authenticate": `Bearer resource_metadata="${GROVE_URL}/.well-known/oauth-protected-resource"`,
+    });
+    res.end(JSON.stringify({ error: "unauthorized" }));
     return;
   }
 
   const key = validateToken(token);
   if (!key) {
     structuredLog("warn", "auth.invalid", rid, { method: req.method, path: req.url, status: 401, token_prefix: token.slice(0, 16), token_length: token.length, hash_prefix: hashToken(token).slice(0, 12) });
-    sendJson(res, 401, { error: "unauthorized" });
+    res.writeHead(401, {
+      "Content-Type": "application/json",
+      "WWW-Authenticate": `Bearer resource_metadata="${GROVE_URL}/.well-known/oauth-protected-resource"`,
+    });
+    res.end(JSON.stringify({ error: "unauthorized" }));
     return;
   }
 
