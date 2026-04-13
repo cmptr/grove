@@ -1055,6 +1055,19 @@ const server = createServer(async (req, res) => {
     // Resolve trail for this key (null = owner, full access)
     const restTrail = resolveTrail(restKey.id);
 
+    // GET /v1/whoami — return identity for the current token
+    if (url.pathname === "/v1/whoami" && req.method === "GET") {
+      res.writeHead(200, restHeaders);
+      res.end(JSON.stringify({
+        key_id: restKey.id,
+        key_name: restKey.name,
+        scopes: restKey.scopes.split(",").filter(Boolean),
+        vault_id: restKey.vault_id,
+        trail: restTrail ? { id: restTrail.id, name: restTrail.name } : null,
+      }));
+      return;
+    }
+
     // GET /v1/notes/* — fetch a single note with resolved links and backlinks
     if (url.pathname.startsWith("/v1/notes/") && req.method === "GET") {
       const notePath = decodeURIComponent(url.pathname.slice("/v1/notes/".length));
