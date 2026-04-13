@@ -40,7 +40,7 @@ import {
   cleanupExpiredAuth,
   seedAdminEmail,
 } from "./auth.js";
-import { getUserRole } from "./users.js";
+import { getUserRole, deleteUser, listUsersWithMeta } from "./users.js";
 import { generateRequestId, log as structuredLog, auditRead, auditWrite } from "./logger.js";
 import { metrics, searchMetrics } from "./metrics.js";
 import { resolveTrail, loadTrails, createTrail, updateTrail, disableTrail, deleteTrail, type TrailConfig } from "./trails.js";
@@ -1048,11 +1048,27 @@ const server = createServer(async (req, res) => {
       const admin = adminAuth(req);
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
-      const db = getDb();
-      const users = db.prepare("SELECT id, username, email, role, created_at, last_login_at FROM users").all() as {
-        id: string; username: string | null; email: string | null; role: string; created_at: string; last_login_at: string | null;
-      }[];
+      const users = listUsersWithMeta();
       sendJson(res, 200, { users });
+      return;
+    }
+
+    // DELETE /v1/admin/users/:id — remove a user and all their data
+    if (url.pathname.startsWith("/v1/admin/users/") && req.method === "DELETE") {
+      const admin = adminAuth(req);
+      if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
+
+      const userId = url.pathname.slice("/v1/admin/users/".length);
+      if (!userId) { sendJson(res, 400, { error: "user id required" }); return; }
+
+      try {
+        const deleted = deleteUser(userId);
+        if (!deleted) { sendJson(res, 404, { error: "user not found" }); return; }
+        sendJson(res, 200, { deleted: userId });
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        sendJson(res, 400, { error: msg });
+      }
       return;
     }
 
