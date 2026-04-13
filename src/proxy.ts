@@ -22,7 +22,7 @@ import { RateLimiter } from "./rate-limit.js";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { createKey, revokeKey, isExpired, hashToken, updateLastUsed, type StoredKey } from "./keys.js";
-import { getDb } from "./db.js";
+import { getDb, closeDb } from "./db.js";
 import { runMigration } from "./db.js";
 import {
   requestMagicLink,
@@ -1369,3 +1369,16 @@ server.listen(PROXY_PORT, "0.0.0.0", () => {
   console.log(`OAuth authorize: ${GROVE_URL}/oauth/authorize`);
   console.log(`Loaded ${keyCount.count} API key(s) from SQLite`);
 });
+
+// ── Graceful shutdown ────────────────────────────────────────────
+let shuttingDown = false;
+for (const signal of ["SIGTERM", "SIGINT"] as const) {
+  process.on(signal, () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[grove-proxy] ${signal} received, shutting down...`);
+    closeDb();
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(1), 15_000);
+  });
+}

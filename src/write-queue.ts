@@ -56,8 +56,8 @@ export class WriteQueue {
     this.pushTimer = null;
     try {
       await this.pushFn();
-    } catch {
-      // Push failures are non-fatal — next write will retry
+    } catch (err) {
+      console.error(`[write-queue] git push failed: ${(err as Error).message}`);
     }
   }
 

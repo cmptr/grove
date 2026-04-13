@@ -9,6 +9,9 @@ GROVE_DIR="${HOME}/.grove"
 
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Starting Grove backup..."
 
+# Checkpoint WAL to ensure consistent SQLite snapshot
+sqlite3 "${GROVE_DIR}/grove.db" "PRAGMA wal_checkpoint(TRUNCATE);"
+
 # Create tarball
 tar czf "${BACKUP_FILE}" \
   -C "${GROVE_DIR}" \

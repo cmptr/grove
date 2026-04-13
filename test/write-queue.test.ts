@@ -58,6 +58,38 @@ describe("WriteQueue", () => {
     expect(results).toEqual(["done"]);
   });
 
+  it("flush completes pending writes and triggers push", async () => {
+    const queue = new WriteQueue();
+    const events: string[] = [];
+
+    queue.schedulePush(async () => {
+      events.push("pushed");
+    });
+
+    queue.enqueue(async () => {
+      await delay(30);
+      events.push("write-1");
+    });
+    queue.enqueue(async () => {
+      await delay(10);
+      events.push("write-2");
+    });
+
+    // flush should wait for both writes, then execute the push
+    await queue.flush();
+    expect(events).toEqual(["write-1", "write-2", "pushed"]);
+  });
+
+  it("flush is a no-op when nothing is pending", async () => {
+    const queue = new WriteQueue();
+    const pushed: string[] = [];
+    queue.schedulePush(async () => { pushed.push("push"); });
+
+    // No enqueued writes — flush should resolve without pushing
+    await queue.flush();
+    expect(pushed).toEqual([]);
+  });
+
   it("enqueue returns the value from the operation", async () => {
     const queue = new WriteQueue();
     const result = await queue.enqueue(async () => 42);
