@@ -15,7 +15,12 @@ Tell me an idea — a sentence, a half-thought, a "what if." I'll capture it as 
 
 ## Sparks
 
-<!-- New sparks go here. Format: - **Short name** — the idea in a sentence or two -->
+- **End-to-end encryption** — encrypt vault content at rest and in transit, similar to how Obsidian Publish handles encrypted vaults. Trail consumers only decrypt what their key allows.
+- **User profile & trail config UX** — app-level UI for users to manage their profile and configure trails (scopes, permissions, appearance) without CLI
+- **Graph health heartbeats** — automated periodic checks that the knowledge graph is growing and healthy (new links forming, no orphan explosions, embedding coverage holding)
+- **Growth prompting heartbeat** — proactive system that prompts the user with questions designed to grow the graph in the right direction (fill gaps, connect islands, deepen thin concepts)
+- **Image uploads as graph nodes** — support uploading popular image formats (PNG, JPG, WebP), auto-tag them with concepts, and treat them as first-class nodes in the knowledge graph
+- **Pinterest-style image view** — visual grid/masonry layout for browsing image nodes in the vault, filterable by tags and connections
 
 ---
 
