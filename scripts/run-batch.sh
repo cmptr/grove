@@ -124,6 +124,15 @@ get_batch "$BATCH"
 cd "$REPO_DIR"
 mkdir -p "$LOG_DIR"
 
+# ── Pre-flight: push to origin ──────────────────────────────────
+# claude --worktree branches from origin/main, not local main.
+# Unpushed commits mean agents work on a stale base → merge conflicts.
+ahead=$(git log origin/main..main --oneline 2>/dev/null | wc -l | tr -d ' ')
+if [[ "$ahead" -gt 0 ]]; then
+  log "Pushing $ahead commit(s) to origin/main (worktrees branch from origin)..."
+  git push origin main || { log "Push failed — fix and retry."; exit 1; }
+fi
+
 # Parse batch definition into arrays
 BRANCHES=()
 PROMPTS=()
