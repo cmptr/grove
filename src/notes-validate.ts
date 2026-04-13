@@ -23,6 +23,45 @@ const TYPE_PATHS: Record<string, string> = {
   source:  "Sources/",
 };
 
+// ── Path-based tag inference rules ─────────────────────────────────
+const TAG_RULES: Array<{ prefix: string; tags: string[] }> = [
+  { prefix: "Journal/",           tags: ["journal"] },
+  { prefix: "Resources/People/",  tags: ["person"] },
+  { prefix: "Resources/Concepts/",tags: ["concept"] },
+  { prefix: "Resources/Recipes/", tags: ["recipe"] },
+  { prefix: "Areas/Health/",      tags: ["health", "private"] },
+  { prefix: "Areas/Finances/",    tags: ["finances", "private"] },
+];
+
+/**
+ * Infer tags from a note's path and frontmatter. Returns a deduplicated
+ * array merging existing tags with inferred ones. Never removes tags.
+ */
+export function inferTags(
+  path: string,
+  frontmatter: Record<string, unknown>,
+): string[] {
+  const existing = Array.isArray(frontmatter.tags)
+    ? (frontmatter.tags as string[])
+    : typeof frontmatter.tags === "string"
+      ? [frontmatter.tags]
+      : [];
+
+  const inferred = new Set<string>(existing);
+
+  // Path-based rules
+  for (const rule of TAG_RULES) {
+    if (path.startsWith(rule.prefix)) {
+      for (const t of rule.tags) inferred.add(t);
+    }
+  }
+
+  // private: true in frontmatter → add #private
+  if (frontmatter.private === true) inferred.add("private");
+
+  return [...inferred];
+}
+
 const MAX_CONTENT_BYTES = 100 * 1024;
 const JOURNAL_RE = /^\d{4}-\d{2}-\d{2}(-\d+)?\.md$/;
 

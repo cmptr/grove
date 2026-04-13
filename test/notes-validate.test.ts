@@ -8,6 +8,7 @@ import {
   parseNote,
   serializeNote,
   contentHash,
+  inferTags,
 } from "../src/notes-validate.js";
 
 // ── validatePath ────────────────────────────────────────────────────
@@ -234,6 +235,85 @@ describe("serializeNote", () => {
     expect((frontmatter.tags as string[])).toEqual(["person"]);
     expect((frontmatter.aliases as string[])).toEqual(["JM"]);
     expect(content).toBe(body);
+  });
+});
+
+// ── inferTags ───────────────────────────────────────────────────────
+
+describe("inferTags", () => {
+  it("infers #journal for Journal/ path", () => {
+    const tags = inferTags("Journal/2026/2026-04-01.md", { type: "journal" });
+    expect(tags).toContain("journal");
+  });
+
+  it("infers #person for Resources/People/ path", () => {
+    const tags = inferTags("Resources/People/John-Milinovich.md", { type: "person" });
+    expect(tags).toContain("person");
+  });
+
+  it("infers #concept for Resources/Concepts/ path", () => {
+    const tags = inferTags("Resources/Concepts/taste-graph.md", { type: "concept" });
+    expect(tags).toContain("concept");
+  });
+
+  it("infers #recipe for Resources/Recipes/ path", () => {
+    const tags = inferTags("Resources/Recipes/pasta.md", { type: "recipe" });
+    expect(tags).toContain("recipe");
+  });
+
+  it("infers #health and #private for Areas/Health/ path", () => {
+    const tags = inferTags("Areas/Health/sleep.md", { type: "concept" });
+    expect(tags).toContain("health");
+    expect(tags).toContain("private");
+  });
+
+  it("infers #finances and #private for Areas/Finances/ path", () => {
+    const tags = inferTags("Areas/Finances/budget.md", { type: "concept" });
+    expect(tags).toContain("finances");
+    expect(tags).toContain("private");
+  });
+
+  it("infers #private from frontmatter private: true", () => {
+    const tags = inferTags("Inbox/secret.md", { type: "concept", private: true });
+    expect(tags).toContain("private");
+  });
+
+  it("supplements existing tags without replacing them", () => {
+    const tags = inferTags("Journal/2026/2026-04-01.md", {
+      type: "journal",
+      tags: ["daily", "reflection"],
+    });
+    expect(tags).toContain("daily");
+    expect(tags).toContain("reflection");
+    expect(tags).toContain("journal");
+  });
+
+  it("does not duplicate existing tags", () => {
+    const tags = inferTags("Journal/2026/2026-04-01.md", {
+      type: "journal",
+      tags: ["journal"],
+    });
+    expect(tags.filter((t) => t === "journal")).toHaveLength(1);
+  });
+
+  it("handles tags as a single string", () => {
+    const tags = inferTags("Resources/Concepts/foo.md", {
+      type: "concept",
+      tags: "ai",
+    });
+    expect(tags).toContain("ai");
+    expect(tags).toContain("concept");
+  });
+
+  it("returns inferred tags when no tags exist", () => {
+    const tags = inferTags("Areas/Health/sleep.md", { type: "concept" });
+    expect(tags).toEqual(expect.arrayContaining(["health", "private"]));
+    expect(tags.length).toBe(2);
+  });
+
+  it("returns empty array for unrecognized path with no tags", () => {
+    const tags = inferTags("Inbox/random.md", { type: "concept" });
+    expect(tags).toEqual([]);
   });
 });
 
