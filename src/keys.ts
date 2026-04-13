@@ -127,13 +127,15 @@ if (command === "create") {
 }
 
 // -- Programmatic API (used by proxy /keys endpoint) --
-export function createKey(name: string, scopes: string[] = ["read", "write"], vaultId = "life", ttlDays?: number) {
+export function createKey(name: string, scopes: string[] = ["read", "write"], vaultId = "life", ttlDays?: number, userId?: string) {
   const raw = randomBytes(32).toString("hex");
   const token = PREFIX + raw;
   const db = getDb();
 
-  const adminUser = db.prepare("SELECT id FROM users LIMIT 1").get() as { id: string } | undefined;
-  const userId = adminUser?.id ?? "user_00000000";
+  if (!userId) {
+    const adminUser = db.prepare("SELECT id FROM users LIMIT 1").get() as { id: string } | undefined;
+    userId = adminUser?.id ?? "user_00000000";
+  }
 
   const id = generateId();
   db.prepare(

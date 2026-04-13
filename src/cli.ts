@@ -929,6 +929,28 @@ async function cmdTrailDelete(config: Config, id: string, flags: Record<string, 
   return { ok: true, deleted: id, _fmt: () => `Deleted trail: ${id}` };
 }
 
+// ── Invite (remote, via /v1/admin/invite API) ──────────────────
+
+async function cmdInvite(config: Config, email: string, flags: Record<string, string | boolean>): Promise<CmdResult> {
+  if (!email) throw new CliError("bad_request", "Usage: grove invite <email> --trail <trail-id> [--role viewer]", 1);
+  const trailId = flags.trail as string;
+  if (!trailId) throw new CliError("bad_request", "Usage: grove invite <email> --trail <trail-id> [--role viewer]\n--trail is required.", 1);
+  const role = (flags.role as string) ?? "viewer";
+
+  const url = new URL("/v1/admin/invite", config.server);
+  const res = await httpDo("POST", url, { Authorization: `Bearer ${config.token}` }, JSON.stringify({ email, trail_id: trailId, role }));
+  handleHttpStatus(res);
+  const data = tryParseJson(res.body) ?? {};
+  return {
+    ok: true,
+    ...data,
+    _fmt: () => {
+      const status = data.created ? "New user created" : "Existing user";
+      return `\nInvited: ${data.email}\nUser:    ${data.user_id} (${status})\nTrail:   ${data.trail_id}\nKey:     ${data.key_id}\n\nA welcome email with a magic link has been sent.\n`;
+    },
+  };
+}
+
 // ── Snapshot / Rollback (local vault git operations) ─────────
 
 function cmdSnapshot(args: string[]): CmdResult {
@@ -1415,6 +1437,13 @@ async function main() {
         default:
           throw new CliError("bad_request", `Unknown keys subcommand: ${sub}\nUsage: grove keys [list|create|revoke]`, 1);
       }
+      emitResult(result, json);
+      return;
+    }
+
+    // Invite
+    if (command === "invite") {
+      result = await cmdInvite(config, positional, flags);
       emitResult(result, json);
       return;
     }

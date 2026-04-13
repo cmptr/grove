@@ -51,6 +51,7 @@ import {
   type StatusMode,
 } from "./rest.js";
 import { startStatsTimer } from "./vault-stats.js";
+import { inviteUser } from "./invite.js";
 
 const QMD_PORT = Number(process.env.QMD_PORT ?? 8181);
 const GROVE_SERVER_PORT = Number(process.env.GROVE_SERVER_PORT ?? 8190);
@@ -1029,6 +1030,42 @@ const server = createServer(async (req, res) => {
         id: string; username: string | null; email: string | null; role: string; created_at: string; last_login_at: string | null;
       }[];
       sendJson(res, 200, { users });
+      return;
+    }
+
+    // POST /v1/admin/invite — invite a user to a trail
+    if (url.pathname === "/v1/admin/invite" && req.method === "POST") {
+      const admin = adminAuth(req);
+      if (!admin) { sendJson(res, 401, { error: "unauthorized" }); return; }
+
+      let body: string;
+      try { body = await readBody(req); } catch {
+        sendJson(res, 400, { error: "read error" });
+        return;
+      }
+      let parsed: any;
+      try { parsed = JSON.parse(body); } catch {
+        sendJson(res, 400, { error: "invalid json" });
+        return;
+      }
+
+      const { email, trail_id, role } = parsed;
+      if (!email || !trail_id) {
+        sendJson(res, 400, { error: "email and trail_id are required" });
+        return;
+      }
+
+      try {
+        const result = await inviteUser(email, trail_id, role ?? "viewer", GROVE_URL);
+        sendJson(res, 200, result);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes("not found")) {
+          sendJson(res, 404, { error: msg });
+        } else {
+          sendJson(res, 500, { error: msg });
+        }
+      }
       return;
     }
 
