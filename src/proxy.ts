@@ -416,7 +416,9 @@ function handleOAuth(req: IncomingMessage, res: ServerResponse, url: URL): boole
       db.prepare("DELETE FROM oauth_codes WHERE code_hash = ?").run(codeHash);
       const accessToken = decryptForOAuth(authCode.encrypted_key);
 
-      console.log(`OAuth token issued for code`);
+      // Debug: verify decrypted token validates
+      const debugKey = validateToken(accessToken);
+      console.log(`OAuth token issued for code — decrypt validates: ${!!debugKey}, hash prefix: ${hashToken(accessToken).slice(0, 12)}, token prefix: ${accessToken.slice(0, 16)}, token length: ${accessToken.length}`);
 
       // Return the original API key as the access token
       sendJson(res, 200, {
@@ -1132,7 +1134,7 @@ const server = createServer(async (req, res) => {
 
   const key = validateToken(token);
   if (!key) {
-    structuredLog("warn", "auth.invalid", rid, { method: req.method, path: req.url, status: 401 });
+    structuredLog("warn", "auth.invalid", rid, { method: req.method, path: req.url, status: 401, token_prefix: token.slice(0, 16), token_length: token.length, hash_prefix: hashToken(token).slice(0, 12) });
     sendJson(res, 401, { error: "unauthorized" });
     return;
   }
