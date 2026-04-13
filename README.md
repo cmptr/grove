@@ -1,10 +1,10 @@
 # Grove
 
-### your knowledge, everywhere your AI is.
+### Open-source MCP server that makes your Obsidian vault accessible from any AI client.
 
-Give your AI a persistent memory that works from every surface — phone, laptop, web, terminal. One vault. Every client.
+One URL. Claude, ChatGPT, Cursor, or any MCP-compatible client connects and gets structured access — search, read, write-back, graph analysis. Your vault stays yours: markdown files in a git repo, versioned forever.
 
-**One URL. Any MCP client.** Add this to Claude, ChatGPT, Cursor, or any MCP-compatible client:
+**Connect any client:**
 
 ```
 https://api.grove.md/mcp
@@ -37,7 +37,7 @@ https://api.grove.md/mcp
 
 Karpathy's [LLM Knowledge Bases](https://x.com/karpathy/status/2039805659525644595) thread described the problem: "I think there is room here for an incredible new product instead of a hacky collection of scripts." He's using brute-force context windows and LLM-maintained index files to manage a personal knowledge base in Obsidian. That works at 100 articles. It doesn't work at 1,000 notes accumulated over years — journal entries, concept notes, people, recipes, projects — where the connections between ideas matter as much as the ideas themselves.
 
-Grove is the infrastructure layer. Not another note-taking app. Not a RAG pipeline. A hosted API that wraps your git-tracked vault and exposes it as structured MCP tools with search, read, write-back, and graph analysis. Your vault stays yours — markdown files in a git repo, editable in Obsidian, versioned forever.
+Grove is the infrastructure layer. Not another note-taking app. Not a RAG pipeline. A self-hosted server that exposes six structured MCP tools — carefully designed to compose into higher-level workflows without overwhelming agent tool selection.
 
 ## How I got here
 
