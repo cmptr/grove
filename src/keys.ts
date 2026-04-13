@@ -29,8 +29,11 @@ export function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
-export function loadKeys(): StoredKey[] {
+export function loadKeys(userId?: string): StoredKey[] {
   const db = getDb();
+  if (userId) {
+    return db.prepare("SELECT * FROM api_keys WHERE user_id = ?").all(userId) as StoredKey[];
+  }
   return db.prepare("SELECT * FROM api_keys").all() as StoredKey[];
 }
 
@@ -127,20 +130,22 @@ if (command === "create") {
 }
 
 // -- Programmatic API (used by proxy /keys endpoint) --
-export function createKey(name: string, scopes: string[] = ["read", "write"], vaultId = "life", ttlDays?: number) {
+export function createKey(name: string, scopes: string[] = ["read", "write"], vaultId = "life", ttlDays?: number, userId?: string) {
   const raw = randomBytes(32).toString("hex");
   const token = PREFIX + raw;
   const db = getDb();
 
-  const adminUser = db.prepare("SELECT id FROM users LIMIT 1").get() as { id: string } | undefined;
-  const userId = adminUser?.id ?? "user_00000000";
+  const resolvedUserId = userId ?? (() => {
+    const adminUser = db.prepare("SELECT id FROM users LIMIT 1").get() as { id: string } | undefined;
+    return adminUser?.id ?? "user_00000000";
+  })();
 
   const id = generateId();
   db.prepare(
     "INSERT INTO api_keys (id, user_id, vault_id, name, hashed_token, scopes, created_at, last_used_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
   ).run(
     id,
-    userId,
+    resolvedUserId,
     vaultId,
     name,
     hashToken(token),
@@ -150,7 +155,7 @@ export function createKey(name: string, scopes: string[] = ["read", "write"], va
     ttlDays ? new Date(Date.now() + ttlDays * 86400_000).toISOString() : null,
   );
 
-  return { id, name, token };
+  return { id, name, token, userId: resolvedUserId };
 }
 
 export function revokeKey(id: string): boolean {
