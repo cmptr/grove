@@ -121,7 +121,7 @@ describe("HELP", () => {
     "search", "read", "list", "write", "init",
     "graph", "digest", "health", "metrics",
     "status", "history", "diagnostics",
-    "keys", "trails", "sync", "lint", "snapshot", "rollback",
+    "keys", "trails", "sync", "ingest", "lint", "snapshot", "rollback",
     "whoami", "tag-backfill",
   ];
 
@@ -170,6 +170,59 @@ describe("printCommandHelp", () => {
     const out = printCommandHelp("search");
     expect(out).toContain("Examples:");
     expect(out).toContain("taste graph");
+  });
+});
+
+// ── parseArgs: ingest flags ──────────────────────────────────────
+
+describe("parseArgs ingest flags", () => {
+  beforeEach(() => {
+    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+  });
+
+  it("parses ingest command with directory", () => {
+    const result = parseArgs(["ingest", "./import/"]);
+    expect(result.command).toBe("ingest");
+    expect(result.positional).toBe("./import/");
+  });
+
+  it("parses ingest with --dry-run", () => {
+    const result = parseArgs(["ingest", "./import/", "--dry-run"]);
+    expect(result.command).toBe("ingest");
+    expect(result.positional).toBe("./import/");
+    expect(result.flags["dry-run"]).toBe(true);
+  });
+
+  it("parses ingest with --json", () => {
+    const result = parseArgs(["ingest", "./import/", "--json"]);
+    expect(result.flags.json).toBe(true);
+  });
+});
+
+// ── HELP: ingest entry ───────────────────────────────────────────
+
+describe("HELP ingest", () => {
+  it("has an ingest help entry", () => {
+    expect(HELP.ingest).toBeDefined();
+  });
+
+  it("ingest help has required fields", () => {
+    expect(HELP.ingest.usage).toContain("grove ingest");
+    expect(HELP.ingest.description).toContain("Import");
+    expect(HELP.ingest.json_schema).toContain("imported");
+    expect(HELP.ingest.exit_codes).toContain("0=success");
+  });
+
+  it("ingest help includes --dry-run flag", () => {
+    expect(HELP.ingest.flags).toBeDefined();
+    expect(HELP.ingest.flags!.some((f) => f.includes("dry-run"))).toBe(true);
+  });
+
+  it("printCommandHelp renders ingest", () => {
+    const out = printCommandHelp("ingest");
+    expect(out).toContain("grove ingest");
+    expect(out).toContain("dry-run");
+    expect(out).toContain("Examples:");
   });
 });
 
