@@ -5,10 +5,13 @@
 import { randomBytes } from "node:crypto";
 import { getDb } from "./db.js";
 
+export type UserRole = "owner" | "member" | "viewer";
+
 export interface User {
   id: string;
   username: string;
   email: string;
+  role: UserRole;
   created_at: string;
   last_login_at: string | null;
 }
@@ -31,17 +34,17 @@ export function validateUsername(username: string): { valid: boolean; reason?: s
   return { valid: true };
 }
 
-export function createUser(email: string, username: string): User {
+export function createUser(email: string, username: string, role: UserRole = "viewer"): User {
   const validation = validateUsername(username);
   if (!validation.valid) throw new Error(validation.reason);
 
   const id = "user_" + randomBytes(4).toString("hex");
   const db = getDb();
   db.prepare(
-    "INSERT INTO users (id, username, email) VALUES (?, ?, ?)"
-  ).run(id, username, email);
+    "INSERT INTO users (id, username, email, role) VALUES (?, ?, ?, ?)"
+  ).run(id, username, email, role);
 
-  return { id, username, email, created_at: new Date().toISOString(), last_login_at: null };
+  return { id, username, email, role, created_at: new Date().toISOString(), last_login_at: null };
 }
 
 export function getUserById(id: string): User | null {
@@ -57,4 +60,10 @@ export function getUserByUsername(username: string): User | null {
 export function getUserByEmail(email: string): User | null {
   const db = getDb();
   return db.prepare("SELECT * FROM users WHERE email = ?").get(email) as User | null;
+}
+
+export function getUserRole(userId: string): UserRole | null {
+  const db = getDb();
+  const row = db.prepare("SELECT role FROM users WHERE id = ?").get(userId) as { role: UserRole } | undefined;
+  return row?.role ?? null;
 }
