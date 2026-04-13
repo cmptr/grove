@@ -154,7 +154,7 @@ for i in "${!BRANCHES[@]}"; do
   # Launch claude in worktree mode, backgrounded.
   # Output is buffered (appears when agent finishes), but the progress
   # monitor below polls log file sizes to show liveness.
-  claude --worktree "$branch" --print "$prompt" > "$logfile" 2>&1 &
+  claude --worktree "$branch" --print --dangerously-skip-permissions "$prompt" > "$logfile" 2>&1 &
   PIDS+=($!)
   LOGFILES+=("$logfile")
 done
