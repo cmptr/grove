@@ -310,7 +310,7 @@ Examples: "Resources/People/*.md", "Journal/2026/*.md", "path1.md,path2.md"`,
           }
         }
         const url = noteUrl(entry.path);
-        results.push({ path: entry.path, url, frontmatter, content: content.slice(0, 2000), content_hash: contentHash(raw) });
+        results.push({ path: entry.path, url, frontmatter, content, content_hash: contentHash(raw) });
       }
       return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
     },
