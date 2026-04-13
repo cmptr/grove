@@ -818,3 +818,16 @@ async function start() {
 }
 
 start().catch(console.error);
+
+// ── Graceful shutdown ────────────────────────────────────────────
+let shuttingDown = false;
+for (const signal of ["SIGTERM", "SIGINT"] as const) {
+  process.on(signal, async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[grove] ${signal} received, flushing write queue...`);
+    await writeQueue.flush();
+    httpServer.close(() => process.exit(0));
+    setTimeout(() => process.exit(1), 15_000);
+  });
+}
