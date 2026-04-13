@@ -23,7 +23,7 @@ import { homedir } from "node:os";
 import { execSync } from "node:child_process";
 import { readArchiveSources, planSync, normalizeDir } from "./sync-sources.js";
 import { loadTrails, createTrail, disableTrail, deleteTrail } from "./trails.js";
-import { parseNote, serializeNote, inferTags } from "./notes-validate.js";
+import { parseNote, serializeNote, inferTags, contentHash } from "./notes-validate.js";
 
 // ── Vault path (local git operations) ────────────────────────────
 const VAULT_PATH = process.env.GROVE_VAULT ?? join(homedir(), "life");
@@ -604,6 +604,164 @@ async function cmdSync(config: Config, dir: string, flags: Record<string, string
   };
 }
 
+// ── Ingest (bulk import .md files) ─────────────────────────
+
+const INGEST_TYPE_PATHS: Record<string, string> = {
+  concept: "Resources/Concepts/",
+  person:  "Resources/People/",
+  recipe:  "Resources/Recipes/",
+  project: "Resources/Projects/",
+  company: "Resources/Companies/",
+  place:   "Resources/Places/",
+  journal: "Journal/",
+  source:  "Sources/",
+};
+
+async function cmdIngest(config: Config, dir: string, flags: Record<string, string | boolean>): Promise<CmdResult> {
+  if (!dir) throw new CliError("bad_request", "Usage: grove ingest <dir> [--dry-run]", 1);
+  const dryRun = !!flags["dry-run"];
+
+  // Verify dir exists and has .md files
+  let dirEntries: ReturnType<typeof readdirSync>;
+  try {
+    dirEntries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    throw new CliError("bad_request", `Cannot read directory: ${dir}`, 1);
+  }
+  const mdFiles = dirEntries.filter((e) => e.isFile() && e.name.endsWith(".md"));
+  if (mdFiles.length === 0) throw new CliError("bad_request", `No .md files found in ${dir}`, 1);
+
+  // Parse each file and determine target path
+  interface IngestCandidate {
+    filename: string;
+    targetPath: string;
+    frontmatter: Record<string, unknown>;
+    content: string;
+    title: string;
+  }
+  const candidates: IngestCandidate[] = [];
+  const prefixesNeeded = new Set<string>();
+
+  for (const entry of mdFiles) {
+    const raw = readFileSync(join(dir, entry.name), "utf-8");
+    const { frontmatter, content } = parseNote(raw);
+    const type = typeof frontmatter.type === "string" ? frontmatter.type : undefined;
+    const prefix = type && INGEST_TYPE_PATHS[type] ? INGEST_TYPE_PATHS[type] : "Inbox/";
+    const targetPath = prefix + entry.name;
+    const title = entry.name.replace(/\.md$/, "").toLowerCase();
+
+    prefixesNeeded.add(prefix.replace(/\/$/, ""));
+    candidates.push({ filename: entry.name, targetPath, frontmatter, content, title });
+  }
+
+  // Fetch existing notes for dedup (by path and title)
+  const existingPaths = new Set<string>();
+  const existingTitles = new Set<string>();
+
+  for (const prefix of prefixesNeeded) {
+    try {
+      const data = await restGet(config, `/v1/list?prefix=${encodeURIComponent(prefix)}`);
+      for (const n of (data.entries ?? []) as Array<{ path: string }>) {
+        existingPaths.add(n.path);
+        const stem = n.path.split("/").pop()?.replace(/\.md$/, "").toLowerCase() ?? "";
+        existingTitles.add(stem);
+      }
+    } catch {
+      // Prefix may not exist yet — not an error
+    }
+  }
+
+  // Split into import vs skip
+  const toImport: IngestCandidate[] = [];
+  const skipped: string[] = [];
+
+  for (const c of candidates) {
+    if (existingPaths.has(c.targetPath) || existingTitles.has(c.title)) {
+      skipped.push(c.filename);
+    } else {
+      toImport.push(c);
+    }
+  }
+
+  // Snapshot before writing
+  if (!dryRun) {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const tagName = `grove-snapshot-pre-ingest-${timestamp}`;
+    execSync(`git tag ${tagName}`, { cwd: VAULT_PATH });
+    process.stderr.write(`Snapshot created: ${tagName}\n`);
+  }
+
+  if (dryRun) {
+    return {
+      ok: true,
+      action: "ingest_dry_run",
+      would_import: toImport.map((n) => n.targetPath),
+      skipped: skipped.length,
+      total: mdFiles.length,
+      _fmt: () => {
+        const lines: string[] = [];
+        for (const n of toImport) lines.push(`  would import: ${n.targetPath}`);
+        for (const s of skipped) lines.push(`  would skip:   ${s} (duplicate)`);
+        lines.push(`\n${toImport.length} would import, ${skipped.length} would skip (${mdFiles.length} total)`);
+        return lines.join("\n");
+      },
+    };
+  }
+
+  // Write notes via MCP
+  let imported = 0;
+  let failed = 0;
+  const results: { path: string; status: string }[] = [];
+
+  for (const note of toImport) {
+    try {
+      const fm = { ...note.frontmatter };
+      if (!fm.type) fm.type = "concept";
+      if (!Array.isArray(fm.tags) || fm.tags.length === 0) {
+        fm.tags = inferTags(note.targetPath, fm);
+        if ((fm.tags as string[]).length === 0) fm.tags = [fm.type as string];
+      }
+
+      const raw = await mcpCall(config, "write_note", {
+        path: note.targetPath,
+        frontmatter: JSON.stringify(fm),
+        content: note.content,
+      });
+      const result = tryParseJson(raw) ?? {};
+      results.push({ path: result.path ?? note.targetPath, status: result.action ?? "created" });
+      imported++;
+      process.stderr.write(`\rImported ${imported}/${toImport.length} notes (${skipped.length} skipped as duplicates)`);
+    } catch (err: any) {
+      results.push({ path: note.targetPath, status: `error: ${err.message ?? err}` });
+      failed++;
+    }
+  }
+  if (toImport.length > 0) process.stderr.write("\n");
+
+  return {
+    ok: true,
+    action: "ingest",
+    imported,
+    failed,
+    skipped: skipped.length,
+    total: mdFiles.length,
+    results,
+    _fmt: () => {
+      const lines: string[] = [];
+      lines.push(`Reading: ${dir}`);
+      lines.push(`Found ${mdFiles.length} .md files`);
+      lines.push("");
+      for (const r of results) {
+        const icon = r.status.startsWith("error") ? "✗" : "✓";
+        lines.push(`  ${icon} ${r.path}`);
+      }
+      lines.push(`\nImported ${imported}/${mdFiles.length} notes (${skipped.length} skipped as duplicates)`);
+      if (failed > 0) lines.push(`${failed} failed`);
+      return lines.join("\n");
+    },
+  };
+}
+
 // ── Key management (remote, via /keys API) ──────────────────
 
 function keysPost(config: Config, body: unknown): Promise<{ status: number; body: string }> {
@@ -1031,6 +1189,14 @@ export const HELP: Record<string, CmdHelp> = {
     json_schema: "{ok, action, created, failed, skipped, results}",
     exit_codes: EXIT_CODES,
   },
+  ingest: {
+    usage: "grove ingest <dir> [--dry-run] [--json]",
+    description: "Import .md files into the vault. Deduplicates by title against existing notes. Creates a snapshot before starting.",
+    flags: ["--dry-run  Show what would be imported", "--json     JSON output"],
+    json_schema: "{ok, action, imported, failed, skipped, total, results: [{path, status}]}",
+    exit_codes: EXIT_CODES,
+    examples: ["grove ingest ./import/", "grove ingest ./export/ --dry-run"],
+  },
   lint: {
     usage: "grove lint <dir> [--dry-run] [--json]",
     description: "Normalize YAML frontmatter in .md files.",
@@ -1098,6 +1264,7 @@ Commands:
   keys                    Manage API keys
   trails                  Manage trails (scoped access)
   sync <dir>              Sync archived Sources
+  ingest <dir>            Import .md files into vault
   lint <dir>              Normalize frontmatter
   tag-backfill            Backfill inferred tags on untagged notes
   snapshot                Create/list vault snapshots
@@ -1203,6 +1370,7 @@ async function main() {
       case "list":        result = await cmdList(config, positional, flags); break;
       case "write":       result = await cmdWrite(config, positional, flags); break;
       case "sync":        result = await cmdSync(config, positional, flags); break;
+      case "ingest":      result = await cmdIngest(config, positional, flags); break;
       case "history":     result = await cmdHistory(config, flags); break;
       case "status":      result = await cmdStatus(config); break;
       case "diagnostics": result = await cmdDiagnostics(config); break;
