@@ -154,6 +154,18 @@ CREATE TABLE IF NOT EXISTS discovery_queue (
 );
 
 CREATE INDEX IF NOT EXISTS idx_discovery_queue_status ON discovery_queue(status, queued_at);
+
+CREATE TABLE IF NOT EXISTS discovery_results (
+  id TEXT PRIMARY KEY,
+  source_path TEXT NOT NULL,
+  target_path TEXT NOT NULL,
+  similarity REAL NOT NULL,
+  relationship TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  dismissed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_discovery_results_source ON discovery_results(source_path);
 `;
 
 export function createSchema(): void {
@@ -381,6 +393,63 @@ export function discoveryQueueDepth(): number {
     .prepare("SELECT COUNT(*) as count FROM discovery_queue WHERE status = 'pending'")
     .get() as { count: number };
   return row.count;
+}
+
+// ── Discovery results helpers ────────────────────────────────────
+
+export interface DiscoveryResultRow {
+  id: string;
+  source_path: string;
+  target_path: string;
+  similarity: number;
+  relationship: string | null;
+  created_at: string;
+  dismissed_at: string | null;
+}
+
+/** Insert a discovery result. */
+export function insertDiscoveryResult(
+  id: string,
+  sourcePath: string,
+  targetPath: string,
+  similarity: number,
+  relationship: string,
+): void {
+  const database = getDb();
+  database
+    .prepare(
+      "INSERT INTO discovery_results (id, source_path, target_path, similarity, relationship) VALUES (?, ?, ?, ?, ?)",
+    )
+    .run(id, sourcePath, targetPath, similarity, relationship);
+}
+
+/** Clear undismissed results for a source path (before re-processing). */
+export function clearUndismissedResults(sourcePath: string): void {
+  const database = getDb();
+  database
+    .prepare("DELETE FROM discovery_results WHERE source_path = ? AND dismissed_at IS NULL")
+    .run(sourcePath);
+}
+
+/** Get discovery results, optionally filtered by source path. */
+export function getDiscoveryResults(sourcePath?: string): DiscoveryResultRow[] {
+  const database = getDb();
+  if (sourcePath) {
+    return database
+      .prepare("SELECT * FROM discovery_results WHERE source_path = ? ORDER BY similarity DESC")
+      .all(sourcePath) as DiscoveryResultRow[];
+  }
+  return database
+    .prepare("SELECT * FROM discovery_results ORDER BY created_at DESC, similarity DESC")
+    .all() as DiscoveryResultRow[];
+}
+
+/** Dismiss a discovery result (soft delete). */
+export function dismissDiscoveryResult(id: string): void {
+  const database = getDb();
+  database
+    .prepare("UPDATE discovery_results SET dismissed_at = datetime('now') WHERE id = ?")
+    .run(id);
 }
 
 function hashTokenForMigration(token: string): string {
