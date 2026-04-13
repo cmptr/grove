@@ -142,25 +142,89 @@ echo ""
 # ── Launch agents ─────────────────────────────────────────────────
 
 PIDS=()
+LOGFILES=()
 for i in "${!BRANCHES[@]}"; do
   branch="${BRANCHES[$i]}"
   prompt="${PROMPTS[$i]}"
   logfile="$LOG_DIR/${BATCH}_${branch//\//_}_${TIMESTAMP}.log"
 
   log "Launching agent $((i+1))/$AGENT_COUNT: $branch"
-  log "  Log: $logfile"
 
-  # Launch claude in worktree mode, backgrounded
-  claude --worktree --print "$prompt" > "$logfile" 2>&1 &
+  # Launch claude in worktree mode, backgrounded.
+  # Use `script` to allocate a PTY so output streams unbuffered
+  # and `tail -f` on the logfile works in real-time.
+  script -q "$logfile" claude --worktree --print "$prompt" &
   PIDS+=($!)
+  LOGFILES+=("$logfile")
 done
 
 echo ""
-log "All $AGENT_COUNT agents launched. Waiting for completion..."
-log "Monitor: tail -f $LOG_DIR/${BATCH}_*_${TIMESTAMP}.log"
+log "All $AGENT_COUNT agents launched."
 echo ""
 
-# ── Wait for all agents ──────────────────────────────────────────
+# ── Progress monitor while waiting ───────────────────────────────
+# Reports log size + last meaningful line per agent every 30s.
+
+progress() {
+  for i in "${!BRANCHES[@]}"; do
+    branch="${BRANCHES[$i]}"
+    pid="${PIDS[$i]}"
+    logfile="${LOGFILES[$i]}"
+
+    # Check if still running
+    if kill -0 "$pid" 2>/dev/null; then
+      status="⏳"
+    else
+      status="✓"
+    fi
+
+    # Get log size (human-readable)
+    size="0"
+    if [[ -f "$logfile" ]]; then
+      size=$(du -h "$logfile" 2>/dev/null | cut -f1 | tr -d ' ')
+    fi
+
+    # Get last meaningful line (strip control codes, blanks)
+    last=""
+    if [[ -f "$logfile" ]]; then
+      last=$(cat "$logfile" 2>/dev/null | col -b 2>/dev/null | sed 's/^[[:space:]]*//' | grep -v '^$' | tail -1 | cut -c1-80)
+    fi
+
+    echo "  $status $branch  ($size)  ${last:-<starting...>}"
+  done
+}
+
+# Poll progress while any agent is alive
+while true; do
+  # Check if any PID is still running
+  any_alive=false
+  for pid in "${PIDS[@]}"; do
+    if kill -0 "$pid" 2>/dev/null; then
+      any_alive=true
+      break
+    fi
+  done
+  $any_alive || break
+
+  log "── Progress ──"
+  progress
+  echo ""
+
+  # Sleep 30s but break early if all agents finish
+  for tick in $(seq 1 30); do
+    any_alive=false
+    for pid in "${PIDS[@]}"; do
+      if kill -0 "$pid" 2>/dev/null; then
+        any_alive=true
+        break
+      fi
+    done
+    $any_alive || break
+    sleep 1
+  done
+done
+
+# ── Collect exit codes ───────────────────────────────────────────
 
 FAILED=()
 for i in "${!PIDS[@]}"; do
@@ -174,6 +238,9 @@ for i in "${!PIDS[@]}"; do
     FAILED+=("$branch")
   fi
 done
+
+log "── Final Status ──"
+progress
 
 echo ""
 
