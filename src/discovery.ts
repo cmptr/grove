@@ -3,27 +3,51 @@
  *
  * Runs as a polling loop (default 2s interval). Each tick:
  * 1. Claims the next pending entry from discovery_queue
- * 2. Logs "processing <path>"
- * 3. (Future: runs extraction, linking, neighbor surfacing)
+ * 2. Reads the note and extracts entities via Claude API
+ * 3. Wires wikilinks into the source note and creates new concept notes
  * 4. Marks the entry done or errored
  *
  * Errors on individual notes are caught and logged — they never block the queue.
  */
 
+import { join } from "node:path";
+import { homedir } from "node:os";
 import {
   dequeueDiscovery,
   markDiscoveryDone,
   markDiscoveryError,
   type DiscoveryQueueEntry,
 } from "./db.js";
+import { extractFromNote } from "./discovery-extract.js";
+import { wireLinks } from "./discovery-link.js";
 
 const DEFAULT_POLL_MS = 2_000;
 
 export type Processor = (entry: DiscoveryQueueEntry) => Promise<void>;
 
-/** No-op processor — logs and returns. Future phases plug in real extractors. */
+function getVaultPath(): string {
+  return process.env.GROVE_VAULT ?? join(homedir(), "life");
+}
+
+/** Default processor — extracts entities and wires wikilinks. */
 const defaultProcessor: Processor = async (entry) => {
+  const vaultPath = getVaultPath();
   console.log(`[discovery] processing ${entry.path}`);
+
+  // Extract entities via Claude API
+  const extraction = await extractFromNote(vaultPath, entry.path);
+  console.log(
+    `[discovery] extracted ${extraction.entities.length} entities, ` +
+    `${extraction.suggested_links.length} links, ` +
+    `${extraction.new_notes.length} new notes from ${entry.path}`,
+  );
+
+  // Wire wikilinks and create new concept notes
+  const result = await wireLinks(vaultPath, entry.path, extraction);
+  console.log(
+    `[discovery] wired ${result.links_wired} links, ` +
+    `created ${result.notes_created.length} notes for ${entry.path}`,
+  );
 };
 
 let running = false;

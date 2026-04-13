@@ -36,6 +36,7 @@
     "node": ">=22.0.0"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.88.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/better-sqlite3": "^7.6.13",
     "better-sqlite3": "^12.8.0",
