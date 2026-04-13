@@ -1,43 +1,15 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { parseArgs, CliError } from "../src/cli.js";
 
 // ── parseArgs ───────────────────────────────────────────────────────
-// Re-implement the pure parseArgs function for testing since it's not exported
-// from cli.ts (which has top-level side effects from sync-sources import).
-
-function parseArgs(argv: string[]): { command: string; positional: string; flags: Record<string, string | boolean> } {
-  const command = argv[0] ?? "help";
-  let positional = "";
-  const flags: Record<string, string | boolean> = {};
-
-  for (let i = 1; i < argv.length; i++) {
-    const arg = argv[i];
-    if (arg.startsWith("--")) {
-      const key = arg.slice(2);
-      const next = argv[i + 1];
-      if (next && !next.startsWith("-")) {
-        flags[key] = next;
-        i++;
-      } else {
-        flags[key] = true;
-      }
-    } else if (arg.startsWith("-") && arg.length === 2) {
-      const key = arg.slice(1);
-      const next = argv[i + 1];
-      if (next && !next.startsWith("-")) {
-        flags[key] = next;
-        i++;
-      } else {
-        flags[key] = true;
-      }
-    } else if (!positional) {
-      positional = arg;
-    }
-  }
-
-  return { command, positional, flags };
-}
 
 describe("parseArgs", () => {
+  // parseArgs reads process.stdout.isTTY for auto-detection.
+  // Force TTY=true for predictable tests (non-TTY tests override below).
+  beforeEach(() => {
+    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+  });
+
   it("parses a simple command", () => {
     const result = parseArgs(["search"]);
     expect(result.command).toBe("search");
@@ -91,6 +63,53 @@ describe("parseArgs", () => {
   it("only captures first positional argument", () => {
     const result = parseArgs(["read", "file1", "file2"]);
     expect(result.positional).toBe("file1");
-    // file2 is ignored (not captured)
+  });
+
+  it("parses --json as boolean flag", () => {
+    const result = parseArgs(["search", "test", "--json"]);
+    expect(result.flags.json).toBe(true);
+  });
+
+  it("auto-enables json when stdout is not a TTY", () => {
+    Object.defineProperty(process.stdout, "isTTY", { value: undefined, configurable: true });
+    const result = parseArgs(["search", "test"]);
+    expect(result.flags.json).toBe(true);
+  });
+
+  it("does not auto-enable json when stdout is a TTY", () => {
+    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+    const result = parseArgs(["search", "test"]);
+    expect(result.flags.json).toBeUndefined();
+  });
+});
+
+// ── CliError ────────────────────────────────────────────────────────
+
+describe("CliError", () => {
+  it("creates error with code, message, and default exitCode", () => {
+    const err = new CliError("not_found", "Note not found");
+    expect(err.code).toBe("not_found");
+    expect(err.message).toBe("Note not found");
+    expect(err.exitCode).toBe(1);
+    expect(err).toBeInstanceOf(Error);
+  });
+
+  it("creates error with custom exitCode", () => {
+    const err = new CliError("auth_error", "Bad token", 2);
+    expect(err.exitCode).toBe(2);
+  });
+
+  it("creates server error with exitCode 3", () => {
+    const err = new CliError("server_error", "Connection refused", 3);
+    expect(err.exitCode).toBe(3);
+  });
+
+  it("exit code semantics: 1=not_found, 2=auth, 3=server", () => {
+    expect(new CliError("not_found", "").exitCode).toBe(1);
+    expect(new CliError("bad_request", "").exitCode).toBe(1);
+    expect(new CliError("auth_error", "", 2).exitCode).toBe(2);
+    expect(new CliError("config_missing", "", 2).exitCode).toBe(2);
+    expect(new CliError("server_error", "", 3).exitCode).toBe(3);
+    expect(new CliError("connection_refused", "", 3).exitCode).toBe(3);
   });
 });
