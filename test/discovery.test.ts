@@ -11,6 +11,11 @@ import {
   markDiscoveryDone,
   markDiscoveryError,
   discoveryQueueDepth,
+  insertDiscoveryResult,
+  getRecentExtractions,
+  getNewConceptsCreated,
+  getSurprisingConnections,
+  getLastProcessedAt,
   getDb,
   createSchema,
   closeDb,
@@ -194,5 +199,125 @@ describe("discovery loop (tick)", () => {
     await tick(processor);
 
     expect(order).toEqual(["first.md", "second.md", "third.md"]);
+  });
+});
+
+describe("discovery digest helpers", () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "grove-digest-test-"));
+    process.env.GROVE_DB_PATH = join(tempDir, "grove.db");
+    resetDb();
+    createSchema();
+  });
+
+  afterEach(() => {
+    closeDb();
+    delete process.env.GROVE_DB_PATH;
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("empty state returns zeroed fields", () => {
+    expect(getRecentExtractions()).toEqual([]);
+    expect(getNewConceptsCreated()).toEqual([]);
+    expect(getSurprisingConnections()).toEqual([]);
+    expect(discoveryQueueDepth()).toBe(0);
+    expect(getLastProcessedAt()).toBeNull();
+  });
+
+  it("getRecentExtractions returns only done entries with processed_at", () => {
+    enqueueDiscovery("a.md", "write");
+    enqueueDiscovery("b.md", "commit");
+    enqueueDiscovery("c.md", "write");
+
+    // Process a and b, leave c pending
+    const a = dequeueDiscovery()!;
+    markDiscoveryDone(a.id);
+    const b = dequeueDiscovery()!;
+    markDiscoveryDone(b.id);
+
+    const extractions = getRecentExtractions();
+    expect(extractions).toHaveLength(2);
+    // Both done entries present, c (pending) excluded
+    const paths = extractions.map((e) => e.path).sort();
+    expect(paths).toEqual(["a.md", "b.md"]);
+    expect(extractions.every((e) => e.processed_at != null)).toBe(true);
+  });
+
+  it("getRecentExtractions respects limit", () => {
+    for (let i = 0; i < 5; i++) {
+      enqueueDiscovery(`note-${i}.md`, "write");
+      const entry = dequeueDiscovery()!;
+      markDiscoveryDone(entry.id);
+    }
+    expect(getRecentExtractions(3)).toHaveLength(3);
+  });
+
+  it("getNewConceptsCreated returns concept-path results", () => {
+    insertDiscoveryResult("r1", "Journal/2026/2026-04-13.md", "Resources/Concepts/knowledge-graphs.md", 0.85, "mentioned");
+    insertDiscoveryResult("r2", "Journal/2026/2026-04-13.md", "Resources/People/alice.md", 0.9, "mentioned");
+    insertDiscoveryResult("r3", "Notes/scratch.md", "Resources/Concepts/emergence.md", 0.75, "related");
+
+    const concepts = getNewConceptsCreated();
+    expect(concepts).toHaveLength(2);
+    // Both should be concept paths
+    expect(concepts.every((c) => c.path.startsWith("Resources/Concepts/"))).toBe(true);
+    // triggered_by should be the source
+    expect(concepts.find((c) => c.path.includes("knowledge-graphs"))?.triggered_by).toBe("Journal/2026/2026-04-13.md");
+  });
+
+  it("getSurprisingConnections returns by similarity desc", () => {
+    insertDiscoveryResult("r1", "a.md", "b.md", 0.7, "related");
+    insertDiscoveryResult("r2", "c.md", "d.md", 0.95, "similar");
+    insertDiscoveryResult("r3", "e.md", "f.md", 0.8, "related");
+
+    const connections = getSurprisingConnections();
+    expect(connections).toHaveLength(3);
+    expect(connections[0].similarity).toBe(0.95);
+    expect(connections[1].similarity).toBe(0.8);
+    expect(connections[2].similarity).toBe(0.7);
+  });
+
+  it("getSurprisingConnections excludes dismissed results", () => {
+    insertDiscoveryResult("r1", "a.md", "b.md", 0.9, "related");
+    insertDiscoveryResult("r2", "c.md", "d.md", 0.8, "similar");
+
+    const db = getDb();
+    db.prepare("UPDATE discovery_results SET dismissed_at = datetime('now') WHERE id = 'r1'").run();
+
+    const connections = getSurprisingConnections();
+    expect(connections).toHaveLength(1);
+    expect(connections[0].source).toBe("c.md");
+  });
+
+  it("getLastProcessedAt returns most recent timestamp", () => {
+    enqueueDiscovery("a.md", "write");
+    enqueueDiscovery("b.md", "write");
+
+    const a = dequeueDiscovery()!;
+    markDiscoveryDone(a.id);
+    const b = dequeueDiscovery()!;
+    markDiscoveryDone(b.id);
+
+    const last = getLastProcessedAt();
+    expect(last).toBeTruthy();
+
+    // Should match b's processed_at (processed second)
+    const db = getDb();
+    const bRow = db.prepare("SELECT processed_at FROM discovery_queue WHERE id = ?").get(b.id) as any;
+    expect(last).toBe(bRow.processed_at);
+  });
+
+  it("queue_depth only counts pending entries", () => {
+    enqueueDiscovery("pending-1.md", "write");
+    enqueueDiscovery("pending-2.md", "write");
+    enqueueDiscovery("done.md", "write");
+
+    const entry = dequeueDiscovery()!;  // now processing
+    markDiscoveryDone(entry.id);        // now done
+
+    // 2 pending (pending-2 and done.md which hasn't been dequeued yet)
+    expect(discoveryQueueDepth()).toBe(2);
   });
 });

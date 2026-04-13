@@ -462,6 +462,84 @@ export function dismissDiscoveryResult(id: string): void {
     .run(id);
 }
 
+// ── Discovery digest helpers ────────────────────────────────────
+
+export interface RecentExtraction {
+  path: string;
+  processed_at: string;
+  trigger: string;
+}
+
+/** Get recently processed queue entries (most recent first). */
+export function getRecentExtractions(limit = 20): RecentExtraction[] {
+  const database = getDb();
+  return database
+    .prepare(
+      `SELECT path, processed_at, trigger
+       FROM discovery_queue
+       WHERE status = 'done' AND processed_at IS NOT NULL
+       ORDER BY processed_at DESC
+       LIMIT ?`,
+    )
+    .all(limit) as RecentExtraction[];
+}
+
+export interface NewConceptCreated {
+  path: string;
+  created_at: string;
+  triggered_by: string;
+}
+
+/** Get recently created concept notes from discovery results. */
+export function getNewConceptsCreated(limit = 20): NewConceptCreated[] {
+  const database = getDb();
+  // Concept notes appear as target_path in discovery_results with Resources/Concepts/ prefix
+  // The source_path is what triggered the creation
+  return database
+    .prepare(
+      `SELECT DISTINCT target_path AS path, created_at, source_path AS triggered_by
+       FROM discovery_results
+       WHERE target_path LIKE 'Resources/Concepts/%'
+         AND dismissed_at IS NULL
+       ORDER BY created_at DESC
+       LIMIT ?`,
+    )
+    .all(limit) as NewConceptCreated[];
+}
+
+export interface SurprisingConnection {
+  source: string;
+  target: string;
+  similarity: number;
+}
+
+/** Get top surprising connections (highest similarity, undismissed). */
+export function getSurprisingConnections(limit = 10): SurprisingConnection[] {
+  const database = getDb();
+  return database
+    .prepare(
+      `SELECT source_path AS source, target_path AS target, similarity
+       FROM discovery_results
+       WHERE dismissed_at IS NULL
+       ORDER BY similarity DESC
+       LIMIT ?`,
+    )
+    .all(limit) as SurprisingConnection[];
+}
+
+/** Get the most recent processed_at timestamp. */
+export function getLastProcessedAt(): string | null {
+  const database = getDb();
+  const row = database
+    .prepare(
+      `SELECT processed_at FROM discovery_queue
+       WHERE status = 'done' AND processed_at IS NOT NULL
+       ORDER BY processed_at DESC LIMIT 1`,
+    )
+    .get() as { processed_at: string } | undefined;
+  return row?.processed_at ?? null;
+}
+
 function hashTokenForMigration(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }

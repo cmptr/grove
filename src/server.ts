@@ -35,7 +35,15 @@ import { getStats, startStatsTimer } from "./vault-stats.js";
 import { RateLimiter, IdempotencyCache } from "./rate-limit.js";
 import { log as structuredLog, auditRead } from "./logger.js";
 import { filterByTrail, logTrailAccess, type TrailConfig, type NoteMetadata } from "./trails.js";
-import { runMigration, enqueueDiscovery } from "./db.js";
+import {
+  runMigration,
+  enqueueDiscovery,
+  discoveryQueueDepth,
+  getRecentExtractions,
+  getNewConceptsCreated,
+  getSurprisingConnections,
+  getLastProcessedAt,
+} from "./db.js";
 
 // ── Path traversal guard ─────────────────────────────────────────
 // Resolves a relative path against the vault and rejects any attempt
@@ -427,9 +435,10 @@ Modes:
   history      — recent git log (filter by since, path_prefix)
   diagnostics  — orphan notes, broken [[links]], missing frontmatter, stale Inbox items
   graph        — wikilink graph: most connected, bridges, clusters, orphans
-  digest       — garden lifecycle: seeds, sprouts, growing, mature, dormant, withering`,
+  digest       — garden lifecycle: seeds, sprouts, growing, mature, dormant, withering
+  discovery    — recent extractions, new concepts, surprising connections, queue depth`,
       inputSchema: {
-        mode: z.enum(["health", "history", "diagnostics", "graph", "digest"]).describe("What to check"),
+        mode: z.enum(["health", "history", "diagnostics", "graph", "digest", "discovery"]).describe("What to check"),
         since: z.string().optional().describe("For history: date filter (e.g., '1 week ago', '2026-04-01')"),
         path_prefix: z.string().optional().describe("For history: path filter (e.g., 'Journal/')"),
       },
@@ -506,6 +515,17 @@ Modes:
       if (mode === "digest") {
         const digest = await computeDigest(VAULT_PATH);
         return { content: [{ type: "text" as const, text: JSON.stringify(digest, null, 2) }] };
+      }
+
+      if (mode === "discovery") {
+        const result = {
+          recent_extractions: getRecentExtractions(20),
+          new_concepts_created: getNewConceptsCreated(20),
+          surprising_connections: getSurprisingConnections(10),
+          queue_depth: discoveryQueueDepth(),
+          last_processed_at: getLastProcessedAt(),
+        };
+        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
       }
 
       return { content: [{ type: "text" as const, text: "Unknown mode" }] };
