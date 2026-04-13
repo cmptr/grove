@@ -42,7 +42,7 @@ import {
 } from "./auth.js";
 import { generateRequestId, log as structuredLog, auditRead, auditWrite } from "./logger.js";
 import { metrics } from "./metrics.js";
-import { resolveTrail, type TrailConfig } from "./trails.js";
+import { resolveTrail, loadTrails, createTrail, updateTrail, disableTrail, deleteTrail, type TrailConfig } from "./trails.js";
 import { handleGetNote, handleSearch, handleListNotes, handleStats } from "./rest.js";
 import { startStatsTimer } from "./vault-stats.js";
 
@@ -996,7 +996,7 @@ const server = createServer(async (req, res) => {
     if (req.method === "OPTIONS") {
       res.writeHead(204, {
         "Access-Control-Allow-Origin": REST_CORS_ORIGIN,
-        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type, Authorization",
         "Access-Control-Max-Age": "86400",
       });
@@ -1123,6 +1123,88 @@ const server = createServer(async (req, res) => {
       }
       res.writeHead(200, restHeaders);
       res.end(JSON.stringify(stats));
+      return;
+    }
+
+    // POST /v1/admin/trails — list, create, update, delete (admin only)
+    if (url.pathname === "/v1/admin/trails" && req.method === "POST") {
+      if (restTrail) {
+        // Trail-scoped keys cannot manage trails
+        res.writeHead(403, restHeaders);
+        res.end(JSON.stringify({ error: "admin access required" }));
+        return;
+      }
+
+      let body: string;
+      try { body = await readBody(req); } catch (err: unknown) {
+        if ((err as Error).message === "payload too large") {
+          res.writeHead(413, restHeaders);
+          res.end(JSON.stringify({ error: "payload too large" }));
+          return;
+        }
+        res.writeHead(400, restHeaders);
+        res.end(JSON.stringify({ error: "read error" }));
+        return;
+      }
+      let parsed: any;
+      try { parsed = JSON.parse(body); } catch {
+        res.writeHead(400, restHeaders);
+        res.end(JSON.stringify({ error: "invalid json" }));
+        return;
+      }
+
+      if (parsed.action === "list") {
+        const trails = loadTrails();
+        res.writeHead(200, restHeaders);
+        res.end(JSON.stringify({ trails }));
+        return;
+      }
+
+      if (parsed.action === "create" && parsed.name) {
+        const result = createTrail({
+          name: parsed.name,
+          description: parsed.description,
+          allow_tags: parsed.allow_tags,
+          deny_tags: parsed.deny_tags,
+          allow_types: parsed.allow_types,
+          deny_types: parsed.deny_types,
+          allow_paths: parsed.allow_paths,
+          deny_paths: parsed.deny_paths,
+          rate_limit_reads: parsed.rate_limit_reads,
+          rate_limit_writes: parsed.rate_limit_writes,
+        });
+        res.writeHead(200, restHeaders);
+        res.end(JSON.stringify({ trail: result.trail, token: result.token }));
+        return;
+      }
+
+      if (parsed.action === "update" && parsed.id) {
+        const { id, action, ...updates } = parsed;
+        const ok = updateTrail(id, updates);
+        if (!ok) {
+          res.writeHead(404, restHeaders);
+          res.end(JSON.stringify({ error: "trail not found" }));
+          return;
+        }
+        res.writeHead(200, restHeaders);
+        res.end(JSON.stringify({ updated: id }));
+        return;
+      }
+
+      if (parsed.action === "delete" && parsed.id) {
+        const ok = deleteTrail(parsed.id);
+        if (!ok) {
+          res.writeHead(404, restHeaders);
+          res.end(JSON.stringify({ error: "trail not found" }));
+          return;
+        }
+        res.writeHead(200, restHeaders);
+        res.end(JSON.stringify({ deleted: parsed.id }));
+        return;
+      }
+
+      res.writeHead(400, restHeaders);
+      res.end(JSON.stringify({ error: "invalid action" }));
       return;
     }
 
