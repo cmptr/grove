@@ -17,7 +17,7 @@
 
 import { request as httpsRequest } from "node:https";
 import { request as httpRequest } from "node:http";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { execSync } from "node:child_process";
@@ -346,19 +346,26 @@ async function cmdList(config: Config, pattern: string, flags: Record<string, st
 }
 
 async function cmdWrite(config: Config, path: string, flags: Record<string, string | boolean>): Promise<CmdResult> {
-  if (!path) throw new CliError("bad_request", "Usage: grove write <path> --type <type> [--tags tag1,tag2]", 1);
+  if (!path) throw new CliError("bad_request", "Usage: grove write <path> --type <type> [--content text | stdin]", 1);
   const type = (flags.type as string) ?? "concept";
   const tags = flags.tags
     ? (flags.tags as string).split(",").map((t) => t.trim())
     : [type];
 
-  // Read content from stdin
-  const chunks: Buffer[] = [];
-  process.stdin.on("data", (c) => chunks.push(c));
-  await new Promise<void>((resolve) => process.stdin.on("end", resolve));
-  const content = Buffer.concat(chunks).toString().trim();
+  let content: string;
+  if (typeof flags.content === "string") {
+    content = flags.content.trim();
+  } else if (process.stdin.isTTY) {
+    throw new CliError("bad_request", "Provide content via --content flag or pipe to stdin", 1);
+  } else {
+    // Read content from stdin
+    const chunks: Buffer[] = [];
+    process.stdin.on("data", (c) => chunks.push(c));
+    await new Promise<void>((resolve) => process.stdin.on("end", resolve));
+    content = Buffer.concat(chunks).toString().trim();
+  }
 
-  if (!content) throw new CliError("bad_request", "No content provided on stdin.", 1);
+  if (!content) throw new CliError("bad_request", "No content provided.", 1);
 
   // Write still uses MCP (no PUT /v1/notes endpoint yet)
   const raw = await mcpCall(config, "write_note", {
@@ -388,6 +395,144 @@ async function cmdDiagnostics(config: Config): Promise<CmdResult> {
   const raw = await mcpCall(config, "vault_status", { mode: "diagnostics" });
   const data = tryParseJson(raw) ?? {};
   return { ok: true, ...data, _fmt: formatDiagnostics };
+}
+
+async function cmdGraph(config: Config): Promise<CmdResult> {
+  const data = await restGet(config, "/v1/stats?sections=graph");
+  const graph = data.graph ?? {};
+  return {
+    ok: true,
+    ...graph,
+    _fmt: () => {
+      const lines: string[] = [];
+      if (graph.total_nodes != null) lines.push(`Nodes: ${graph.total_nodes}`);
+      if (graph.total_edges != null) lines.push(`Edges: ${graph.total_edges}`);
+      if (graph.clusters) {
+        lines.push(`\nClusters: ${graph.clusters.length}`);
+        for (const c of graph.clusters.slice(0, 10)) {
+          lines.push(`  ${c.label ?? c.id ?? "?"}: ${c.size ?? c.count ?? "?"} notes`);
+        }
+      }
+      if (graph.top_hubs) {
+        lines.push(`\nTop hubs:`);
+        for (const h of graph.top_hubs.slice(0, 10)) {
+          lines.push(`  ${h.path ?? h.title ?? h}: ${h.degree ?? h.connections ?? ""}`);
+        }
+      }
+      return lines.join("\n") || JSON.stringify(graph, null, 2);
+    },
+  };
+}
+
+async function cmdDigest(config: Config): Promise<CmdResult> {
+  const data = await restGet(config, "/v1/stats?sections=lifecycle");
+  const lifecycle = data.lifecycle ?? {};
+  return {
+    ok: true,
+    ...lifecycle,
+    _fmt: () => {
+      const lines: string[] = [];
+      if (lifecycle.stages) {
+        for (const [stage, info] of Object.entries(lifecycle.stages as Record<string, any>)) {
+          lines.push(`${stage}: ${info.count ?? info}`);
+        }
+      } else {
+        // Flat lifecycle object
+        for (const [k, v] of Object.entries(lifecycle)) {
+          if (k === "velocity_7d") continue;
+          lines.push(`${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`);
+        }
+      }
+      if (lifecycle.velocity_7d != null) lines.push(`\nVelocity (7d): ${lifecycle.velocity_7d}`);
+      return lines.join("\n") || JSON.stringify(lifecycle, null, 2);
+    },
+  };
+}
+
+async function cmdHealth(config: Config): Promise<CmdResult> {
+  const url = new URL("/health", config.server);
+  const res = await httpDo("GET", url, { Authorization: `Bearer ${config.token}` });
+  if (res.status >= 500) throw new CliError("server_error", `Server error (${res.status})`, 3);
+  const data = tryParseJson(res.body) ?? {};
+  const checks = data.checks ?? {};
+  return {
+    ok: true,
+    status: data.ok ? "healthy" : "degraded",
+    components: checks,
+    _fmt: () => {
+      const lines: string[] = [];
+      lines.push(`Status: ${data.ok ? "healthy" : "DEGRADED"}`);
+      if (Object.keys(checks).length > 0) {
+        lines.push("");
+        for (const [name, ok] of Object.entries(checks)) {
+          lines.push(`  ${ok ? "✓" : "✗"} ${name}`);
+        }
+      }
+      return lines.join("\n");
+    },
+  };
+}
+
+async function cmdMetrics(config: Config): Promise<CmdResult> {
+  const url = new URL("/metrics", config.server);
+  const res = await httpDo("GET", url, { Authorization: `Bearer ${config.token}` });
+  handleHttpStatus(res);
+  const data = tryParseJson(res.body) ?? {};
+  return {
+    ok: true,
+    ...data,
+    _fmt: () => {
+      const lines: string[] = [];
+      if (data.started_at) lines.push(`Up since: ${data.started_at}`);
+      if (data.uptime_seconds != null) lines.push(`Uptime:   ${Math.floor(data.uptime_seconds / 3600)}h ${Math.floor((data.uptime_seconds % 3600) / 60)}m`);
+      lines.push(`Requests: ${data.total_requests ?? 0}`);
+      lines.push(`Errors:   ${data.total_errors ?? 0} (${((data.error_rate ?? 0) * 100).toFixed(1)}%)`);
+
+      const byTool = data.by_tool as Record<string, any> | undefined;
+      if (byTool && Object.keys(byTool).length > 0) {
+        lines.push("\nBy endpoint:");
+        for (const [name, stats] of Object.entries(byTool)) {
+          lines.push(`  ${name}: ${stats.count} req, p50=${stats.latency_p50}ms, p95=${stats.latency_p95}ms`);
+        }
+      }
+
+      const search = data.search as Record<string, any> | undefined;
+      if (search && search.queries_1h > 0) {
+        lines.push(`\nSearch (1h): ${search.queries_1h} queries, avg ${search.avg_latency_ms}ms, ${((search.zero_result_rate ?? 0) * 100).toFixed(0)}% zero-result`);
+      }
+      return lines.join("\n");
+    },
+  };
+}
+
+async function cmdInit(flags: Record<string, string | boolean>): Promise<CmdResult> {
+  const server = (flags.server as string) ?? "https://api.grove.md";
+  const token = flags.token as string;
+  if (!token) throw new CliError("bad_request", "Usage: grove init --server <url> --token <token>", 1);
+
+  // Validate by calling /health
+  const url = new URL("/health", server);
+  let res: { status: number; body: string };
+  try {
+    res = await httpDo("GET", url, { Authorization: `Bearer ${token}` });
+  } catch (err) {
+    if (err instanceof CliError) throw err;
+    throw new CliError("connection_refused", `Cannot connect to ${server}`, 3);
+  }
+  if (res.status >= 400) throw new CliError("auth_error", `Server returned ${res.status}. Check your token.`, 2);
+
+  // Write config
+  const configDir = join(homedir(), ".grove");
+  const configPath = join(configDir, "cli.json");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(configPath, JSON.stringify({ server, token }, null, 2) + "\n");
+
+  return {
+    ok: true,
+    server,
+    config_path: configPath,
+    _fmt: () => `Connected to ${server}\nConfig written to ${configPath}`,
+  };
 }
 
 async function cmdSync(config: Config, dir: string, flags: Record<string, string | boolean>): Promise<CmdResult> {
@@ -668,42 +813,201 @@ function cmdLint(dir: string, flags: Record<string, string | boolean>): CmdResul
   };
 }
 
-// ── Usage ───────────────────────────────────────────────────────
+// ── Help system ─────────────────────────────────────────────────
+
+interface CmdHelp {
+  usage: string;
+  description: string;
+  flags?: string[];
+  json_schema?: string;
+  exit_codes?: string;
+  examples?: string[];
+}
+
+const EXIT_CODES = "Exit: 0=success, 1=bad input/not found, 2=auth, 3=server";
+
+export const HELP: Record<string, CmdHelp> = {
+  search: {
+    usage: "grove search <query> [-n N] [--json] [--paths]",
+    description: "Search notes. Returns ranked results with snippets.",
+    flags: ["-n N      Max results (default 10)", "--json    JSON output", "--paths   Paths only (for piping)"],
+    json_schema: "{ok, results: [{path, title, score, snippet}], count}",
+    exit_codes: EXIT_CODES,
+    examples: ["grove search 'taste graph'", "grove search 'parametric design' -n 5"],
+  },
+  read: {
+    usage: "grove read <path-or-title> [--json]",
+    description: "Read a single note by path or title.",
+    flags: ["--json    JSON output"],
+    json_schema: "{ok, path, frontmatter, content, content_hash, resolved_from?}",
+    exit_codes: EXIT_CODES,
+    examples: ["grove read 'Taste Graph'", "grove read Resources/Concepts/taste-graph.md"],
+  },
+  list: {
+    usage: "grove list <glob> [--aliases] [--json]",
+    description: "List notes matching a glob pattern.",
+    flags: ["--aliases  Include aliases", "--json     JSON output"],
+    json_schema: "{ok, entries: [{path, type, modified_at, aliases?}], count}",
+    exit_codes: EXIT_CODES,
+    examples: ["grove list 'Resources/People/*'", "grove list 'Journal/2026/*' --json"],
+  },
+  write: {
+    usage: "grove write <path> --type <type> [--content text | stdin] [--tags t1,t2]",
+    description: "Create or update a note. Content from --content flag or stdin.",
+    flags: ["--type T      Note type (default: concept)", "--content S   Note content (alternative to stdin)", "--tags T1,T2  Comma-separated tags"],
+    json_schema: "{ok, path, action, content_hash, url}",
+    exit_codes: EXIT_CODES,
+    examples: ["grove write Inbox/idea.md --type concept --content 'My idea'", "cat draft.md | grove write Resources/Concepts/new.md --type concept"],
+  },
+  init: {
+    usage: "grove init --server <url> --token <token>",
+    description: "Configure Grove CLI. Validates connection and writes ~/.grove/cli.json.",
+    flags: ["--server URL  Server URL (default: https://api.grove.md)", "--token T     API token (required)"],
+    json_schema: "{ok, server, config_path}",
+    exit_codes: EXIT_CODES,
+    examples: ["grove init --server https://api.grove.md --token grove_live_xxx"],
+  },
+  graph: {
+    usage: "grove graph [--json]",
+    description: "Show vault knowledge graph — clusters, hubs, centrality.",
+    flags: ["--json    JSON output"],
+    json_schema: "{ok, total_nodes, total_edges, clusters, top_hubs}",
+    exit_codes: EXIT_CODES,
+  },
+  digest: {
+    usage: "grove digest [--json]",
+    description: "Show note lifecycle stages — seeds, sprouts, growing, mature, dormant, withering.",
+    flags: ["--json    JSON output"],
+    json_schema: "{ok, stages, velocity_7d}",
+    exit_codes: EXIT_CODES,
+  },
+  health: {
+    usage: "grove health [--json]",
+    description: "Check server component health.",
+    flags: ["--json    JSON output"],
+    json_schema: "{ok, status, components: {proxy, grove-server, qmd, embed}}",
+    exit_codes: EXIT_CODES,
+  },
+  metrics: {
+    usage: "grove metrics [--json]",
+    description: "Show server request counts, latency, and error rates.",
+    flags: ["--json    JSON output"],
+    json_schema: "{ok, started_at, uptime_seconds, total_requests, error_rate, by_tool, search}",
+    exit_codes: EXIT_CODES,
+  },
+  status: {
+    usage: "grove status [--json]",
+    description: "Vault health overview.",
+    flags: ["--json    JSON output"],
+    json_schema: "{ok, vault, freshness, graph, index, lifecycle, git}",
+    exit_codes: EXIT_CODES,
+  },
+  history: {
+    usage: "grove history [--since <date>] [--json]",
+    description: "Recent vault changes.",
+    flags: ["--since D  Date string (default: '1 week ago')", "--json     JSON output"],
+    json_schema: "{ok, entries: [{date, message, files}]}",
+    exit_codes: EXIT_CODES,
+  },
+  diagnostics: {
+    usage: "grove diagnostics [--json]",
+    description: "Run vault diagnostics — orphans, broken links, missing frontmatter.",
+    flags: ["--json    JSON output"],
+    json_schema: "{ok, total_notes, orphans, broken_links, missing_frontmatter, stale_inbox}",
+    exit_codes: EXIT_CODES,
+  },
+  keys: {
+    usage: "grove keys [list|create|revoke] [--json]",
+    description: "Manage API keys.",
+    flags: ["--json    JSON output"],
+    json_schema: "{ok, keys: [{id, name, scopes, vault_id, created_at, last_used_at}]}",
+    exit_codes: EXIT_CODES,
+    examples: ["grove keys", "grove keys create laptop", "grove keys revoke key_abc123"],
+  },
+  trails: {
+    usage: "grove trails [list|create|disable|delete] [--json]",
+    description: "Manage trails (scoped read access).",
+    flags: ["--allow-tags T   Allow tags", "--deny-tags T    Deny tags", "--allow-types T  Allow types", "--allow-paths P  Allow paths", "--json           JSON output"],
+    json_schema: "{ok, trails: [{id, name, enabled, allow_tags, allow_paths}]}",
+    exit_codes: EXIT_CODES,
+  },
+  sync: {
+    usage: "grove sync <dir> [--dry-run] [--json]",
+    description: "Sync archived Sources directory to Grove.",
+    flags: ["--dry-run  Show what would be synced", "--json     JSON output"],
+    json_schema: "{ok, action, created, failed, skipped, results}",
+    exit_codes: EXIT_CODES,
+  },
+  lint: {
+    usage: "grove lint <dir> [--dry-run] [--json]",
+    description: "Normalize YAML frontmatter in .md files.",
+    flags: ["--dry-run  Show what would change", "--json     JSON output"],
+    json_schema: "{ok, changed, total}",
+    exit_codes: EXIT_CODES,
+  },
+  snapshot: {
+    usage: "grove snapshot [name] | grove snapshot list",
+    description: "Create or list vault snapshots (git tags).",
+    json_schema: "{ok, tag, message?} | {ok, snapshots: [string]}",
+    exit_codes: EXIT_CODES,
+  },
+  rollback: {
+    usage: "grove rollback <tag>",
+    description: "Restore vault to a snapshot.",
+    json_schema: "{ok, rolled_back_to}",
+    exit_codes: EXIT_CODES,
+  },
+};
+
+export function printCommandHelp(cmd: string): string {
+  const h = HELP[cmd];
+  if (!h) return `Unknown command: ${cmd}\nRun 'grove' for available commands.`;
+  const lines: string[] = [h.usage, `  ${h.description}`, ""];
+  if (h.flags?.length) {
+    lines.push("Flags:");
+    for (const f of h.flags) lines.push(`  ${f}`);
+    lines.push("");
+  }
+  if (h.json_schema) lines.push(`JSON: ${h.json_schema}`);
+  if (h.exit_codes) lines.push(h.exit_codes);
+  if (h.examples?.length) {
+    lines.push("\nExamples:");
+    for (const e of h.examples) lines.push(`  ${e}`);
+  }
+  return lines.join("\n");
+}
 
 function printUsage(): string {
   return `grove — CLI client for the Grove knowledge API
 
-Usage:
-  grove search <query> [-n limit]       Search notes
-  grove read <path-or-title>            Read a note
-  grove list <glob> [--aliases]         List notes
-  grove write <path> --type <type>      Create note (content from stdin)
-  grove sync <dir> [--dry-run]          Sync archived Sources to Grove
-  grove keys                            List all API keys
-  grove keys create <name>              Create a new key (token shown once)
-  grove keys revoke <key-id>            Revoke a key
-  grove trails                          List all trails
-  grove trails create <name> [opts]     Create a trail (--allow-tags, --deny-tags, --allow-types, --allow-paths)
-  grove trails disable <trail-id>       Disable a trail
-  grove trails delete <trail-id>        Delete a trail
-  grove lint <dir> [--dry-run]          Normalize YAML frontmatter in .md files
-  grove snapshot [name]                 Create a vault snapshot (git tag)
-  grove snapshot list                   List recent snapshots
-  grove rollback <tag>                  Restore vault to a snapshot
-  grove history [--since <date>]        Recent changes
-  grove status                          Vault health
-  grove diagnostics                     Run diagnostics
+Commands:
+  search <query>          Search notes
+  read <path-or-title>    Read a note
+  list <glob>             List notes
+  write <path>            Create/update a note
+  graph                   Knowledge graph overview
+  digest                  Note lifecycle stages
+  history                 Recent changes
+  status                  Vault health overview
+  diagnostics             Run vault diagnostics
+
+  health                  Server component health
+  metrics                 Request counts and latency
+
+  init                    Configure CLI connection
+  keys                    Manage API keys
+  trails                  Manage trails (scoped access)
+  sync <dir>              Sync archived Sources
+  lint <dir>              Normalize frontmatter
+  snapshot                Create/list vault snapshots
+  rollback <tag>          Restore vault to snapshot
 
 Flags:
-  --json                                Force JSON output (auto-enabled when piped)
+  --json                  Force JSON output (auto-enabled when piped)
+  --help                  Show help for a command
 
-Config: ~/.grove/cli.json
-  { "server": "https://api.grove.md", "token": "grove_live_..." }
-
-New device setup:
-  1. On an existing device:  grove keys create <device-name>
-  2. Copy the token
-  3. On the new device:      mkdir -p ~/.grove && echo '{"server":"https://api.grove.md","token":"grove_live_..."}' > ~/.grove/cli.json`;
+Config: ~/.grove/cli.json  |  Env: GROVE_SERVER, GROVE_TOKEN
+Setup: grove init --server https://api.grove.md --token grove_live_...`;
 }
 
 // ── Output dispatcher ───────────────────────────────────────────
@@ -744,6 +1048,12 @@ async function main() {
     return;
   }
 
+  // Per-command --help
+  if (flags.help) {
+    process.stdout.write(printCommandHelp(command) + "\n");
+    return;
+  }
+
   try {
     let result: CmdResult;
 
@@ -751,6 +1061,7 @@ async function main() {
     if (command === "snapshot") { result = cmdSnapshot(process.argv.slice(3)); emitResult(result, json); return; }
     if (command === "rollback") { result = cmdRollback(positional); emitResult(result, json); return; }
     if (command === "lint") { result = cmdLint(positional, flags); emitResult(result, json); return; }
+    if (command === "init") { result = await cmdInit(flags); emitResult(result, json); return; }
     if (command === "trails") {
       const sub = positional || "list";
       const subArg = process.argv.slice(4)[0] ?? "";
@@ -793,8 +1104,12 @@ async function main() {
       case "history":     result = await cmdHistory(config, flags); break;
       case "status":      result = await cmdStatus(config); break;
       case "diagnostics": result = await cmdDiagnostics(config); break;
+      case "graph":       result = await cmdGraph(config); break;
+      case "digest":      result = await cmdDigest(config); break;
+      case "health":      result = await cmdHealth(config); break;
+      case "metrics":     result = await cmdMetrics(config); break;
       default:
-        throw new CliError("bad_request", `Unknown command: ${command}`, 1);
+        throw new CliError("bad_request", `Unknown command: ${command}\nRun 'grove' for available commands.`, 1);
     }
     emitResult(result, json);
   } catch (err) {
