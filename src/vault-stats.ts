@@ -7,6 +7,7 @@
  */
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { join, relative, basename } from "node:path";
 import { parse as yamlParse } from "yaml";
 import Database from "better-sqlite3";
@@ -54,6 +55,12 @@ export interface VaultStats {
     dormant: number;
     withering: number;
   };
+  git: {
+    last_commit_at: string;
+    last_commit_msg: string;
+    uncommitted_changes: number;
+    branch: string;
+  } | null;
   computed_at: string;
 }
 
@@ -330,6 +337,23 @@ async function computeLifecycleSection(
   }
 }
 
+// ── Git Section ─────────────────────────────────────────────────────
+
+function computeGitSection(vaultPath: string): VaultStats["git"] {
+  const opts = { cwd: vaultPath, encoding: "utf-8" as const };
+  try {
+    const last_commit_at = execSync("git log -1 --format=%cI", opts).trim();
+    const last_commit_msg = execSync("git log -1 --format=%s", opts).trim();
+    const porcelain = execSync("git status --porcelain", opts).trim();
+    const uncommitted_changes = porcelain === "" ? 0 : porcelain.split("\n").length;
+    const branch = execSync("git rev-parse --abbrev-ref HEAD", opts).trim();
+    return { last_commit_at, last_commit_msg, uncommitted_changes, branch };
+  } catch (err) {
+    console.warn("[vault-stats] git section failed:", err);
+    return null;
+  }
+}
+
 // ── Main Computation ─────────────────────────────────────────────────
 
 export async function computeVaultStats(
@@ -340,7 +364,8 @@ export async function computeVaultStats(
   const { section: vault, fileInfos } = computeVaultSection(vaultPath, files);
   const freshness = computeFreshness(fileInfos);
   const index = computeIndexSection(vault.total_notes);
-  console.log(`[vault-stats] vault/freshness/index computed in ${Date.now() - t0}ms (${files.length} files)`);
+  const git = computeGitSection(vaultPath);
+  console.log(`[vault-stats] vault/freshness/index/git computed in ${Date.now() - t0}ms (${files.length} files)`);
 
   // Graph and lifecycle both do their own vault walks — run in parallel
   // Use a timeout so a slow Brandes' doesn't block everything
@@ -369,6 +394,7 @@ export async function computeVaultStats(
     graph,
     index,
     lifecycle,
+    git,
     computed_at: new Date().toISOString(),
   };
 }
@@ -405,6 +431,8 @@ function pingHeartbeat(stats: VaultStats): void {
     `tags=${stats.vault.tag_cardinality}`,
     `nodes=${stats.graph.nodes}`,
     `edges=${stats.graph.edges}`,
+    `branch=${stats.git?.branch ?? "unknown"}`,
+    `uncommitted=${stats.git?.uncommitted_changes ?? "?"}`,
   ].join(" | ");
 
   fetch(HEARTBEAT_URL, { method: "POST", body: summary }).catch((err) =>
