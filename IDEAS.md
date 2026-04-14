@@ -21,6 +21,7 @@ Tell me an idea — a sentence, a half-thought, a "what if." I'll capture it as 
 - **Growth prompting heartbeat** — proactive system that prompts the user with questions designed to grow the graph in the right direction (fill gaps, connect islands, deepen thin concepts)
 - **Image uploads as graph nodes** — support uploading popular image formats (PNG, JPG, WebP), auto-tag them with concepts, and treat them as first-class nodes in the knowledge graph
 - **Pinterest-style image view** — visual grid/masonry layout for browsing image nodes in the vault, filterable by tags and connections
+- **Vault-agnostic structure** — decouple Grove from PARA folder conventions (Areas/, Resources/, Journal/, etc.) so it works with any Obsidian vault organization. Folder semantics should be configurable or inferred, not hard-coded.
 
 ---
 
