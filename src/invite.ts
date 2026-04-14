@@ -110,7 +110,10 @@ export async function inviteUser(
     new Date(Date.now() + 15 * 60 * 1000).toISOString(),
   );
 
-  const verifyUrl = `${baseUrl}/auth/verify?token=${token}&email=${encodeURIComponent(normalizedEmail)}`;
+  // Redirect through grove.md auth callback so the user gets a session cookie and lands on the trail
+  const wwwBase = baseUrl.replace("api.grove.md", "grove.md");
+  const redirect = `${wwwBase}/api/auth/callback?trail=${encodeURIComponent(trailId)}`;
+  const verifyUrl = `${baseUrl}/auth/verify?token=${token}&email=${encodeURIComponent(normalizedEmail)}&redirect=${encodeURIComponent(redirect)}`;
   await sendMagicLinkEmail(normalizedEmail, verifyUrl, { welcome: true, trailName: trail.name });
 
   return {

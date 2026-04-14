@@ -71,6 +71,16 @@ type AdminAuthResult =
   | { ok: true; keyId: string; keyName: string; userId: string }
   | { ok: false; status: 401 | 403 };
 
+/** Authenticate any session-cookie user (regardless of role). */
+function sessionAuth(req: IncomingMessage): AdminAuthResult {
+  const sessionToken = getSessionFromCookie(req);
+  if (sessionToken) {
+    const user = validateSession(sessionToken);
+    if (user) return { ok: true, keyId: user.id, keyName: user.username ?? user.email, userId: user.id };
+  }
+  return { ok: false, status: 401 };
+}
+
 function adminAuth(req: IncomingMessage): AdminAuthResult {
   // Check session cookie first (persistent in SQLite)
   const sessionToken = getSessionFromCookie(req);
@@ -942,7 +952,9 @@ const server = createServer(async (req, res) => {
 
   // ── Key management API (admin session cookie or bearer auth required) ──
   if (url.pathname === "/keys" && req.method === "POST") {
-    const admin = adminAuth(req);
+    // Allow any authenticated user to manage their own keys; fall back to admin auth for Bearer tokens
+    const session = sessionAuth(req);
+    const admin = session.ok ? session : adminAuth(req);
     if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
     let body: string;
