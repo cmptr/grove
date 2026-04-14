@@ -406,12 +406,13 @@ export interface ListEntry {
  * If a trail is provided, filters to trail-visible notes only.
  */
 export function handleListNotes(prefix: string, trail?: TrailConfig | null): ListEntry[] {
-  const dirPrefix = prefix.endsWith("/") ? prefix : prefix + "/";
+  // Empty prefix means "list all notes" (for sidebar folder discovery)
+  const dirPrefix = prefix === "" ? "" : (prefix.endsWith("/") ? prefix : prefix + "/");
   const allNotes = listNotes(VAULT_PATH, "*");
 
   return allNotes
     .filter((n) => {
-      if (!n.path.startsWith(dirPrefix)) return false;
+      if (dirPrefix !== "" && !n.path.startsWith(dirPrefix)) return false;
       if (trail) {
         const meta: NoteMetadata = {
           path: n.path,
