@@ -975,6 +975,33 @@ async function cmdTrailDelete(config: Config, id: string, flags: Record<string, 
   return { ok: true, deleted: id, _fmt: () => `Deleted trail: ${id}` };
 }
 
+// ── Share (remote, via /v1/admin/share API) ────────────────────
+
+async function cmdShare(config: Config, notePath: string, flags: Record<string, string | boolean>): Promise<CmdResult> {
+  if (!notePath) throw new CliError("bad_request", "Usage: grove share <note-path> [--ttl 24h|7d] [--max-views 100]", 1);
+
+  // Parse TTL — supports "24h", "1d", "7d" etc. Default 7d.
+  let ttlDays = 7;
+  const ttlRaw = flags.ttl as string | undefined;
+  if (ttlRaw) {
+    const m = ttlRaw.match(/^(\d+)(h|d)$/i);
+    if (!m) throw new CliError("bad_request", "Invalid --ttl format. Use e.g. 24h or 7d", 1);
+    const [, num, unit] = m;
+    ttlDays = unit.toLowerCase() === "h" ? Number(num) / 24 : Number(num);
+  }
+
+  const maxViews = flags["max-views"] ? Number(flags["max-views"]) : undefined;
+
+  const url = new URL("/v1/admin/share", config.server);
+  const body: Record<string, unknown> = { note_path: notePath, ttl_days: ttlDays };
+  if (maxViews) body.max_views = maxViews;
+
+  const res = await httpDo("POST", url, { Authorization: `Bearer ${config.token}` }, JSON.stringify(body));
+  handleHttpStatus(res);
+  const data = JSON.parse(res.body);
+  return { lines: [`${data.url}\n\nExpires: ${data.expires_at}  Views: 0/${maxViews ?? 100}`], data };
+}
+
 // ── Invite (remote, via /v1/admin/invite API) ──────────────────
 
 async function cmdInvite(config: Config, email: string, flags: Record<string, string | boolean>): Promise<CmdResult> {
@@ -1491,6 +1518,13 @@ async function main() {
         default:
           throw new CliError("bad_request", `Unknown keys subcommand: ${sub}\nUsage: grove keys [list|create|revoke]`, 1);
       }
+      emitResult(result, json);
+      return;
+    }
+
+    // Share
+    if (command === "share") {
+      result = await cmdShare(config, positional, flags);
       emitResult(result, json);
       return;
     }
