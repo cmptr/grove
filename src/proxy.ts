@@ -1153,22 +1153,12 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // GET /v1/share/:id — resolve a share link (returns note_path + allowed backlinks)
-    // Requires session auth (the viewer must be signed in)
+    // GET /v1/share/:id — resolve a share link (public, no auth required)
+    // The share ID itself is the secret — anyone with the link can view.
     const shareMatch = url.pathname.match(/^\/v1\/share\/([^/]+)$/);
     if (shareMatch && req.method === "GET") {
-      // Session auth — viewer must be signed in
-      const sessionToken = getSessionFromCookie(req);
-      const restAuth2 = req.headers.authorization;
-      const restToken2 = restAuth2?.startsWith("Bearer ") ? restAuth2.slice(7) : null;
-
-      const hasSession = sessionToken ? !!validateSession(sessionToken) : false;
-      const hasBearer = restToken2 ? !!validateToken(restToken2) : false;
-
-      if (!hasSession && !hasBearer) {
-        sendJson(res, 401, { error: "sign in required to view shared notes" });
-        return;
-      }
+      // CORS: allow any origin for public share links
+      res.setHeader("Access-Control-Allow-Origin", "*");
 
       const shareId = decodeURIComponent(shareMatch[1]);
       const link = resolveShareLink(shareId);
@@ -1177,9 +1167,24 @@ const server = createServer(async (req, res) => {
         return;
       }
 
+      // Read the note content from disk
+      let noteContent: string | null = null;
+      let noteTitle: string | null = null;
+      try {
+        const note = await handleGetNote(link.note_path);
+        if (note) {
+          noteContent = note.content;
+          noteTitle = note.title ?? link.note_path.replace(/\.md$/, "").split("/").pop() ?? null;
+        }
+      } catch {
+        // Note may have been deleted — still return the share metadata
+      }
+
       sendJson(res, 200, {
         id: link.id,
         note_path: link.note_path,
+        title: noteTitle,
+        content: noteContent,
         expires_at: link.expires_at,
         view_count: link.view_count,
         max_views: link.max_views,
