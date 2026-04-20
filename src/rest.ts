@@ -411,13 +411,49 @@ export interface ListEntry {
   type: string | null;
   tags: string[];
   modified_at: string;
+  // Image-specific (populated only for notes with type: image)
+  thumbnail_url?: string;
+  image_url?: string;
+  dimensions?: { width: number; height: number };
+  description?: string;
+}
+
+/**
+ * Read image-specific frontmatter fields from a note file.
+ * Returns undefined if the file is unreadable or missing image metadata.
+ */
+function readImageMetadata(notePath: string): Pick<ListEntry, "thumbnail_url" | "image_url" | "dimensions" | "description"> {
+  try {
+    const abs = join(VAULT_PATH, notePath);
+    const raw = readFileSync(abs, "utf-8");
+    const { frontmatter, content } = parseNote(raw);
+    const out: Pick<ListEntry, "thumbnail_url" | "image_url" | "dimensions" | "description"> = {};
+    if (typeof frontmatter.thumbnail_url === "string") out.thumbnail_url = frontmatter.thumbnail_url;
+    if (typeof frontmatter.image_url === "string") out.image_url = frontmatter.image_url;
+    const dim = frontmatter.dimensions;
+    if (dim && typeof dim === "object" && typeof (dim as Record<string, unknown>).width === "number"
+        && typeof (dim as Record<string, unknown>).height === "number") {
+      out.dimensions = { width: (dim as { width: number }).width, height: (dim as { height: number }).height };
+    }
+    // Description: first non-heading paragraph of content, truncated
+    const firstPara = content
+      .split("\n")
+      .map((l) => l.trim())
+      .find((l) => l && !l.startsWith("#") && !l.startsWith("!["));
+    if (firstPara) out.description = firstPara.slice(0, 240);
+    return out;
+  } catch {
+    return {};
+  }
 }
 
 /**
  * List notes under a path prefix. Returns metadata for each note.
  * If a trail is provided, filters to trail-visible notes only.
+ * If a type is provided, filters to notes with that frontmatter type.
+ * Image notes (type: image) carry thumbnail_url/image_url/dimensions.
  */
-export function handleListNotes(prefix: string, trail?: TrailConfig | null): ListEntry[] {
+export function handleListNotes(prefix: string, trail?: TrailConfig | null, type?: string | null): ListEntry[] {
   // Empty prefix means "list all notes" (for sidebar folder discovery)
   const dirPrefix = prefix === "" ? "" : (prefix.endsWith("/") ? prefix : prefix + "/");
   const allNotes = listNotes(VAULT_PATH, "*");
@@ -425,6 +461,7 @@ export function handleListNotes(prefix: string, trail?: TrailConfig | null): Lis
   return allNotes
     .filter((n) => {
       if (dirPrefix !== "" && !n.path.startsWith(dirPrefix)) return false;
+      if (type && n.type !== type) return false;
       if (trail) {
         const meta: NoteMetadata = {
           path: n.path,
@@ -436,13 +473,17 @@ export function handleListNotes(prefix: string, trail?: TrailConfig | null): Lis
       }
       return true;
     })
-    .map((n) => ({
-      path: n.path,
-      name: n.name,
-      type: n.type,
-      tags: n.tags ?? [],
-      modified_at: n.modified_at,
-    }))
+    .map((n): ListEntry => {
+      const base: ListEntry = {
+        path: n.path,
+        name: n.name,
+        type: n.type,
+        tags: n.tags ?? [],
+        modified_at: n.modified_at,
+      };
+      if (n.type === "image") Object.assign(base, readImageMetadata(n.path));
+      return base;
+    })
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
