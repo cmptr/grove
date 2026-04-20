@@ -12,6 +12,7 @@ import { homedir } from "node:os";
 import { hybridSearch, bm25Search } from "./hybrid-search.js";
 import { gitLog, listNotes, gitCommit, qmdReindex, gitPush } from "./vault-ops.js";
 import { validatePath, validateNote, parseNote, serializeNote, contentHash } from "./notes-validate.js";
+import { loadVaultConfig } from "./vault-config.js";
 import { filterByTrail, trailAllowsWrite, getTrailPublicInfo, getTrailConfig, type TrailConfig, type NoteMetadata } from "./trails.js";
 import { getStats, refreshStats } from "./vault-stats.js";
 import { analyzeGraph, computeDigest } from "./vault-graph.js";
@@ -699,8 +700,8 @@ export async function handleWriteNote(
   }
   const relPath = relative(VAULT_PATH, absPath);
 
-  // Validate note structure
-  const { errors } = validateNote(relPath, frontmatter, content);
+  // Validate note structure (config drives type_paths + tag rules + journal pattern)
+  const { errors } = validateNote(relPath, frontmatter, content, loadVaultConfig(VAULT_PATH));
   if (errors.length > 0) {
     throw Object.assign(new Error(`Validation errors:\n${errors.map((e) => `- ${e}`).join("\n")}`), { code: "VALIDATION", errors });
   }

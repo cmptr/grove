@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { resolve, relative } from "node:path";
 import { lstatSync } from "node:fs";
 import { parse as yamlParse, stringify as yamlStringify } from "yaml";
+import { getDefaultConfig, journalFilenameRegex, type VaultConfig } from "./vault-config.js";
 
 // ── Known types & required fields ──────────────────────────────────
 // Types with specific requirements are listed here.
@@ -11,35 +12,17 @@ const KNOWN_TYPES: Record<string, { required: string[] }> = {
   recipe:   { required: ["meal_type"] },
 };
 
-// ── Type → allowed folder prefixes (Inbox/ and Notes/ accept anything) ──
-const TYPE_PATHS: Record<string, string> = {
-  concept: "Resources/Concepts/",
-  person:  "Resources/People/",
-  recipe:  "Resources/Recipes/",
-  project: "Resources/Projects/",
-  company: "Resources/Companies/",
-  place:   "Resources/Places/",
-  journal: "Journal/",
-  source:  "Sources/",
-};
-
-// ── Path-based tag inference rules ─────────────────────────────────
-const TAG_RULES: Array<{ prefix: string; tags: string[] }> = [
-  { prefix: "Journal/",           tags: ["journal"] },
-  { prefix: "Resources/People/",  tags: ["person"] },
-  { prefix: "Resources/Concepts/",tags: ["concept"] },
-  { prefix: "Resources/Recipes/", tags: ["recipe"] },
-  { prefix: "Areas/Health/",      tags: ["health", "private"] },
-  { prefix: "Areas/Finances/",    tags: ["finances", "private"] },
-];
-
 /**
  * Infer tags from a note's path and frontmatter. Returns a deduplicated
  * array merging existing tags with inferred ones. Never removes tags.
+ *
+ * Tag rules come from the vault config. If config is omitted, PARA defaults
+ * are used (current behavior).
  */
 export function inferTags(
   path: string,
   frontmatter: Record<string, unknown>,
+  config: VaultConfig = getDefaultConfig(),
 ): string[] {
   const existing = Array.isArray(frontmatter.tags)
     ? (frontmatter.tags as string[])
@@ -49,8 +32,7 @@ export function inferTags(
 
   const inferred = new Set<string>(existing);
 
-  // Path-based rules
-  for (const rule of TAG_RULES) {
+  for (const rule of config.structure.tag_rules) {
     if (path.startsWith(rule.prefix)) {
       for (const t of rule.tags) inferred.add(t);
     }
@@ -63,7 +45,6 @@ export function inferTags(
 }
 
 const MAX_CONTENT_BYTES = 100 * 1024;
-const JOURNAL_RE = /^\d{4}-\d{2}-\d{2}(-\d+)?\.md$/;
 
 // ── Path validation ─────────────────────────────────────────────────
 export function validatePath(vaultRoot: string, filePath: string): string {
@@ -97,6 +78,7 @@ export function validateNote(
   path: string,
   frontmatter: Record<string, unknown>,
   content: string,
+  config: VaultConfig = getDefaultConfig(),
 ): { errors: string[] } {
   const errors: string[] = [];
   const raw = serializeNote(frontmatter, content);
@@ -128,21 +110,30 @@ export function validateNote(
   if (tags.length === 0)
     errors.push(`At least one tag is required`);
 
-  // Path/type consistency: reject only when a note is in another type's folder
-  const basename = path.split("/").pop() ?? "";
-  const relSegments = path;
-
-  for (const [otherType, prefix] of Object.entries(TYPE_PATHS)) {
-    if (otherType === type) continue;
-    if (relSegments.startsWith(prefix) || relSegments.includes(`/${prefix}`)) {
-      errors.push(`Type '${type}' cannot be placed under ${prefix} (that's for '${otherType}')`);
-      break;
+  // Path/type consistency: reject only when a note is in another type's folder.
+  // When type_paths is empty, skip folder validation entirely — type is frontmatter-only.
+  const typePaths = config.structure.type_paths;
+  if (Object.keys(typePaths).length > 0) {
+    for (const [otherType, prefix] of Object.entries(typePaths)) {
+      if (otherType === type) continue;
+      if (path.startsWith(prefix) || path.includes(`/${prefix}`)) {
+        errors.push(`Type '${type}' cannot be placed under ${prefix} (that's for '${otherType}')`);
+        break;
+      }
     }
   }
 
-  // Journal filename pattern
-  if (type === "journal" && !JOURNAL_RE.test(basename))
-    errors.push("Journal entries must match YYYY-MM-DD.md or YYYY-MM-DD-N.md");
+  // Journal filename pattern (driven by config.journal_filename)
+  if (type === "journal") {
+    const journalRe = journalFilenameRegex(config.structure.journal_filename);
+    if (journalRe) {
+      const basename = path.split("/").pop() ?? "";
+      if (!journalRe.test(basename)) {
+        const pattern = config.structure.journal_filename;
+        errors.push(`Journal entries must match ${pattern} or ${pattern?.replace(/\.md$/, "-N.md")}`);
+      }
+    }
+  }
 
   return { errors };
 }
