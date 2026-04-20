@@ -17,7 +17,7 @@
 
 import { request as httpsRequest } from "node:https";
 import { request as httpRequest } from "node:http";
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, existsSync } from "node:fs";
 import { join, relative } from "node:path";
 import { homedir } from "node:os";
 import { execSync } from "node:child_process";
@@ -50,6 +50,11 @@ import {
   completionFish,
 } from "./cli/phase3.js";
 import { runEdit, type EditDeps } from "./cli/edit.js";
+import {
+  CONFIG_RELATIVE_PATH,
+  detectAndWriteConfig,
+  loadVaultConfig,
+} from "./vault-config.js";
 
 // ── Vault path (local git operations) ────────────────────────────
 const VAULT_PATH = process.env.GROVE_VAULT ?? join(homedir(), "life");
@@ -1369,6 +1374,73 @@ function cmdLint(dir: string, flags: Record<string, string | boolean>): CmdResul
   };
 }
 
+// ── Vault config ────────────────────────────────────────────────
+
+function formatVaultConfig(data: Record<string, unknown>): string {
+  const s = (data as any).structure as Record<string, any>;
+  const lines: string[] = [];
+  lines.push(`config_path: ${(data as any).config_path}`);
+  lines.push(`exists:      ${(data as any).exists ? "yes" : "no (defaults in use)"}`);
+  lines.push("");
+  lines.push("entities:");
+  for (const [k, v] of Object.entries(s.entities)) lines.push(`  ${k}: ${v}`);
+  const typePaths = Object.entries(s.type_paths as Record<string, string>);
+  if (typePaths.length) {
+    lines.push("type_paths:");
+    for (const [k, v] of typePaths) lines.push(`  ${k}: ${v}`);
+  } else {
+    lines.push("type_paths: (empty)");
+  }
+  const tagRules = s.tag_rules as Array<{ prefix: string; tags: string[] }>;
+  if (tagRules.length) {
+    lines.push("tag_rules:");
+    for (const r of tagRules) lines.push(`  ${r.prefix} → ${r.tags.join(", ")}`);
+  } else {
+    lines.push("tag_rules: (empty)");
+  }
+  const priv = s.private_paths as string[];
+  lines.push(priv.length ? `private_paths: ${priv.join(", ")}` : "private_paths: (empty)");
+  lines.push(`archive_path: ${s.archive_path}`);
+  lines.push(`journal_path: ${s.journal_path ?? "(none)"}`);
+  lines.push(`journal_filename: ${s.journal_filename ?? "(none)"}`);
+  return lines.join("\n");
+}
+
+function cmdConfigShow(): CmdResult {
+  const configPath = join(VAULT_PATH, CONFIG_RELATIVE_PATH);
+  const exists = existsSync(configPath);
+  const config = loadVaultConfig(VAULT_PATH);
+  return {
+    ok: true,
+    config_path: configPath,
+    exists,
+    structure: config.structure,
+    _fmt: formatVaultConfig,
+  };
+}
+
+async function cmdConfigInit(flags: Record<string, string | boolean>): Promise<CmdResult> {
+  const configPath = join(VAULT_PATH, CONFIG_RELATIVE_PATH);
+  const existed = existsSync(configPath);
+  if (existed && !flags.yes) {
+    await confirmTyped(
+      "init",
+      `re-detect vault structure and overwrite ${CONFIG_RELATIVE_PATH} — current config will be lost.`,
+    );
+  }
+  const { pattern, config } = detectAndWriteConfig(VAULT_PATH);
+  return {
+    ok: true,
+    action: existed ? "regenerated" : "generated",
+    pattern,
+    config_path: configPath,
+    structure: config.structure,
+    _fmt: (data: any) =>
+      `${data.action} ${configPath}\ndetected pattern: ${data.pattern}\n\n` +
+      formatVaultConfig({ ...data, exists: true }),
+  };
+}
+
 // ── Tag backfill ────────────────────────────────────────────────
 
 function walkVaultMd(dir: string, acc: string[] = []): string[] {
@@ -1514,6 +1586,14 @@ export const HELP: Record<string, CmdHelp> = {
     json_schema: "{ok, server, config_path}",
     exit_codes: EXIT_CODES,
     examples: ["grove init --server https://api.grove.md --token grove_live_xxx"],
+  },
+  config: {
+    usage: "grove config [init] [--yes] [--json]",
+    description: "Show or regenerate the vault structure config at $VAULT/.grove/config.yaml. With no subcommand, prints the effective config (defaults used when the file is absent). `config init` re-detects the vault layout and writes a fresh config; it requires --yes or typed confirmation when a config already exists.",
+    flags: ["--yes     Skip confirmation when overwriting an existing config", "--json    JSON output"],
+    json_schema: "{ok, config_path, exists, structure} | {ok, action, pattern, config_path, structure}",
+    exit_codes: EXIT_CODES,
+    examples: ["grove config", "grove config --json", "grove config init", "grove config init --yes"],
   },
   graph: {
     usage: "grove graph [--json]",
@@ -1674,6 +1754,7 @@ Commands:
 
   whoami                  Show current identity
   init                    Configure CLI connection
+  config                  Show vault structure config; 'config init' auto-detects
   keys                    Manage API keys
   trails                  Manage trails (scoped access)
   sync <dir>              Sync archived Sources
@@ -1898,6 +1979,27 @@ async function main() {
       return;
     }
     if (command === "init") { result = await cmdInit(flags); emitResult(result, flags); return; }
+
+    // Vault structure config — local only, reads/writes $VAULT/.grove/config.yaml.
+    if (command === "config") {
+      const sub = positional || "show";
+      switch (sub) {
+        case "show":
+          result = cmdConfigShow();
+          break;
+        case "init":
+          result = await cmdConfigInit(flags);
+          break;
+        default:
+          throw new CliError(
+            "bad_request",
+            `Unknown config subcommand: ${sub}\nUsage: grove config [init] [--yes]`,
+            1,
+          );
+      }
+      emitResult(result, flags);
+      return;
+    }
 
     const config = loadConfig();
 
