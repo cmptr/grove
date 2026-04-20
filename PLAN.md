@@ -876,7 +876,7 @@ All dashboard pages live under `src/app/dashboard/`. Each is a server component 
 
 #### Phase 4c: Trail Consumer Pages
 
-- [ ] **P4-8: Consumer onboarding page**
+- [x] **P4-8: Consumer onboarding page**
 
   **Route:** `src/app/trails/[slug]/page.tsx` (public — no auth required)
 
