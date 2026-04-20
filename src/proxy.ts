@@ -51,6 +51,7 @@ import {
   handleStatusGraph, handleStatusDigest, handleTrailInfo, VALID_STATUS_MODES,
   type StatusMode,
 } from "./rest.js";
+import { VaultLockedError } from "./index-crypto.js";
 import { startStatsTimer } from "./vault-stats.js";
 import { inviteUser } from "./invite.js";
 import { createShareLink, resolveShareLink } from "./share.js";
@@ -1372,6 +1373,11 @@ const server = createServer(async (req, res) => {
         res.writeHead(200, restHeaders);
         res.end(JSON.stringify({ results }));
       } catch (err) {
+        if (err instanceof VaultLockedError) {
+          res.writeHead(503, restHeaders);
+          res.end(JSON.stringify({ error: "vault_locked", message: err.message }));
+          return;
+        }
         console.error("[rest] search error:", err);
         res.writeHead(500, restHeaders);
         res.end(JSON.stringify({ error: "internal error" }));

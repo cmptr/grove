@@ -11,10 +11,10 @@ import { homedir } from "node:os";
 import { existsSync } from "node:fs";
 import Database from "better-sqlite3";
 import { searchMetrics } from "./metrics.js";
+import { assertUnlocked, indexWorkingPath } from "./index-crypto.js";
 
 const VOYAGE_API_KEY = process.env.VOYAGE_API_KEY ?? "";
 const VOYAGE_MODEL = process.env.VOYAGE_MODEL ?? "voyage-4-large";
-const QMD_INDEX = process.env.QMD_INDEX ?? `${process.env.HOME}/.cache/qmd/index.sqlite`;
 const BM25_WEIGHT = parseFloat(process.env.BM25_WEIGHT ?? "1.2");
 const VEC_WEIGHT = parseFloat(process.env.VEC_WEIGHT ?? "1.2");
 
@@ -250,6 +250,7 @@ function getAliasIndex(): Map<string, { title: string; filepath: string }> {
 let _db: InstanceType<typeof Database> | null = null;
 
 function getDb(): InstanceType<typeof Database> {
+  assertUnlocked();
   if (_db) return _db;
 
   const vec0Paths = [
@@ -273,10 +274,23 @@ function getDb(): InstanceType<typeof Database> {
     throw new Error("sqlite-vec vec0 extension not found");
   }
 
-  const db = new Database(QMD_INDEX, { readonly: true });
+  const db = new Database(indexWorkingPath(), { readonly: true });
   db.loadExtension(vec0Path);
   _db = db;
   return db;
+}
+
+/**
+ * Close the cached DB handle. The vault key manager must call this before
+ * re-encrypting the index (a held handle would keep the plaintext file
+ * open and may prevent rename/unlink on Windows).
+ */
+export function closeDb(): void {
+  if (_db) {
+    try { _db.close(); } catch { /* ignore */ }
+    _db = null;
+  }
+  _aliasIndex = null;
 }
 
 /**
@@ -396,6 +410,7 @@ export async function hybridSearch(
   query: string,
   limit: number = 10
 ): Promise<HybridResult[]> {
+  assertUnlocked();
   const searchStart = Date.now();
   const oversample = Math.min(limit * 5, 50);
 
@@ -492,3 +507,4 @@ export function formatResults(results: HybridResult[], resolveRealPath?: (vaultP
 }
 
 export { embedQuery, bm25Search, vectorSearch, titleSearch, stripWikilinks };
+export { VaultLockedError } from "./index-crypto.js";
