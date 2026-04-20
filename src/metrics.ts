@@ -11,11 +11,19 @@ interface MetricBucket {
   latencies: number[]; // raw ms values, capped at 10000 entries
 }
 
+interface TrailBucket {
+  requests: number;
+  reads: number;
+  writes: number;
+  last_request_at: string | null;
+}
+
 const WINDOW_MS = 60_000 * 60; // 1 hour window
 const MAX_LATENCIES = 10_000;
 
 class MetricsCollector {
   private buckets = new Map<string, MetricBucket>();
+  private trailBuckets = new Map<string, TrailBucket>();
   private startedAt = new Date().toISOString();
   private totalRequests = 0;
   private totalErrors = 0;
@@ -41,6 +49,23 @@ class MetricsCollector {
     this.record(key, latencyMs, status >= 400);
   }
 
+  /** Record a request attributed to a specific trail (or "none" for non-trail requests). */
+  recordTrailRequest(trailId: string, isWrite: boolean): void {
+    let bucket = this.trailBuckets.get(trailId);
+    if (!bucket) {
+      bucket = { requests: 0, reads: 0, writes: 0, last_request_at: null };
+      this.trailBuckets.set(trailId, bucket);
+    }
+    bucket.requests++;
+    if (isWrite) bucket.writes++;
+    else bucket.reads++;
+    bucket.last_request_at = new Date().toISOString();
+  }
+
+  getTrailMetrics(trailId: string): TrailBucket | null {
+    return this.trailBuckets.get(trailId) ?? null;
+  }
+
   getMetrics(): Record<string, unknown> {
     const byTool: Record<string, unknown> = {};
     for (const [tool, bucket] of this.buckets) {
@@ -54,6 +79,10 @@ class MetricsCollector {
         latency_p99: percentile(sorted, 0.99),
       };
     }
+    const byTrail: Record<string, unknown> = {};
+    for (const [trailId, bucket] of this.trailBuckets) {
+      byTrail[trailId] = { ...bucket };
+    }
     return {
       started_at: this.startedAt,
       uptime_seconds: Math.floor((Date.now() - new Date(this.startedAt).getTime()) / 1000),
@@ -61,11 +90,13 @@ class MetricsCollector {
       total_errors: this.totalErrors,
       error_rate: this.totalRequests > 0 ? (this.totalErrors / this.totalRequests) : 0,
       by_tool: byTool,
+      by_trail: byTrail,
     };
   }
 
   reset(): void {
     this.buckets.clear();
+    this.trailBuckets.clear();
     this.totalRequests = 0;
     this.totalErrors = 0;
   }

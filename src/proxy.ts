@@ -1555,6 +1555,36 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // GET /v1/admin/trails/:id/usage — per-trail usage metrics (admin only)
+    const trailUsageMatch = url.pathname.match(/^\/v1\/admin\/trails\/([^/]+)\/usage$/);
+    if (trailUsageMatch && req.method === "GET") {
+      const auth = adminAuth(req);
+      if (!auth.ok) {
+        res.writeHead(auth.status, restHeaders);
+        res.end(JSON.stringify({ error: auth.status === 403 ? "forbidden" : "unauthorized" }));
+        return;
+      }
+      const trailId = decodeURIComponent(trailUsageMatch[1]!);
+      const trails = loadTrails();
+      const trail = trails.find((t) => t.id === trailId);
+      if (!trail) {
+        res.writeHead(404, restHeaders);
+        res.end(JSON.stringify({ error: "trail not found" }));
+        return;
+      }
+      const trailMetrics = metrics.getTrailMetrics(trailId);
+      res.writeHead(200, restHeaders);
+      res.end(JSON.stringify({
+        trail_id: trailId,
+        name: trail.name,
+        requests: trailMetrics?.requests ?? 0,
+        reads: trailMetrics?.reads ?? 0,
+        writes: trailMetrics?.writes ?? 0,
+        last_request_at: trailMetrics?.last_request_at ?? null,
+      }));
+      return;
+    }
+
     // Unknown /v1/ route
     res.writeHead(404, restHeaders);
     res.end(JSON.stringify({ error: "not found" }));
@@ -1753,6 +1783,10 @@ const server = createServer(async (req, res) => {
         groveRes.on("end", () => {
           res.end();
           const latency = Date.now() - reqStart;
+          // Record per-trail metrics for this tool call
+          const trailId = trail ? trail.id : "none";
+          const isWrite = toolName === "write_note";
+          metrics.recordTrailRequest(trailId, isWrite);
           try {
             logMcp(key?.name ?? "unknown", sessionStr, toolName, parsed.params.arguments, JSON.parse(resBody), latency, groveRes.statusCode ?? 200);
           } catch {

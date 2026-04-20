@@ -59,3 +59,47 @@ describe("MetricsCollector", () => {
     expect(m.total_requests).toBe(0);
   });
 });
+
+describe("Trail metrics", () => {
+  beforeEach(() => {
+    metrics.reset();
+  });
+
+  it("records trail requests with read/write breakdown", () => {
+    metrics.recordTrailRequest("trail-abc", false);
+    metrics.recordTrailRequest("trail-abc", false);
+    metrics.recordTrailRequest("trail-abc", true);
+
+    const bucket = metrics.getTrailMetrics("trail-abc");
+    expect(bucket).not.toBeNull();
+    expect(bucket!.requests).toBe(3);
+    expect(bucket!.reads).toBe(2);
+    expect(bucket!.writes).toBe(1);
+    expect(bucket!.last_request_at).toBeTruthy();
+  });
+
+  it("tracks separate buckets per trail", () => {
+    metrics.recordTrailRequest("trail-1", false);
+    metrics.recordTrailRequest("trail-2", true);
+
+    expect(metrics.getTrailMetrics("trail-1")?.requests).toBe(1);
+    expect(metrics.getTrailMetrics("trail-2")?.requests).toBe(1);
+    expect(metrics.getTrailMetrics("trail-3")).toBeNull();
+  });
+
+  it("includes by_trail in getMetrics output", () => {
+    metrics.recordTrailRequest("trail-xyz", false);
+    const m = metrics.getMetrics();
+    const byTrail = m.by_trail as Record<string, any>;
+    expect(byTrail["trail-xyz"]).toBeDefined();
+    expect(byTrail["trail-xyz"].requests).toBe(1);
+  });
+
+  it("reset clears trail buckets", () => {
+    metrics.recordTrailRequest("trail-abc", false);
+    metrics.reset();
+    expect(metrics.getTrailMetrics("trail-abc")).toBeNull();
+    const m = metrics.getMetrics();
+    expect(Object.keys((m.by_trail as Record<string, unknown>)).length).toBe(0);
+  });
+});
