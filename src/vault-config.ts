@@ -280,3 +280,17 @@ export function detectAndWriteConfig(vaultPath: string): DetectionResult {
   writeConfig(vaultPath, result.config);
   return result;
 }
+
+/**
+ * Convert a strftime-style filename pattern to a regex.
+ * Supports YYYY (year), MM (month), DD (day), with optional -N suffix for multiple entries/day.
+ */
+export function journalFilenameRegex(pattern: string | null): RegExp | null {
+  if (!pattern) return null;
+  const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const rx = escaped
+    .replace(/YYYY/g, "\\d{4}")
+    .replace(/MM/g, "\\d{2}")
+    .replace(/DD/g, "\\d{2}");
+  return new RegExp(`^${rx.replace(/\\\.md$/, "(-\\d+)?\\.md")}$`);
+}

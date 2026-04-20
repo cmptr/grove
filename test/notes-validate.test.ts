@@ -10,6 +10,7 @@ import {
   contentHash,
   inferTags,
 } from "../src/notes-validate.js";
+import { getDefaultConfig, type VaultConfig } from "../src/vault-config.js";
 
 // ── validatePath ────────────────────────────────────────────────────
 
@@ -202,6 +203,65 @@ describe("validateNote", () => {
     }, huge);
     expect(errors).toEqual([expect.stringContaining("exceeds 100KB limit")]);
   });
+
+  // ── Config-driven validation (P10-2) ─────────────────────────────
+  it("skips folder validation when type_paths is empty", () => {
+    const config: VaultConfig = {
+      structure: {
+        ...getDefaultConfig().structure,
+        type_paths: {},
+      },
+    };
+    // A concept under Resources/People/ would normally fail — with empty
+    // type_paths, folder layout is unenforced.
+    const { errors } = validateNote("Resources/People/Foo.md", {
+      type: "concept",
+      tags: ["concept"],
+    }, "", config);
+    expect(errors).toEqual([]);
+  });
+
+  it("validates against custom type_paths", () => {
+    const config: VaultConfig = {
+      structure: {
+        ...getDefaultConfig().structure,
+        type_paths: {
+          concept: "Zettelkasten/",
+          person: "Directory/",
+        },
+      },
+    };
+    // Concept inside its configured folder — OK
+    const ok = validateNote("Zettelkasten/foo.md", {
+      type: "concept",
+      tags: ["concept"],
+    }, "", config);
+    expect(ok.errors).toEqual([]);
+
+    // Concept inside the person folder — rejected
+    const bad = validateNote("Directory/foo.md", {
+      type: "concept",
+      tags: ["concept"],
+    }, "", config);
+    expect(bad.errors).toEqual([
+      expect.stringContaining("Type 'concept' cannot be placed under Directory/"),
+    ]);
+  });
+
+  it("skips journal filename check when config has no journal_filename", () => {
+    const config: VaultConfig = {
+      structure: {
+        ...getDefaultConfig().structure,
+        journal_filename: null,
+      },
+    };
+    const { errors } = validateNote("Journal/my-entry.md", {
+      type: "journal",
+      tags: ["journal"],
+      date: "2026-04-20",
+    }, "", config);
+    expect(errors).toEqual([]);
+  });
 });
 
 // ── parseNote ───────────────────────────────────────────────────────
@@ -314,6 +374,33 @@ describe("inferTags", () => {
   it("returns empty array for unrecognized path with no tags", () => {
     const tags = inferTags("Inbox/random.md", { type: "concept" });
     expect(tags).toEqual([]);
+  });
+
+  // ── Config-driven tag rules (P10-2) ──────────────────────────────
+  it("uses config tag_rules instead of hard-coded constants", () => {
+    const config: VaultConfig = {
+      structure: {
+        ...getDefaultConfig().structure,
+        tag_rules: [
+          { prefix: "Ideas/", tags: ["idea"] },
+          { prefix: "Vault/private/", tags: ["secret"] },
+        ],
+      },
+    };
+    expect(inferTags("Ideas/foo.md", {}, config)).toContain("idea");
+    expect(inferTags("Vault/private/foo.md", {}, config)).toContain("secret");
+    // Default PARA rules are NOT applied when custom config is passed
+    expect(inferTags("Journal/2026/2026-04-01.md", {}, config)).not.toContain("journal");
+  });
+
+  it("returns empty array when tag_rules is empty and no existing tags", () => {
+    const config: VaultConfig = {
+      structure: {
+        ...getDefaultConfig().structure,
+        tag_rules: [],
+      },
+    };
+    expect(inferTags("Resources/Concepts/foo.md", { type: "concept" }, config)).toEqual([]);
   });
 });
 
