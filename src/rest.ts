@@ -955,9 +955,14 @@ export async function handleWriteNote(
     const who = options.keyName ? `grove (${options.keyName})` : "grove (api)";
     const commitMsg = `${who}: ${action} ${relPath}`;
     const sha = await gitCommit(VAULT_PATH, relPath, commitMsg);
-    await qmdReindex(relPath);
 
-    // Refresh stats cache (fire-and-forget)
+    // qmd reindex is full-vault and takes ~10s on a large vault.
+    // Fire-and-forget: the dedup+coalesce in qmdReindex() ensures at most
+    // one in-flight run + one queued tail run, so search catches up within
+    // ~10-20s of the last write without blocking any individual response.
+    qmdReindex(relPath).catch(() => {});
+
+    // Refresh stats cache (fire-and-forget; deduped in-flight)
     refreshStats(VAULT_PATH).catch(() => {});
 
     return {
@@ -1059,7 +1064,7 @@ export async function handleDeleteNote(
       unlinkSync(srcAbs);
       invalidateFrontmatterCache(srcAbs);
       const commitSha = await gitCommitPaths(VAULT_PATH, [srcRel], `${who}: delete ${srcRel}`);
-      await qmdReindex(srcRel);
+      qmdReindex(srcRel).catch(() => {});
       refreshStats(VAULT_PATH).catch(() => {});
       return commitSha;
     });
@@ -1114,7 +1119,7 @@ export async function handleDeleteNote(
       [srcRel, archiveRel],
       `${who}: archive ${srcRel}`,
     );
-    await qmdReindex(srcRel);
+    qmdReindex(srcRel).catch(() => {});
     refreshStats(VAULT_PATH).catch(() => {});
     return commitSha;
   });
@@ -1223,7 +1228,7 @@ export async function handleMoveNote(
       `${who}: move ${srcRel} → ${dstRel}`,
     );
 
-    await qmdReindex(dstRel);
+    qmdReindex(dstRel).catch(() => {});
     refreshStats(VAULT_PATH).catch(() => {});
 
     const finalRaw = readNoteFile(dstAbs);

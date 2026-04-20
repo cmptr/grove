@@ -361,7 +361,21 @@ export async function startupRecovery(vaultPath: string): Promise<void> {
 
 // ── QMD reindex ──────────────────────────────────────────────────────
 
-export async function qmdReindex(_filePath: string): Promise<void> {
+// `qmd update` reindexes the entire vault (the filePath arg is unused
+// by the qmd CLI today), so a per-write call is a ~10s full rebuild.
+//
+// Under burst writes this would dominate latency, so we dedup + coalesce:
+//   - If an update is already in flight, every new call awaits that run.
+//   - At most one follow-up run is queued to pick up writes that arrived
+//     mid-flight. Further calls during that tail run collapse into it.
+//
+// Callers typically run qmdReindex inside the write queue, so their own
+// completion blocks on the shared promise. To keep write response latency
+// snappy the caller should treat this as fire-and-forget when possible.
+let activeReindex: Promise<void> | null = null;
+let tailReindexPending = false;
+
+async function runReindexOnce(): Promise<void> {
   try {
     await exec("qmd", ["update"], "/tmp", 10_000);
   } catch (err) {
@@ -370,6 +384,25 @@ export async function qmdReindex(_filePath: string): Promise<void> {
       (err as Error).message,
     );
   }
+}
+
+export async function qmdReindex(_filePath: string): Promise<void> {
+  if (activeReindex) {
+    if (!tailReindexPending) {
+      tailReindexPending = true;
+      activeReindex = activeReindex
+        .catch(() => {})
+        .then(async () => {
+          tailReindexPending = false;
+          await runReindexOnce();
+        });
+    }
+    return activeReindex;
+  }
+  activeReindex = runReindexOnce().finally(() => {
+    if (!tailReindexPending) activeReindex = null;
+  });
+  return activeReindex;
 }
 
 // ── File listing ─────────────────────────────────────────────────────
