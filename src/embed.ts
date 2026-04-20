@@ -17,6 +17,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
+import { isSearchIndexLocked } from "./index-crypto.js";
 
 const DB_PATH = process.argv.includes("--db")
   ? process.argv[process.argv.indexOf("--db") + 1]
@@ -128,6 +129,10 @@ function float32Buffer(vec: number[]): Buffer {
 }
 
 async function main() {
+  if (isSearchIndexLocked()) {
+    console.error("Search index is encrypted and locked. Unlock the vault before running embed.");
+    process.exit(2);
+  }
   console.log(`Opening database: ${DB_PATH}`);
   const db = new Database(DB_PATH);
 

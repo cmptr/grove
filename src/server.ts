@@ -19,6 +19,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 
 import { hybridSearch, formatResults, bm25Search } from "./hybrid-search.js";
+import { VaultLockedError } from "./index-crypto.js";
 
 /** Encode a vault path as a valid URL (encode each segment, preserve slashes) */
 function noteUrl(vaultPath: string): string {
@@ -136,7 +137,15 @@ Example: searches=[{type:'lex', query:'salary'}, {type:'vec', query:'how much do
       const queryText = searches.map((s) => s.query).join(" ");
       // Fetch more results if trail filtering is active (pre-filter reduction)
       const fetchLimit = activeTrail ? (limit ?? 10) * 3 : (limit ?? 10);
-      const results = await hybridSearch(queryText, fetchLimit);
+      let results;
+      try {
+        results = await hybridSearch(queryText, fetchLimit);
+      } catch (err) {
+        if (err instanceof VaultLockedError) {
+          return { content: [{ type: "text" as const, text: err.message }], isError: true };
+        }
+        throw err;
+      }
       const totalFound = results.length;
 
       // Resolve QMD lowercase-kebab paths to real filesystem paths.
