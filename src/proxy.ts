@@ -1366,7 +1366,7 @@ const server = createServer(async (req, res) => {
         const note = await handleGetNote(link.note_path);
         if (note) {
           noteContent = note.content;
-          noteTitle = note.title ?? link.note_path.replace(/\.md$/, "").split("/").pop() ?? null;
+          noteTitle = (note.frontmatter?.title as string) ?? link.note_path.replace(/\.md$/, "").split("/").pop() ?? null;
         }
       } catch {
         // Note may have been deleted — still return the share metadata

@@ -1267,7 +1267,7 @@ async function cmdShare(config: Config, notePath: string, flags: Record<string, 
   const res = await httpDo("POST", url, { Authorization: `Bearer ${config.token}` }, JSON.stringify(body));
   handleHttpStatus(res);
   const data = JSON.parse(res.body);
-  return { lines: [`${data.url}\n\nExpires: ${data.expires_at}  Views: 0/${maxViews ?? 100}`], data };
+  return { ok: true, lines: [`${data.url}\n\nExpires: ${data.expires_at}  Views: 0/${maxViews ?? 100}`], data };
 }
 
 // ── Invite (remote, via /v1/admin/invite API) ──────────────────

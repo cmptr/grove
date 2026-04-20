@@ -6,7 +6,7 @@
  * designed for Next.js SSR fetching from grove-www.
  */
 
-import { existsSync, readdirSync, statSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync, mkdirSync } from "node:fs";
 import { join, relative, resolve, basename, dirname } from "node:path";
 import { homedir } from "node:os";
 import { hybridSearch, bm25Search } from "./hybrid-search.js";

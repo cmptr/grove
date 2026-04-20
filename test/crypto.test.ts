@@ -85,8 +85,9 @@ describe("primitives", () => {
     const key = generateVaultKey();
     const plaintext = "hello, encrypted world 🌲 with some 特殊字符";
     const ct = encryptContent(plaintext, key);
-    expect(Buffer.isBuffer(ct)).toBe(true);
-    expect(ct.toString("utf-8")).not.toContain("hello");
+    expect(typeof ct).toBe("string");
+    expect(ct).toContain("-----GROVE-ENCRYPTED-v1-----");
+    expect(ct).not.toContain("hello");
     expect(decryptContent(ct, key)).toBe(plaintext);
   });
 
@@ -94,14 +95,14 @@ describe("primitives", () => {
     const key1 = generateVaultKey();
     const key2 = generateVaultKey();
     const ct = encryptContent("secret", key1);
-    expect(() => decryptContent(ct, key2)).toThrowError("decryption_failed");
+    expect(() => decryptContent(ct, key2)).toThrowError(/[Dd]ecrypt/);
   });
 
   it("each encryption produces a distinct ciphertext (fresh IV)", () => {
     const key = generateVaultKey();
     const a = encryptContent("hello", key);
     const b = encryptContent("hello", key);
-    expect(a.equals(b)).toBe(false);
+    expect(a).not.toBe(b);
     expect(decryptContent(a, key)).toBe("hello");
     expect(decryptContent(b, key)).toBe("hello");
   });
@@ -109,8 +110,12 @@ describe("primitives", () => {
   it("tampering with ciphertext fails decryption (GCM auth tag)", () => {
     const key = generateVaultKey();
     const ct = encryptContent("important", key);
-    ct[ct.length - 1] ^= 0xff; // flip a byte in the body
-    expect(() => decryptContent(ct, key)).toThrowError("decryption_failed");
+    // Flip a character in the base64 body
+    const lines = ct.split("\n");
+    const body = lines[1];
+    const tampered = body.slice(0, -2) + "XX";
+    const tamperedCt = lines[0] + "\n" + tampered + "\n";
+    expect(() => decryptContent(tamperedCt, key)).toThrow();
   });
 
   it("deriveKey is deterministic for the same salt + passphrase", () => {
