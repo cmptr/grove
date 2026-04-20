@@ -8,7 +8,19 @@ const TEST_DB_PATH = join(TEST_DIR, "grove.db");
 process.env.GROVE_DB_PATH = TEST_DB_PATH;
 
 import { getDb, resetDb, createSchema } from "../src/db.js";
-import { createUser, getUserById, getUserByEmail, getUserRole, type UserRole } from "../src/users.js";
+import {
+  createUser,
+  getUserById,
+  getUserByEmail,
+  getUserRole,
+  updateUserDisplayName,
+  listUserSessions,
+  revokeUserSession,
+  revokeAllOtherSessions,
+  type UserRole,
+} from "../src/users.js";
+import { createSession, getSessionIdFromToken } from "../src/auth.js";
+import { createKey } from "../src/keys.js";
 
 describe("user roles", () => {
   beforeEach(() => {
@@ -134,5 +146,177 @@ describe("role migration", () => {
 
     const { rmSync: rm } = require("node:fs");
     rm(migrationDir, { recursive: true, force: true });
+  });
+});
+
+// ── P15-1: profile endpoints (display name, sessions, key linkage) ────────
+
+describe("profile (P15-1)", () => {
+  beforeEach(() => {
+    resetDb();
+    createSchema();
+    // Truncate state between tests — createSchema uses IF NOT EXISTS so rows persist
+    // across test cases when the underlying SQLite file is reused.
+    const db = getDb();
+    db.exec("DELETE FROM api_keys; DELETE FROM sessions; DELETE FROM trail_grants; DELETE FROM trails; DELETE FROM vaults; DELETE FROM users;");
+    db.prepare("INSERT OR IGNORE INTO users (id, username, email, role) VALUES (?, ?, ?, ?)").run(
+      "user_00000000", "admin", "admin@grove.local", "owner",
+    );
+    db.prepare("INSERT OR IGNORE INTO vaults (id, owner_id, slug, display_name, git_repo_path) VALUES (?, ?, ?, ?, ?)").run(
+      "vault_00000000", "user_00000000", "life", "Life", "/tmp/life",
+    );
+  });
+
+  afterEach(() => {
+    resetDb();
+  });
+
+  describe("display name", () => {
+    it("updateUserDisplayName persists a new name", () => {
+      const ok = updateUserDisplayName("user_00000000", "Jane");
+      expect(ok).toBe(true);
+      expect(getUserById("user_00000000")!.display_name).toBe("Jane");
+    });
+
+    it("trims whitespace and collapses empty input to null", () => {
+      updateUserDisplayName("user_00000000", "  Jane  ");
+      expect(getUserById("user_00000000")!.display_name).toBe("Jane");
+      updateUserDisplayName("user_00000000", "   ");
+      expect(getUserById("user_00000000")!.display_name).toBeNull();
+    });
+
+    it("returns false for a non-existent user", () => {
+      expect(updateUserDisplayName("user_missing", "x")).toBe(false);
+    });
+  });
+
+  describe("sessions", () => {
+    it("createSession persists user_agent when provided", () => {
+      const { id } = createSession("user_00000000", "Mozilla/5.0 (Macintosh) Chrome/121");
+      const db = getDb();
+      const row = db.prepare("SELECT user_agent FROM sessions WHERE id = ?").get(id) as { user_agent: string };
+      expect(row.user_agent).toBe("Mozilla/5.0 (Macintosh) Chrome/121");
+    });
+
+    it("listUserSessions returns fresh sessions with user_agent", () => {
+      createSession("user_00000000", "Chrome on Mac");
+      createSession("user_00000000", "iOS Safari");
+      const rows = listUserSessions("user_00000000");
+      expect(rows.length).toBe(2);
+      const uas = rows.map((r) => r.user_agent).sort();
+      expect(uas).toEqual(["Chrome on Mac", "iOS Safari"]);
+    });
+
+    it("listUserSessions excludes expired sessions", () => {
+      const { id: freshId } = createSession("user_00000000", "fresh");
+      const { id: staleId } = createSession("user_00000000", "stale");
+      // Expire one session in the past
+      getDb()
+        .prepare("UPDATE sessions SET expires_at = ? WHERE id = ?")
+        .run(new Date(Date.now() - 60_000).toISOString(), staleId);
+      const rows = listUserSessions("user_00000000");
+      expect(rows.map((r) => r.id)).toEqual([freshId]);
+    });
+
+    it("revokeUserSession only deletes the caller's own session", () => {
+      createUser("mallory@example.com", "mallory", "viewer");
+      const { id: ownSession } = createSession("user_00000000", "own");
+      const { id: foreignSession } = createSession(getUserByEmail("mallory@example.com")!.id, "mallory's");
+
+      // user_00000000 can't revoke mallory's session
+      expect(revokeUserSession("user_00000000", foreignSession)).toBe(false);
+      // …but can revoke their own
+      expect(revokeUserSession("user_00000000", ownSession)).toBe(true);
+
+      const db = getDb();
+      const remaining = db.prepare("SELECT id FROM sessions").all() as { id: string }[];
+      expect(remaining.map((r) => r.id)).toEqual([foreignSession]);
+    });
+
+    it("revokeAllOtherSessions keeps the nominated current session", () => {
+      const { id: current } = createSession("user_00000000", "current");
+      createSession("user_00000000", "other-1");
+      createSession("user_00000000", "other-2");
+
+      const removed = revokeAllOtherSessions("user_00000000", current);
+      expect(removed).toBe(2);
+      const rows = listUserSessions("user_00000000");
+      expect(rows.map((r) => r.id)).toEqual([current]);
+    });
+
+    it("revokeAllOtherSessions with empty keep param wipes everything (legacy behavior)", () => {
+      createSession("user_00000000", "a");
+      createSession("user_00000000", "b");
+      const removed = revokeAllOtherSessions("user_00000000", "");
+      expect(removed).toBe(2);
+      expect(listUserSessions("user_00000000").length).toBe(0);
+    });
+  });
+
+  describe("api-key ↔ session linkage (is_current)", () => {
+    it("createKey persists session_id when supplied", () => {
+      const { id: sessionId } = createSession("user_00000000", "ua");
+      const key = createKey("web", ["read"], "life", undefined, "user_00000000", sessionId);
+      const row = getDb()
+        .prepare("SELECT session_id FROM api_keys WHERE id = ?")
+        .get(key.id) as { session_id: string | null };
+      expect(row.session_id).toBe(sessionId);
+    });
+
+    it("createKey defaults session_id to null for non-session (bearer) creation", () => {
+      const key = createKey("cli", ["read", "write"], "life", undefined, "user_00000000");
+      const row = getDb()
+        .prepare("SELECT session_id FROM api_keys WHERE id = ?")
+        .get(key.id) as { session_id: string | null };
+      expect(row.session_id).toBeNull();
+    });
+
+    it("getSessionIdFromToken resolves the id for a fresh session token", () => {
+      const { token, id } = createSession("user_00000000", "ua");
+      expect(getSessionIdFromToken(token)).toBe(id);
+    });
+
+    it("getSessionIdFromToken returns null for an unknown token", () => {
+      expect(getSessionIdFromToken("not-a-real-token")).toBeNull();
+    });
+  });
+
+  describe("profile data aggregation (mirrors /v1/me)", () => {
+    it("owner sees their own keys, trails, and sessions with is_current flag", () => {
+      // Create the caller's session + linked web key
+      const { id: sessionId } = createSession("user_00000000", "Chrome on Mac");
+      const webKey = createKey("grove-www", ["read"], "life", undefined, "user_00000000", sessionId);
+      // A second key with no session (CLI)
+      createKey("cli", ["read", "write"], "life", undefined, "user_00000000");
+      // Another browser session unrelated to the key
+      createSession("user_00000000", "iOS Safari");
+
+      const user = getUserById("user_00000000")!;
+      const db = getDb();
+      const keys = db
+        .prepare("SELECT id, name, scopes FROM api_keys WHERE user_id = ?")
+        .all(user.id) as Array<{ id: string; name: string; scopes: string }>;
+      expect(keys.length).toBe(2);
+
+      const currentSessionRow = db
+        .prepare("SELECT session_id FROM api_keys WHERE id = ?")
+        .get(webKey.id) as { session_id: string | null };
+      const currentSessionId = currentSessionRow.session_id;
+
+      const sessions = listUserSessions(user.id).map((s) => ({
+        ...s,
+        is_current: s.id === currentSessionId,
+      }));
+      expect(sessions.length).toBe(2);
+      expect(sessions.filter((s) => s.is_current).map((s) => s.id)).toEqual([sessionId]);
+    });
+
+    it("viewer role is preserved through profile queries", () => {
+      const viewer = createUser("victor@example.com", "victor", "viewer");
+      createSession(viewer.id, "ua");
+      const fetched = getUserById(viewer.id)!;
+      expect(fetched.role).toBe("viewer");
+      expect(listUserSessions(viewer.id).length).toBe(1);
+    });
   });
 });

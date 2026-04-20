@@ -32,14 +32,18 @@ export interface SessionRow {
   created_at: string;
   last_used_at: string | null;
   expires_at: string;
+  user_agent: string | null;
 }
 export function listUserSessions(userId: string): SessionRow[] {
   const db = getDb();
+  // expires_at is stored as ISO-8601 (…T…Z) but datetime('now') returns a
+  // space-separated form. Normalize both sides through datetime() so the
+  // comparison is date-aware, not a lexical string compare.
   return db
     .prepare(
-      `SELECT id, created_at, last_used_at, expires_at
+      `SELECT id, created_at, last_used_at, expires_at, user_agent
          FROM sessions
-        WHERE user_id = ? AND expires_at > datetime('now')
+        WHERE user_id = ? AND datetime(expires_at) > datetime('now')
         ORDER BY last_used_at DESC NULLS LAST, created_at DESC`,
     )
     .all(userId) as SessionRow[];

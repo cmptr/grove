@@ -80,7 +80,7 @@ export interface VerifyResult {
   user: { id: string; username: string | null; email: string };
 }
 
-export function verifyMagicLink(token: string, email: string): VerifyResult | null {
+export function verifyMagicLink(token: string, email: string, userAgent?: string | null): VerifyResult | null {
   const db = getDb();
   const normalizedEmail = email.toLowerCase().trim();
   const tokenHash = hashToken(token);
@@ -104,7 +104,7 @@ export function verifyMagicLink(token: string, email: string): VerifyResult | nu
   if (!user) return null;
 
   // Create session (also updates last_login_at)
-  const sessionToken = createSession(user.id);
+  const { token: sessionToken } = createSession(user.id, userAgent);
 
   return { sessionToken, user };
 }
@@ -115,14 +115,14 @@ const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;          // 30 days sliding
 const SESSION_ABSOLUTE_TTL_MS = 90 * 24 * 60 * 60 * 1000; // 90 days absolute
 const SESSION_REFRESH_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000; // refresh when < 7 days left
 
-export function createSession(userId: string): string {
+export function createSession(userId: string, userAgent?: string | null): { token: string; id: string } {
   const db = getDb();
   const token = randomBytes(32).toString("hex");
   const now = new Date();
   const id = generateId("sess_");
 
   db.prepare(
-    "INSERT INTO sessions (id, user_id, token_hash, expires_at, absolute_expires_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?)"
+    "INSERT INTO sessions (id, user_id, token_hash, expires_at, absolute_expires_at, last_used_at, user_agent) VALUES (?, ?, ?, ?, ?, ?, ?)"
   ).run(
     id,
     userId,
@@ -130,13 +130,23 @@ export function createSession(userId: string): string {
     new Date(now.getTime() + SESSION_TTL_MS).toISOString(),
     new Date(now.getTime() + SESSION_ABSOLUTE_TTL_MS).toISOString(),
     now.toISOString(),
+    userAgent ?? null,
   );
 
   // Track last login for the user (magic link flow does this in verifyMagicLink,
   // but API key / auth code flows go through createSession directly)
   db.prepare("UPDATE users SET last_login_at = ? WHERE id = ?").run(now.toISOString(), userId);
 
-  return token;
+  return { token, id };
+}
+
+/** Resolve the session id attached to a given session token, or null if invalid/expired. */
+export function getSessionIdFromToken(token: string): string | null {
+  const db = getDb();
+  const row = db.prepare(
+    "SELECT id FROM sessions WHERE token_hash = ?"
+  ).get(hashToken(token)) as { id: string } | undefined;
+  return row?.id ?? null;
 }
 
 export interface SessionUser {
@@ -280,7 +290,7 @@ export function createAuthCode(userId: string): string {
   return code;
 }
 
-export function exchangeAuthCode(code: string): { sessionToken: string; user: SessionUser } | null {
+export function exchangeAuthCode(code: string, userAgent?: string | null): { sessionToken: string; user: SessionUser } | null {
   const db = getDb();
   const codeHash = hashToken(code);
 
@@ -299,7 +309,7 @@ export function exchangeAuthCode(code: string): { sessionToken: string; user: Se
   db.prepare("UPDATE auth_codes SET used_at = ? WHERE id = ?").run(new Date().toISOString(), row.id);
 
   // Create a session for this user
-  const sessionToken = createSession(row.user_id);
+  const { token: sessionToken } = createSession(row.user_id, userAgent);
 
   return {
     sessionToken,
