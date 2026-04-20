@@ -9,8 +9,15 @@
  *   pm2 start src/discovery-worker.ts --interpreter tsx --name discovery
  */
 
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { createSchema } from "./db.js";
 import { startDiscoveryLoop, stopDiscoveryLoop } from "./discovery.js";
+import {
+  startHealthCronLoop,
+  stopHealthCronLoop,
+  DEFAULT_HEALTH_INTERVAL_MS,
+} from "./graph-health.js";
 
 // Ensure schema exists (idempotent)
 createSchema();
@@ -18,14 +25,21 @@ createSchema();
 console.log("[discovery-worker] starting");
 startDiscoveryLoop();
 
+const vaultPath = process.env.GROVE_VAULT ?? join(homedir(), "life");
+const healthIntervalMs = process.env.GROVE_HEALTH_INTERVAL_MS
+  ? Number(process.env.GROVE_HEALTH_INTERVAL_MS)
+  : DEFAULT_HEALTH_INTERVAL_MS;
+startHealthCronLoop(vaultPath, { intervalMs: healthIntervalMs });
+
 // Graceful shutdown
 let shuttingDown = false;
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
   process.on(signal, () => {
     if (shuttingDown) return;
     shuttingDown = true;
-    console.log(`[discovery-worker] ${signal} received, stopping loop`);
+    console.log(`[discovery-worker] ${signal} received, stopping loops`);
     stopDiscoveryLoop();
+    stopHealthCronLoop();
     process.exit(0);
   });
 }
