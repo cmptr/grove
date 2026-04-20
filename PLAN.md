@@ -338,7 +338,7 @@ tail -f .agents/p4b-1_*.log
 - [x] **P0-3: Deploy to VPS** — nginx + Let's Encrypt on `api.grove.md`
 - [x] **P0-4: Register as Claude.ai custom connector** — connected via OAuth, working from all surfaces
 - [x] **P0-5a: Hybrid search** — BM25 + vector + RRF fusion via TEI + sqlite-vec (replaced OpenAI API plan with self-hosted TEI for privacy)
-- [ ] **P0-5b: Usage journal** — use for 2 weeks, note what's missing
+- [x] **P0-5b: Usage journal** — use for 2 weeks, note what's missing
 
 **Key decisions made during Phase 0:**
 - **Embeddings: self-hosted TEI** (not OpenAI API) — privacy-first, same bge-base-en-v1.5 model on Mac and VPS
@@ -929,8 +929,7 @@ These are the views that make the portal more than an admin panel. They surface 
 - [ ] **P4-11: Lifecycle dashboard**
   Visual representation of `GET /v1/stats?sections=lifecycle` — seeds, sprouts, growing, mature, dormant, withering. Click a lifecycle stage to see the notes in it. The daily `/garden` practice, but visual.
 
-- [ ] **P4-12: Search playground**
-  Try queries against the vault from the browser. See BM25 vs vector scores side-by-side. Useful for tuning search and understanding why results rank the way they do. Developer tool, not a consumer feature.
+- ~~**P4-12: Search playground**~~ — deprioritized, not needed for v1.
 
 #### Phase 4 Execution Strategy
 
@@ -2105,7 +2104,7 @@ Decisions made during planning. Reference these when implementing — don't re-l
 - ✅ You can search your vault from Claude.ai on your phone and get relevant results
 - ✅ You can read a note and see its content
 - ✅ Hybrid search (keyword + semantic) returns high-quality results
-- [ ] You've used it daily for 2 weeks and documented what's missing (P0-5b)
+- [x] You've used it daily for 2 weeks and documented what's missing (P0-5b)
 
 **Phase 1 is successful when:**
 - Claude.ai can create a concept note, and the next conversation (any surface) finds it via search
