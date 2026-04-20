@@ -29,6 +29,8 @@ import { searchMetrics, metrics } from "./metrics.js";
 import { WriteQueue } from "./write-queue.js";
 import { embedFile } from "./embed-single.js";
 import { enqueueDiscovery } from "./db.js";
+import { getImageStore, contentKey, extForContentType, type ImageStore } from "./image-store.js";
+import { autoTagImage, type ImageTagResult } from "./image-tag.js";
 
 const VAULT_PATH = process.env.GROVE_VAULT ?? join(homedir(), "life");
 
@@ -764,4 +766,204 @@ export async function handleWriteNote(
   );
 
   return result;
+}
+
+// ── Image upload ───────────────────────────────────────────────────
+
+const IMAGE_MAX_BYTES = 10 * 1024 * 1024;
+const IMAGE_NOTE_PREFIX = "Resources/Images/";
+
+export interface ImageUploadInput {
+  file: Buffer;
+  contentType: string;
+  filename?: string;
+  path?: string;
+  tags?: string[];
+}
+
+export interface ImageUploadResult {
+  image_url: string;
+  thumbnail_url: string;
+  note_path: string;
+  content_hash: string;
+  auto_tags: string[];
+  description: string;
+  ocr_text: string;
+  dimensions: { width: number; height: number };
+  url: string;
+}
+
+/** Read image dimensions from header bytes. Returns {0,0} if unrecognized. */
+export function readImageDimensions(data: Buffer, contentType: string): { width: number; height: number } {
+  try {
+    if (contentType === "image/png" && data.length >= 24) {
+      // PNG IHDR: width at offset 16, height at offset 20 (big-endian u32)
+      return { width: data.readUInt32BE(16), height: data.readUInt32BE(20) };
+    }
+    if ((contentType === "image/jpeg" || contentType === "image/jpg") && data.length > 4) {
+      // Scan JPEG SOF markers
+      let i = 2;
+      while (i < data.length) {
+        if (data[i] !== 0xff) break;
+        const marker = data[i + 1];
+        const segLen = data.readUInt16BE(i + 2);
+        if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+          const height = data.readUInt16BE(i + 5);
+          const width = data.readUInt16BE(i + 7);
+          return { width, height };
+        }
+        i += 2 + segLen;
+      }
+    }
+    if (contentType === "image/gif" && data.length >= 10) {
+      return { width: data.readUInt16LE(6), height: data.readUInt16LE(8) };
+    }
+    if (contentType === "image/webp" && data.length >= 30) {
+      // VP8L chunk: bits at offset 21; VP8X at offset 24. Handle VP8 (lossy) simple form.
+      const chunk = data.slice(12, 16).toString("ascii");
+      if (chunk === "VP8 ") {
+        return { width: data.readUInt16LE(26) & 0x3fff, height: data.readUInt16LE(28) & 0x3fff };
+      }
+      if (chunk === "VP8L") {
+        const b0 = data[21], b1 = data[22], b2 = data[23], b3 = data[24];
+        const width = 1 + (((b1 & 0x3f) << 8) | b0);
+        const height = 1 + (((b3 & 0x0f) << 10) | (b2 << 2) | ((b1 & 0xc0) >> 6));
+        return { width, height };
+      }
+      if (chunk === "VP8X") {
+        const width = 1 + (data[24] | (data[25] << 8) | (data[26] << 16));
+        const height = 1 + (data[27] | (data[28] << 8) | (data[29] << 16));
+        return { width, height };
+      }
+    }
+  } catch {
+    // fall through to unknown
+  }
+  return { width: 0, height: 0 };
+}
+
+/** Derive a kebab-case slug from the first few words of the description. */
+export function slugFromDescription(description: string, hash: string): string {
+  const trimmed = description
+    .toLowerCase()
+    .split(/\s+/)
+    .slice(0, 6)
+    .join(" ")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (trimmed.length >= 3) return trimmed;
+  return `image-${hash.slice(0, 12)}`;
+}
+
+type VaultIdResolver = () => string;
+let vaultIdResolver: VaultIdResolver = () => process.env.GROVE_VAULT_ID ?? "life";
+
+/** Override vault-id resolution (tests). */
+export function setVaultIdResolver(fn: VaultIdResolver): void {
+  vaultIdResolver = fn;
+}
+
+type AutoTagFn = (data: Buffer, contentType: string) => Promise<ImageTagResult>;
+let autoTagFn: AutoTagFn = autoTagImage;
+
+/** Override auto-tag fn (tests). */
+export function setAutoTagFn(fn: AutoTagFn): void {
+  autoTagFn = fn;
+}
+
+type ImageStoreResolver = () => ImageStore;
+let imageStoreResolver: ImageStoreResolver = () => getImageStore();
+
+/** Override image-store resolver (tests). */
+export function setImageStoreResolver(fn: ImageStoreResolver): void {
+  imageStoreResolver = fn;
+}
+
+/**
+ * Upload an image: stores bytes in R2, auto-tags via Claude Vision, and
+ * creates a companion vault note. Throws on validation failures, trail denies,
+ * or store errors.
+ */
+export async function handleImageUpload(
+  input: ImageUploadInput,
+  options: { trail?: TrailConfig | null; keyName?: string } = {},
+): Promise<ImageUploadResult> {
+  // Validate size
+  if (input.file.length === 0) {
+    throw Object.assign(new Error("empty file"), { code: "VALIDATION" });
+  }
+  if (input.file.length > IMAGE_MAX_BYTES) {
+    throw Object.assign(new Error("image exceeds 10MB limit"), { code: "PAYLOAD_TOO_LARGE" });
+  }
+
+  // Validate content type → extension
+  const ext = extForContentType(input.contentType);
+  if (!ext) {
+    throw Object.assign(new Error(`unsupported content type: ${input.contentType}`), { code: "VALIDATION" });
+  }
+
+  // Compute content-addressed key
+  const vaultId = vaultIdResolver();
+  const key = contentKey(vaultId, input.file, ext);
+  const hash = key.split("/").pop()!.replace(/\.[^.]+$/, "");
+
+  // Upload to R2
+  const store = imageStoreResolver();
+  const uploaded = await store.upload(key, input.file, input.contentType);
+
+  // Thumbnail: TODO integrate sharp for real resize — for now reuse the original URL.
+  // The thumbnail_url key is still distinct so we can swap in a resized upload later.
+  const thumbnailUrl = store.getUrl(key);
+
+  // Auto-tag via Claude Vision
+  const tagResult = await autoTagFn(input.file, input.contentType);
+
+  // Merge user-supplied tags with auto-detected
+  const autoTags = Array.from(
+    new Set([...tagResult.tags, ...(input.tags ?? [])].map((t) => t.trim()).filter(Boolean)),
+  );
+
+  // Determine note path
+  const slug = slugFromDescription(tagResult.description || input.filename || "", hash);
+  const notePath = input.path ?? `${IMAGE_NOTE_PREFIX}${slug}.md`;
+
+  // Enforce trail-scoped writes
+  if (options.trail && !trailAllowsWrite(options.trail, notePath)) {
+    throw Object.assign(new Error("Write not allowed: path outside trail scope"), { code: "TRAIL_DENIED" });
+  }
+
+  // Build companion note
+  const dimensions = readImageDimensions(input.file, input.contentType);
+  const title = slug.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  const frontmatter: Record<string, unknown> = {
+    type: "image",
+    tags: autoTags.length > 0 ? autoTags : ["image"],
+    image_url: uploaded.url,
+    thumbnail_url: thumbnailUrl,
+    content_hash: hash,
+    dimensions,
+    uploaded_at: new Date().toISOString(),
+  };
+  if (tagResult.ocr_text) frontmatter.ocr_text = tagResult.ocr_text;
+
+  const description = tagResult.description || `Image uploaded ${new Date().toISOString().slice(0, 10)}.`;
+  const content = `# ${title}\n\n${description}\n\n![${title}](${uploaded.url})\n`;
+
+  // Create the note via the existing write pipeline (validates + commits + reindexes + embeds)
+  const noteResult = await handleWriteNote(notePath, frontmatter, content, {
+    trail: options.trail,
+    keyName: options.keyName,
+  });
+
+  return {
+    image_url: uploaded.url,
+    thumbnail_url: thumbnailUrl,
+    note_path: noteResult.path,
+    content_hash: hash,
+    auto_tags: autoTags,
+    description,
+    ocr_text: tagResult.ocr_text,
+    dimensions,
+    url: noteResult.url,
+  };
 }
