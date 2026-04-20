@@ -42,13 +42,12 @@ module.exports = {
     {
       name: "grove-discovery",
       script: "/bin/bash",
-      args: "-c 'npx tsx src/discovery-worker.ts'",
+      args: "-c 'set -a; source .env 2>/dev/null; set +a; npx tsx src/discovery-worker.ts'",
       cwd: __dirname,
       kill_timeout: 15000,
       env: {
         ...dotenv,
         GROVE_VAULT: process.env.HOME + "/life",
-        ANTHROPIC_API_KEY: dotenv.ANTHROPIC_API_KEY || "",
       },
     },
     {
