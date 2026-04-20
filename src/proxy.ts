@@ -67,6 +67,12 @@ import {
   getVaultStatus,
   isVaultLocked,
 } from "./crypto.js";
+import {
+  getCurrentHealth,
+  getHealthHistory,
+  getUnresolvedFlags,
+  resolveFlag,
+} from "./graph-health.js";
 
 installCrashHandlers("grove-proxy");
 
@@ -1342,6 +1348,56 @@ const server = createServer(async (req, res) => {
         max_views: typeof max_views === "number" ? max_views : undefined,
       });
       sendJson(res, 200, result);
+      return;
+    }
+
+    // ── Graph health (admin only) ──
+    // GET /v1/admin/health/current — latest metrics snapshot + score
+    if (url.pathname === "/v1/admin/health/current" && req.method === "GET") {
+      const admin = adminAuth(req);
+      if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
+
+      const snapshot = getCurrentHealth();
+      sendJson(res, 200, { snapshot });
+      return;
+    }
+
+    // GET /v1/admin/health/history?days=30 — time series
+    if (url.pathname === "/v1/admin/health/history" && req.method === "GET") {
+      const admin = adminAuth(req);
+      if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
+
+      const daysParam = url.searchParams.get("days");
+      const days = daysParam ? Number(daysParam) : 30;
+      if (!Number.isFinite(days) || days <= 0) {
+        sendJson(res, 400, { error: "days must be a positive number" });
+        return;
+      }
+      const snapshots = getHealthHistory(days);
+      sendJson(res, 200, { snapshots });
+      return;
+    }
+
+    // GET /v1/admin/health/flags — unresolved flags
+    if (url.pathname === "/v1/admin/health/flags" && req.method === "GET") {
+      const admin = adminAuth(req);
+      if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
+
+      const flags = getUnresolvedFlags();
+      sendJson(res, 200, { flags });
+      return;
+    }
+
+    // POST /v1/admin/health/flags/:id/resolve — dismiss a flag
+    const resolveFlagMatch = url.pathname.match(/^\/v1\/admin\/health\/flags\/([^/]+)\/resolve$/);
+    if (resolveFlagMatch && req.method === "POST") {
+      const admin = adminAuth(req);
+      if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
+
+      const flagId = decodeURIComponent(resolveFlagMatch[1]);
+      const updated = resolveFlag(flagId);
+      if (!updated) { sendJson(res, 404, { error: "flag not found or already resolved" }); return; }
+      sendJson(res, 200, { resolved: flagId });
       return;
     }
 

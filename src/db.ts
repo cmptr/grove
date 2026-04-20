@@ -185,6 +185,27 @@ CREATE TABLE IF NOT EXISTS vault_keys (
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   last_unlocked_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS graph_health (
+  id TEXT PRIMARY KEY,
+  measured_at TEXT NOT NULL,
+  metrics TEXT NOT NULL,
+  score INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_health_date ON graph_health(measured_at);
+
+CREATE TABLE IF NOT EXISTS graph_health_flags (
+  id TEXT PRIMARY KEY,
+  flag_type TEXT NOT NULL,
+  source_path TEXT,
+  target_path TEXT,
+  details TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  resolved_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_flags_unresolved ON graph_health_flags(resolved_at, created_at);
 `;
 
 export function createSchema(): void {
