@@ -185,6 +185,15 @@ CREATE TABLE IF NOT EXISTS vault_keys (
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   last_unlocked_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS graph_health (
+  id TEXT PRIMARY KEY,
+  measured_at TEXT NOT NULL,
+  metrics TEXT NOT NULL,
+  score INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_health_date ON graph_health(measured_at);
 `;
 
 export function createSchema(): void {
