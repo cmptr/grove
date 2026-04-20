@@ -6,11 +6,20 @@
  * designed for Next.js SSR fetching from grove-www.
  */
 
-import { readFileSync, existsSync, readdirSync, statSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readdirSync, statSync, mkdirSync } from "node:fs";
 import { join, relative, resolve, basename, dirname } from "node:path";
 import { homedir } from "node:os";
 import { hybridSearch, bm25Search } from "./hybrid-search.js";
-import { gitLog, listNotes, gitCommit, qmdReindex, gitPush } from "./vault-ops.js";
+import {
+  gitLog,
+  listNotes,
+  gitCommit,
+  qmdReindex,
+  gitPush,
+  readNoteFile,
+  writeNoteFile,
+  invalidateFrontmatterCache,
+} from "./vault-ops.js";
 import { validatePath, validateNote, parseNote, serializeNote, contentHash } from "./notes-validate.js";
 import { filterByTrail, trailAllowsWrite, getTrailPublicInfo, getTrailConfig, type TrailConfig, type NoteMetadata } from "./trails.js";
 import { getStats, refreshStats } from "./vault-stats.js";
@@ -83,7 +92,7 @@ async function resolveNote(file: string): Promise<ResolvedNote | null> {
   if (!filePath.endsWith(".md")) filePath += ".md";
 
   const readNote = (abs: string, rel: string, resolvedFrom?: string): ResolvedNote => {
-    const raw = readFileSync(abs, "utf-8");
+    const raw = readNoteFile(abs);
     const { frontmatter, content } = parseNote(raw);
     const hash = contentHash(raw);
     const result: ResolvedNote = { path: rel, frontmatter, content, content_hash: hash };
@@ -196,7 +205,7 @@ function getBacklinkIndex(): Map<string, string[]> {
     const srcPath = relative(VAULT_PATH, abs);
     const srcName = basename(abs, ".md");
     let text: string;
-    try { text = readFileSync(abs, "utf-8"); } catch { continue; }
+    try { text = readNoteFile(abs); } catch { continue; }
 
     const links = extractWikilinks(text);
     for (const target of links) {
@@ -343,7 +352,7 @@ export async function handleGetNote(notePath: string, trail?: TrailConfig | null
       if (info.exists && info.path) {
         try {
           const linkAbs = join(VAULT_PATH, info.path + ".md");
-          const raw = readFileSync(linkAbs, "utf-8");
+          const raw = readNoteFile(linkAbs);
           const { frontmatter } = parseNote(raw);
           const linkTags = Array.isArray(frontmatter.tags) ? frontmatter.tags as string[] : [];
           const linkMeta: NoteMetadata = {
@@ -368,7 +377,7 @@ export async function handleGetNote(notePath: string, trail?: TrailConfig | null
     backlinks = backlinks.filter((bl) => {
       try {
         const abs = join(VAULT_PATH, bl);
-        const raw = readFileSync(abs, "utf-8");
+        const raw = readNoteFile(abs);
         const { frontmatter } = parseNote(raw);
         const blTags = Array.isArray(frontmatter.tags) ? frontmatter.tags as string[] : [];
         const blMeta: NoteMetadata = {
@@ -600,7 +609,7 @@ export function handleStatusDiagnostics(): Record<string, unknown> {
   for (const note of notes) {
     const abs = join(VAULT_PATH, note.path);
     let raw: string;
-    try { raw = readFileSync(abs, "utf-8"); } catch { continue; }
+    try { raw = readNoteFile(abs); } catch { continue; }
 
     const links = [...raw.matchAll(/\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g)].map((m) => m[1]);
     for (const link of links) {
@@ -705,9 +714,9 @@ export async function handleWriteNote(
     throw Object.assign(new Error(`Validation errors:\n${errors.map((e) => `- ${e}`).join("\n")}`), { code: "VALIDATION", errors });
   }
 
-  // Optimistic concurrency check
+  // Optimistic concurrency check (hash is over plaintext, not ciphertext)
   if (options.ifHash && existsSync(absPath)) {
-    const currentRaw = readFileSync(absPath, "utf-8");
+    const currentRaw = readNoteFile(absPath);
     const currentHash = contentHash(currentRaw);
     if (currentHash !== options.ifHash) {
       throw Object.assign(new Error("Conflict: note was modified"), { code: "CONFLICT", currentHash });
@@ -719,7 +728,8 @@ export async function handleWriteNote(
     const serialized = serializeNote(frontmatter, content);
     const dir = dirname(absPath);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    writeFileSync(absPath, serialized, "utf-8");
+    writeNoteFile(absPath, serialized);
+    invalidateFrontmatterCache(absPath);
 
     const isNew = !options.ifHash;
     const action = isNew ? "create" : "update";
