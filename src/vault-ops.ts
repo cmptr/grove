@@ -431,6 +431,11 @@ function getFrontmatter(absPath: string, stat: { mtimeMs: number; size: number }
   // Encrypted files have no reliable "head slice" — base64-decode first.
   const raw = readFileSync(absPath, "utf-8");
   let head: string;
+  // 16 KB is generous for frontmatter (even long ocr_text blocks fit) while
+  // staying well short of the body so a stray `\n---` horizontal rule can't
+  // be mistaken for the closing delimiter. Older limit of 500 truncated
+  // frontmatters of image notes that include multi-line ocr_text fields.
+  const HEAD_LIMIT = 16_384;
   if (isEncrypted(raw)) {
     const key = vaultKeyForPath(absPath);
     if (!key) {
@@ -440,7 +445,7 @@ function getFrontmatter(absPath: string, stat: { mtimeMs: number; size: number }
       return fm;
     }
     try {
-      head = decryptContent(raw, key).slice(0, 500);
+      head = decryptContent(raw, key).slice(0, HEAD_LIMIT);
     } catch {
       // Wrong key (e.g. mixed-key test fixtures, or a file left over from a
       // previous vault key). Don't fail the whole listing — just skip this
@@ -450,7 +455,7 @@ function getFrontmatter(absPath: string, stat: { mtimeMs: number; size: number }
       return fm;
     }
   } else {
-    head = raw.slice(0, 500);
+    head = raw.slice(0, HEAD_LIMIT);
   }
   const fm = parseFrontmatter(head);
   frontmatterCache.set(absPath, { mtimeMs: stat.mtimeMs, size: stat.size, fm });
