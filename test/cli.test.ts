@@ -135,7 +135,7 @@ describe("HELP", () => {
     "search", "read", "list", "write", "init",
     "graph", "digest", "health", "metrics",
     "status", "history", "diagnostics",
-    "keys", "trails", "sync", "ingest", "lint", "snapshot", "rollback",
+    "keys", "trails", "vault", "sync", "ingest", "lint", "snapshot", "rollback",
     "whoami", "tag-backfill",
   ];
 
@@ -257,5 +257,111 @@ describe("parseArgs --content flag", () => {
     const result = parseArgs(["write", "path.md", "--content", "text", "--json"]);
     expect(result.flags.content).toBe("text");
     expect(result.flags.json).toBe(true);
+  });
+});
+
+// ── parseArgs: vault subcommands ─────────────────────────────────
+
+describe("parseArgs vault", () => {
+  beforeEach(() => {
+    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+  });
+
+  it.each(["status", "encrypt", "unlock", "lock"])(
+    "parses vault %s as positional",
+    (sub) => {
+      const result = parseArgs(["vault", sub]);
+      expect(result.command).toBe("vault");
+      expect(result.positional).toBe(sub);
+    },
+  );
+
+  it("parses bare `grove vault` with no positional (defaults to status)", () => {
+    const result = parseArgs(["vault"]);
+    expect(result.command).toBe("vault");
+    expect(result.positional).toBe("");
+  });
+
+  it("parses vault status with --json", () => {
+    const result = parseArgs(["vault", "status", "--json"]);
+    expect(result.command).toBe("vault");
+    expect(result.positional).toBe("status");
+    expect(result.flags.json).toBe(true);
+  });
+});
+
+// ── HELP: vault entry ────────────────────────────────────────────
+
+describe("HELP vault", () => {
+  it("has a vault help entry", () => {
+    expect(HELP.vault).toBeDefined();
+  });
+
+  it("vault help has required fields", () => {
+    expect(HELP.vault.usage).toContain("grove vault");
+    expect(HELP.vault.description).toMatch(/encrypt/i);
+    expect(HELP.vault.json_schema).toContain("encrypted");
+    expect(HELP.vault.exit_codes).toContain("0=success");
+  });
+
+  it("vault help lists all four subcommands in usage", () => {
+    for (const sub of ["status", "encrypt", "unlock", "lock"]) {
+      expect(HELP.vault.usage).toContain(sub);
+    }
+  });
+
+  it("vault help includes an example using GROVE_VAULT_PASSPHRASE env", () => {
+    expect(HELP.vault.examples?.some((e) => e.includes("GROVE_VAULT_PASSPHRASE"))).toBe(true);
+  });
+
+  it("printCommandHelp renders vault", () => {
+    const out = printCommandHelp("vault");
+    expect(out).toContain("grove vault");
+    expect(out).toContain("Examples:");
+    expect(out).toContain("GROVE_VAULT_PASSPHRASE");
+  });
+});
+
+// ── Passphrase prompt helper ─────────────────────────────────────
+
+describe("promptPassphrase", () => {
+  it("returns env var value when set", async () => {
+    const { promptPassphrase } = await import("../src/cli/lib/passphrase.js");
+    process.env.GROVE_TEST_PASSPHRASE = "swordfish";
+    try {
+      const result = await promptPassphrase("Passphrase", { envVar: "GROVE_TEST_PASSPHRASE" });
+      expect(result).toBe("swordfish");
+    } finally {
+      delete process.env.GROVE_TEST_PASSPHRASE;
+    }
+  });
+
+  it("errors when stdin is not a TTY and env var is unset", async () => {
+    const { promptPassphrase } = await import("../src/cli/lib/passphrase.js");
+    const prevTTY = (process.stdin as any).isTTY;
+    Object.defineProperty(process.stdin, "isTTY", { value: false, configurable: true });
+    delete process.env.GROVE_TEST_PASSPHRASE;
+    try {
+      await expect(
+        promptPassphrase("Passphrase", { envVar: "GROVE_TEST_PASSPHRASE" }),
+      ).rejects.toThrow(/PASSPHRASE_REQUIRED|TTY/i);
+    } finally {
+      Object.defineProperty(process.stdin, "isTTY", { value: prevTTY, configurable: true });
+    }
+  });
+
+  it("treats an empty env var as unset (falls through to TTY/error)", async () => {
+    const { promptPassphrase } = await import("../src/cli/lib/passphrase.js");
+    const prevTTY = (process.stdin as any).isTTY;
+    Object.defineProperty(process.stdin, "isTTY", { value: false, configurable: true });
+    process.env.GROVE_TEST_PASSPHRASE = "";
+    try {
+      await expect(
+        promptPassphrase("Passphrase", { envVar: "GROVE_TEST_PASSPHRASE" }),
+      ).rejects.toThrow(/PASSPHRASE_REQUIRED|TTY/i);
+    } finally {
+      delete process.env.GROVE_TEST_PASSPHRASE;
+      Object.defineProperty(process.stdin, "isTTY", { value: prevTTY, configurable: true });
+    }
   });
 });
