@@ -2006,6 +2006,1093 @@ claude --worktree "Read PLAN.md task P9-7. Build share-a-note links per spec. Br
 
 ---
 
+### Phase 10: Vault-Agnostic Structure
+
+**Goal:** Decouple Grove from PARA folder conventions so any Obsidian vault works out of the box. Foundation for multi-vault SaaS product.
+
+**Prerequisites:** None — this is foundational and can start immediately. Should land before Phase 8 (multi-vault).
+
+**Context:** Grove currently hard-codes PARA folder→type mappings in 3 modules:
+- `notes-validate.ts` — `TYPE_PATHS` dict maps types to folders (`concept` → `Resources/Concepts/`), `TAG_RULES` infers tags from paths
+- `discovery-extract.ts` — builds entity vocabulary from `Resources/*` subfolders
+- `vault-stats.ts` — counts notes by PARA folder prefixes for stats/lifecycle
+
+These assumptions lock Grove to one organizational philosophy. A Zettelkasten user, flat-folder user, or anyone with custom hierarchy can't use Grove without restructuring their vault.
+
+**Approach:** Convention-based defaults with a dead-simple config file. If no config exists, auto-detect and generate one. Existing PARA vaults get auto-generated config matching current behavior — zero disruption.
+
+#### P10-1: Vault config schema (`src/vault-config.ts`)
+
+New module. Defines, loads, and validates vault structure configuration.
+
+**Config file:** `.grove/config.yaml` in the vault root (git-tracked, portable with the vault).
+
+```yaml
+# .grove/config.yaml — vault structure configuration
+# Grove auto-generates this on first index. Edit to customize.
+
+structure:
+  # Where auto-created entities land (per-type overrides optional)
+  entities:
+    default: "Inbox/"          # fallback for all entity types
+    concept: "Resources/Concepts/"
+    person: "Resources/People/"
+    project: "Resources/Projects/"
+    company: "Resources/Companies/"
+    place: "Resources/Places/"
+
+  # Path→type inference (optional — frontmatter type is always authoritative)
+  type_paths:
+    concept: "Resources/Concepts/"
+    person: "Resources/People/"
+    recipe: "Resources/Recipes/"
+    project: "Resources/Projects/"
+    company: "Resources/Companies/"
+    place: "Resources/Places/"
+    journal: "Journal/"
+    source: "Sources/"
+
+  # Path→tag inference (supplemental, never removes existing tags)
+  tag_rules:
+    - prefix: "Journal/"
+      tags: ["journal"]
+    - prefix: "Resources/People/"
+      tags: ["person"]
+    - prefix: "Resources/Concepts/"
+      tags: ["concept"]
+    - prefix: "Resources/Recipes/"
+      tags: ["recipe"]
+    - prefix: "Areas/Health/"
+      tags: ["health", "private"]
+    - prefix: "Areas/Finances/"
+      tags: ["finances", "private"]
+
+  # Paths treated as private (notes here get private: true)
+  private_paths: ["Areas/Health/", "Areas/Finances/"]
+
+  # Archive path for soft-deleted notes (Phase 11)
+  archive_path: "Archives/"
+
+  # Journal path pattern (null = no journal convention)
+  journal_path: "Journal/"
+  journal_filename: "YYYY-MM-DD.md"  # strftime-style pattern
+```
+
+**TypeScript interface:**
+```typescript
+interface VaultConfig {
+  structure: {
+    entities: Record<string, string>;     // type → folder path (must include "default")
+    type_paths: Record<string, string>;   // type → expected folder prefix
+    tag_rules: Array<{ prefix: string; tags: string[] }>;
+    private_paths: string[];
+    archive_path: string;
+    journal_path: string | null;
+    journal_filename: string | null;
+  };
+}
+```
+
+**Functions:**
+```typescript
+export function loadVaultConfig(vaultPath: string): VaultConfig;  // reads .grove/config.yaml, falls back to defaults
+export function getDefaultConfig(): VaultConfig;                   // PARA defaults (current behavior)
+export function entityPath(config: VaultConfig, type: string): string;  // resolve where to create a new entity
+```
+
+**Files:** `src/vault-config.ts` (new)
+**Tests:** `test/vault-config.test.ts` — load from YAML, missing file returns defaults, invalid YAML returns error, entityPath resolution
+**Acceptance criteria:**
+- `loadVaultConfig()` reads `.grove/config.yaml` if it exists
+- Missing config file returns PARA defaults (exact current behavior)
+- Config is validated: entities must have "default", paths must end with "/"
+- `entityPath(config, "concept")` returns the configured path for concepts
+
+---
+
+#### P10-2: Decouple notes-validate.ts (`src/notes-validate.ts`)
+
+Replace hard-coded `TYPE_PATHS`, `TAG_RULES` constants with config-driven lookups.
+
+**Changes:**
+1. Remove hard-coded `TYPE_PATHS` and `TAG_RULES` constants
+2. `validateNote()` accepts a `VaultConfig` parameter (or loads it internally)
+3. `inferTags()` reads tag rules from config instead of the constant
+4. Path/type consistency check reads type_paths from config
+5. Journal filename validation reads journal_filename pattern from config
+6. If config has no type_paths (empty object), skip folder validation entirely — type is frontmatter-only
+
+**Files:** `src/notes-validate.ts` (refactor), `src/server.ts` (pass config to validate calls), `src/rest.ts` (pass config to validate calls)
+**Tests:** `test/notes-validate.test.ts` — test with PARA config (existing behavior), test with empty type_paths (no folder validation), test with custom paths
+**Acceptance criteria:**
+- All existing tests pass unchanged (PARA defaults = same behavior)
+- A vault with `type_paths: {}` accepts a concept note at any path
+- A vault with custom paths (`concept: "Zettelkasten/"`) validates correctly
+- `inferTags()` uses config tag_rules, not hard-coded constant
+
+---
+
+#### P10-3: Decouple discovery-extract.ts (`src/discovery-extract.ts`)
+
+Replace hard-coded `Resources/*` vocabulary building with config-driven entity paths.
+
+**Changes:**
+1. `buildVocab()` (or equivalent function that scans for existing entities) reads entity paths from vault config
+2. Instead of scanning `Resources/Concepts/`, `Resources/People/`, etc., scan paths declared in `config.structure.entities`
+3. New entity creation uses `entityPath(config, type)` instead of hard-coded paths
+4. If entity path is `Inbox/` (the default fallback), prefix entity notes with type: `Inbox/concept-taste-graph.md`
+
+**Also update:**
+- `src/discovery-link.ts` — new entity note path generation uses config
+- `src/discovery-bookmarks.ts` — `Sources/X/` path reads from config
+- `src/db.ts` — `getNewConceptsCreated()` WHERE clause uses config path instead of hard-coded `'Resources/Concepts/%'`
+- `src/server.ts` — MCP tool descriptions and vault structure instructions dynamically generated from config (lines 75-98, 180-194)
+- `src/rest.ts` — diagnostics orphan/stale checks read folder config instead of hard-coded `Resources/` and `Inbox/`
+- `src/cli.ts` — ingest `TYPE_PATHS` and help text examples use config
+
+**Files:** `src/discovery-extract.ts`, `src/discovery-link.ts`, `src/discovery-bookmarks.ts`, `src/db.ts`, `src/server.ts`, `src/rest.ts`, `src/cli.ts`
+**Tests:** `test/discovery-extract.test.ts` — test vocab from custom entity paths, test new entity creation at configured path
+**Acceptance criteria:**
+- Existing PARA vault behavior unchanged
+- A vault with `entities.concept: "Ideas/"` builds vocab from `Ideas/` and creates new concepts there
+- A vault with `entities.default: "Inbox/"` creates all entities in Inbox
+- MCP tool descriptions reflect the actual vault structure, not hard-coded PARA
+- Diagnostics check the configured folders, not hard-coded ones
+
+---
+
+#### P10-4: Decouple vault-stats.ts (`src/vault-stats.ts`)
+
+Replace hard-coded PARA folder counting with config-driven stats.
+
+**Changes:**
+1. Folder-based stats section reads from config type_paths instead of hard-coded prefixes
+2. If config has no type_paths, count by frontmatter type only (no folder breakdown)
+3. Lifecycle classification (seeds/sprouts/growing/mature/dormant/withering) stays — it's based on git age, not folder structure
+
+**Files:** `src/vault-stats.ts` (refactor folder counting)
+**Tests:** `test/vault-stats.test.ts` — test stats with custom config
+**Acceptance criteria:**
+- Stats accurately count notes in custom folder structures
+- Stats work when type_paths is empty (type-only counting)
+- Lifecycle classification unchanged
+
+---
+
+#### P10-5: Auto-detection (`src/vault-config.ts`)
+
+When no `.grove/config.yaml` exists and `loadVaultConfig()` is called, auto-detect the vault structure and generate a config.
+
+**Detection heuristic:**
+1. Scan top-level folders in the vault
+2. If `Resources/` and `Journal/` exist → PARA pattern → generate PARA defaults
+3. If `Zettelkasten/` or large flat folder of .md files → Zettelkasten pattern → type_paths empty, entities.default = root or detected folder
+4. If none match → minimal config: type_paths empty (no folder enforcement), entities.default = "Inbox/" (create if missing), tag_rules empty
+5. Write generated config to `.grove/config.yaml`
+6. Log: "Auto-detected vault structure: <pattern>. Config written to .grove/config.yaml — edit to customize."
+
+**Files:** `src/vault-config.ts` (add `detectAndWriteConfig()`)
+**Tests:** `test/vault-config.test.ts` — test detection with PARA fixture vault, test detection with flat vault
+**Acceptance criteria:**
+- PARA vault auto-detects and generates matching config
+- Non-PARA vault generates minimal config (no folder enforcement)
+- Generated config is valid YAML that `loadVaultConfig()` can read back
+- Detection only runs once (subsequent loads read existing config)
+
+---
+
+#### P10-6: CLI command (`src/cli.ts`)
+
+`grove config` — show current vault config. `grove config init` — force re-detect and regenerate.
+
+**Files:** `src/cli.ts` (new command)
+**Acceptance criteria:**
+- `grove config --json` returns the current vault config
+- `grove config init` generates `.grove/config.yaml` via auto-detection
+- `grove config init` on a vault with existing config asks for confirmation (or `--yes`)
+
+---
+
+#### Phase 10 Execution Strategy
+
+**Batch 1 (2 parallel agents):**
+- **Agent A:** P10-1 + P10-5 (config schema + auto-detection) — creates `src/vault-config.ts`, writes tests
+- **Agent B:** P10-2 (decouple notes-validate.ts) — refactors validation, needs config interface (can use mock/defaults initially)
+
+```bash
+# Pane 1
+claude --worktree "Read PLAN.md tasks P10-1 and P10-5. Create vault config module with schema, loading, defaults, and auto-detection per spec. Branch: agent/p10-config."
+# Pane 2
+claude --worktree "Read PLAN.md task P10-2. Decouple notes-validate.ts from hard-coded PARA paths per spec. Branch: agent/p10-validate."
+```
+
+Merge Agent A first (provides the config module), then Agent B.
+
+**Batch 2 (3 parallel agents, after Batch 1 merged):**
+- **Agent C:** P10-3 (decouple discovery-extract.ts)
+- **Agent D:** P10-4 (decouple vault-stats.ts)
+- **Agent E:** P10-6 (CLI command)
+
+```bash
+# Pane 1
+claude --worktree "Read PLAN.md task P10-3. Decouple discovery-extract.ts from PARA paths per spec. Branch: agent/p10-discovery."
+# Pane 2
+claude --worktree "Read PLAN.md task P10-4. Decouple vault-stats.ts from PARA paths per spec. Branch: agent/p10-stats."
+# Pane 3
+claude --worktree "Read PLAN.md task P10-6. Add grove config CLI command per spec. Branch: agent/p10-cli."
+```
+
+#### Phase 10 Success Criteria
+
+- A user with a Zettelkasten vault connects to Grove. Auto-detection generates a config. Search, discovery, and writes all work.
+- Existing PARA vault behavior is 100% unchanged (auto-generated config matches current hard-coded behavior).
+- `grove config` shows the current structure. User edits one path, re-runs discovery — entities land in the new location.
+- No hard-coded PARA folder paths remain in `notes-validate.ts`, `discovery-extract.ts`, or `vault-stats.ts`.
+
+---
+
+### Phase 11: Note Lifecycle Operations (DELETE/Move)
+
+**Goal:** Complete the CRUD surface. Notes can be created, read, updated — but not deleted or moved. This blocks vault reorganization, inbox processing, lifecycle management, and the graph health auto-healer (Phase 13).
+
+**Prerequisites:** Phase 10 (vault-agnostic) — archive path needs to be configurable.
+
+**Key design decisions:**
+- Soft delete (archive) by default, hard delete as opt-in
+- Fold into existing MCP tools (stays within 6-tool limit)
+- Wikilink update on move is critical — a moved note with broken links is worse than no move
+- All operations go through the write queue. No new concurrency concerns.
+
+#### P11-1: Delete operation (`src/rest.ts`, `src/vault-ops.ts`)
+
+**`DELETE /v1/notes/{path}`** — soft delete by default, hard delete with `?hard=true`.
+
+```
+DELETE /v1/notes/Inbox/old-idea.md
+Authorization: Bearer grove_live_xxx
+If-Match: "abc123"  (optional — prevent deleting a note that changed)
+
+→ 200 OK (soft delete — archived)
+{
+  "action": "archived",
+  "original_path": "Inbox/old-idea.md",
+  "archive_path": "Archives/Inbox/old-idea.md",
+  "commit": "abc789"
+}
+
+DELETE /v1/notes/Inbox/old-idea.md?hard=true
+→ 200 OK (hard delete — removed from vault)
+{
+  "action": "deleted",
+  "original_path": "Inbox/old-idea.md",
+  "commit": "def012"
+}
+
+→ 404 Not Found (note doesn't exist)
+→ 409 Conflict (If-Match hash mismatch)
+→ 403 Forbidden (trail scope violation)
+```
+
+**Soft delete behavior:**
+1. Read current note content and frontmatter
+2. Add `archived_from: <original-path>` and `archived_at: <ISO date>` to frontmatter
+3. Move file to `{archive_path}/{original-path}` (preserving directory structure under archives)
+4. Git commit: `grove (keyname): archive {path}`
+5. Remove from search index (archived notes are not searchable)
+6. Update backlinks: notes linking to the archived note keep their wikilinks (they become red links — this is intentional, not broken)
+
+**Hard delete behavior:**
+1. Remove file from disk
+2. Git commit: `grove (keyname): delete {path}`
+3. Remove from search index
+4. Backlinks become red links (same as archive)
+
+**Implementation:** Add `handleDeleteNote()` to `src/rest.ts` (same pattern as `handleWriteNote()`). Add `gitRm()` to `src/vault-ops.ts`. Both operations go through `writeQueue.enqueue()`.
+
+**Files:** `src/rest.ts` (add `handleDeleteNote`), `src/vault-ops.ts` (add `gitRm`, `gitMv`), `src/proxy.ts` (add DELETE route), `src/vault-config.ts` (read archive_path)
+**Tests:** `test/rest.test.ts` — soft delete moves to archive with frontmatter, hard delete removes file, If-Match conflict returns 409, trail scope enforcement
+**Acceptance criteria:**
+- `DELETE /v1/notes/path.md` moves note to archive path with `archived_from` frontmatter
+- `DELETE /v1/notes/path.md?hard=true` removes file from disk
+- Both create git commits with identity
+- Archived notes are removed from search index
+- Trail-scoped keys can only delete within their allowed paths
+- If-Match with wrong hash returns 409
+
+---
+
+#### P11-2: Move operation (`src/rest.ts`, `src/vault-ops.ts`)
+
+**`PATCH /v1/notes/{path}`** with `move_to` field — rename/move a note.
+
+```
+PATCH /v1/notes/Inbox/taste-graph.md
+Authorization: Bearer grove_live_xxx
+Content-Type: application/json
+
+{
+  "move_to": "Resources/Concepts/taste-graph.md"
+}
+
+→ 200 OK
+{
+  "action": "moved",
+  "from": "Inbox/taste-graph.md",
+  "to": "Resources/Concepts/taste-graph.md",
+  "links_updated": 3,
+  "commit": "abc789"
+}
+
+→ 404 Not Found (source doesn't exist)
+→ 409 Conflict (destination already exists)
+→ 403 Forbidden (trail must allow both source and destination paths)
+```
+
+**Move behavior:**
+1. Validate destination path (same rules as write — no traversal, .md only)
+2. Check destination doesn't already exist (409 if it does)
+3. Move file via `git mv`
+4. Scan vault for wikilinks pointing to the old note (by title, path, and aliases)
+5. Update all found wikilinks: `[[Old Name]]` → `[[New Name]]`, `[[old/path|display]]` → `[[new/path|display]]`
+6. Git commit all changes: `grove (keyname): move {from} → {to}` (single commit for move + link updates)
+7. Reindex both old path (remove) and new path (add)
+8. Re-embed the moved note
+
+**Wikilink update scope:**
+- Match `[[exact title]]` (case-insensitive)
+- Match `[[exact/path]]` and `[[exact/path|display text]]`
+- Match aliases declared in the moved note's frontmatter
+- Do NOT fuzzy-match partial strings — only exact wikilink matches
+
+**Files:** `src/rest.ts` (add `handleMoveNote`), `src/vault-ops.ts` (add `gitMv`, add `updateWikilinks`), `src/proxy.ts` (add PATCH route)
+**Tests:** `test/rest.test.ts` — move updates path, wikilinks in other notes updated, destination exists returns 409, trail scope checked for both paths
+**Acceptance criteria:**
+- `PATCH /v1/notes/old.md` with `move_to` moves the file
+- All exact wikilink matches across the vault are updated in the same commit
+- Destination conflict returns 409
+- Trail-scoped keys must have access to both source and destination paths
+- Response includes count of updated links
+
+---
+
+#### P11-3: MCP integration (`src/server.ts`)
+
+Fold delete and move into existing MCP tools to stay within the 6-tool limit.
+
+**Option A (recommended):** Add `action` parameter to `write_note`:
+- `action: "write"` (default, current behavior)
+- `action: "delete"` with `path` — soft delete
+- `action: "hard_delete"` with `path` — hard delete
+- `action: "move"` with `path` and `move_to`
+
+**Tool schema update:**
+```typescript
+{
+  name: "write_note",
+  description: "Create, update, delete, or move notes in the vault.",
+  inputSchema: {
+    // existing: path, frontmatter, content, if_hash
+    action: { type: "string", enum: ["write", "delete", "hard_delete", "move"], default: "write" },
+    move_to: { type: "string", description: "Destination path (required when action is 'move')" },
+  }
+}
+```
+
+**Files:** `src/server.ts` (extend write_note tool handler)
+**Tests:** `test/server.test.ts` — MCP delete, MCP move, invalid action returns error
+**Acceptance criteria:**
+- `write_note` with `action: "delete"` calls `handleDeleteNote`
+- `write_note` with `action: "move"` calls `handleMoveNote`
+- Default action is "write" — all existing behavior unchanged
+- Tool description updated to mention delete/move capabilities
+
+---
+
+#### P11-4: CLI commands (`src/cli.ts`)
+
+```bash
+grove delete "Inbox/old-idea.md"              # soft delete (archive)
+grove delete "Inbox/old-idea.md" --hard --yes  # hard delete (requires --yes)
+grove move "Inbox/idea.md" "Resources/Concepts/idea.md"
+```
+
+**Files:** `src/cli.ts` (add `delete` and `move` commands)
+**Tests:** `test/cli.test.ts` — JSON output schemas for delete/move, --hard requires --yes
+**Acceptance criteria:**
+- `grove delete path.md --json` returns `{"ok": true, "action": "archived", ...}`
+- `grove delete path.md --hard` without `--yes` prints what would happen and exits 1
+- `grove move old.md new.md --json` returns `{"ok": true, "action": "moved", "links_updated": N, ...}`
+
+---
+
+#### Phase 11 Execution Strategy
+
+**Batch 1 (2 parallel agents):**
+- **Agent A:** P11-1 + P11-2 (REST delete + move operations) — creates the service functions in rest.ts, adds git operations to vault-ops.ts
+- **Agent B:** P11-4 (CLI commands) — extends cli.ts only, uses HTTP endpoints
+
+```bash
+# Pane 1
+claude --worktree "Read PLAN.md tasks P11-1 and P11-2. Implement DELETE and PATCH (move) endpoints per spec. Branch: agent/p11-lifecycle."
+# Pane 2
+claude --worktree "Read PLAN.md task P11-4. Add grove delete and grove move CLI commands per spec. Branch: agent/p11-cli."
+```
+
+Merge Agent A first, then Agent B. Then P11-3 (MCP integration) as a follow-up single agent.
+
+**Batch 2 (1 agent):**
+- **Agent C:** P11-3 (MCP integration)
+
+```bash
+claude --worktree "Read PLAN.md task P11-3. Extend write_note MCP tool with delete/move actions per spec. Branch: agent/p11-mcp."
+```
+
+#### Phase 11 Success Criteria
+
+- `grove delete "Inbox/old-idea.md"` archives the note to configured archive path
+- `grove move "Inbox/idea.md" "Resources/Concepts/idea.md"` moves it and updates all wikilinks
+- Both show up in git log with clear audit trail
+- MCP `write_note` with `action: "delete"` works from Claude.ai
+- No note is ever permanently deleted without explicit `--hard` + `--yes` (or `?hard=true`)
+
+---
+
+### Phase 12: Encryption at Rest
+
+**Goal:** Vault data is encrypted on disk and in git. Server processes plaintext only in memory. Users trust that Grove operators cannot read their data without the user's passphrase.
+
+**Prerequisites:** None (independent track). But should land before opening to external users.
+
+**Trust story:** "Your vault is encrypted with a passphrase only you know. Without it, the server can't read your notes. Your data on disk, in git, and in backups is ciphertext."
+
+**Architecture:**
+```
+User provides passphrase → derive vault key (Argon2id) → decrypt master key
+Master key (AES-256-GCM) encrypts/decrypts vault files
+Plaintext only in memory during request processing
+Disk, git repo, S3 backups = ciphertext
+Search indexes encrypted at rest (SQLCipher or file-level encryption)
+```
+
+**Key design decisions:**
+- **Per-vault encryption key** (single key per vault, not per-note)
+- **Server-escrowed key** — master key encrypted with user's passphrase-derived key, stored in DB
+- **In-memory plaintext** — server decrypts on-the-fly for search/embedding, never persists to disk
+- **Passphrase caching** — decrypted master key held in memory for session duration, purged on timeout or restart
+- **No recovery** by design — lost passphrase = lost access (optional recovery key for users who want it)
+
+#### P12-1: Encryption module (`src/crypto.ts`)
+
+Core cryptographic operations.
+
+```typescript
+// Key derivation
+export function deriveKey(passphrase: string, salt: Buffer): Buffer;  // Argon2id → 256-bit key
+
+// Vault key management
+export function generateVaultKey(): Buffer;                            // random 256-bit key
+export function encryptVaultKey(vaultKey: Buffer, passphrase: string): { encrypted: Buffer; salt: Buffer };
+export function decryptVaultKey(encrypted: Buffer, salt: Buffer, passphrase: string): Buffer;
+
+// File encryption/decryption
+export function encryptContent(plaintext: string, vaultKey: Buffer): Buffer;  // AES-256-GCM
+export function decryptContent(ciphertext: Buffer, vaultKey: Buffer): string;
+
+// Index encryption
+export function encryptIndex(indexPath: string, vaultKey: Buffer): void;
+export function decryptIndexToMemory(encryptedPath: string, vaultKey: Buffer): Buffer;
+```
+
+**Files:** `src/crypto.ts` (new)
+**Tests:** `test/crypto.test.ts` — encrypt/decrypt roundtrip, wrong passphrase fails, key derivation is deterministic with same salt
+**Acceptance criteria:**
+- `encryptContent → decryptContent` roundtrips correctly
+- Wrong passphrase throws a clear error (not garbage output)
+- Key derivation takes >100ms (Argon2id with appropriate cost parameters — resists brute force)
+
+---
+
+#### P12-2: Vault key lifecycle (`src/db.ts`, `src/proxy.ts`)
+
+Store encrypted vault keys in the database. Manage unlock/lock lifecycle.
+
+**Schema addition:**
+```sql
+CREATE TABLE IF NOT EXISTS vault_keys (
+  vault_id TEXT PRIMARY KEY REFERENCES vaults(id),
+  encrypted_key BLOB NOT NULL,     -- AES-256-GCM encrypted vault key
+  key_salt BLOB NOT NULL,          -- Argon2id salt
+  created_at TEXT NOT NULL,
+  last_unlocked_at TEXT
+);
+```
+
+**In-memory key cache:** `Map<vault_id, { key: Buffer; unlockedAt: Date }>`. Purged after configurable timeout (default 24h) or on process restart.
+
+**API endpoints:**
+```
+POST /v1/admin/vault/encrypt   — enable encryption (first time: generate vault key, encrypt all files)
+POST /v1/admin/vault/unlock    — provide passphrase, decrypt vault key into memory
+POST /v1/admin/vault/lock      — purge in-memory key, vault becomes inaccessible
+GET  /v1/admin/vault/status    — returns { encrypted: bool, unlocked: bool, last_unlocked_at }
+POST /v1/admin/vault/change-passphrase — re-encrypt vault key with new passphrase
+```
+
+**Behavior when locked:** All MCP tools and REST endpoints return 503 with `{"error": "vault_locked", "message": "Vault is encrypted and locked. Unlock with your passphrase."}`. Health check still works (reports `vault_locked` status).
+
+**Files:** `src/db.ts` (table), `src/crypto.ts` (key cache), `src/proxy.ts` (new routes + locked middleware)
+**Tests:** `test/crypto.test.ts` — full lifecycle: encrypt → lock → unlock → read
+**Acceptance criteria:**
+- `POST /v1/admin/vault/unlock` with correct passphrase makes vault accessible
+- `POST /v1/admin/vault/unlock` with wrong passphrase returns 401
+- Locked vault returns 503 on all data endpoints
+- Server restart requires re-unlock (key not persisted to disk)
+
+---
+
+#### P12-3: Transparent encryption layer (`src/vault-ops.ts`)
+
+Intercept all file reads and writes to encrypt/decrypt transparently.
+
+**Changes to vault-ops.ts:**
+1. `readFile()` calls: if vault is encrypted, decrypt after reading from disk
+2. `writeFile()` calls: if vault is encrypted, encrypt before writing to disk
+3. `gitCommit()`: files on disk are ciphertext, committed as ciphertext
+4. `gitPush()`: pushes ciphertext (remote repo is encrypted)
+5. `listNotes()`: must decrypt frontmatter to parse (cache parsed frontmatter in memory)
+
+**Performance concern:** Decrypting every file on read adds latency. Mitigate with an in-memory frontmatter cache (populated on startup/unlock, updated on writes). Full content decrypted only when requested.
+
+**Files:** `src/vault-ops.ts` (add encryption hooks), `src/rest.ts` (ensure handleWriteNote encrypts)
+**Tests:** `test/vault-ops.test.ts` — write encrypted file, read back decrypted, git log shows ciphertext
+**Acceptance criteria:**
+- Files on disk are encrypted (not readable with `cat`)
+- `git clone` of the vault yields ciphertext
+- MCP/REST reads return plaintext (decrypted in memory)
+- Writes encrypt before disk write
+- Frontmatter cache makes `list_notes` fast despite encryption
+
+---
+
+#### P12-4: Search index encryption (`src/hybrid-search.ts`)
+
+The QMD SQLite index and embedding vectors contain plaintext content. Encrypt them.
+
+**Approach:** Use SQLCipher (encrypted SQLite) for the QMD index. The vault key is the SQLCipher key.
+
+**Changes:**
+1. On vault unlock, open QMD index with SQLCipher key
+2. On vault lock, close the index
+3. Reindex operations write to the encrypted index
+4. Embedding vectors stored in encrypted SQLite
+
+**Fallback if SQLCipher is too complex:** Encrypt the index file at rest (file-level encryption). Decrypt into a tmpfs mount on unlock. Re-encrypt on lock. Less elegant but simpler.
+
+**Files:** `src/hybrid-search.ts` (encrypted index opening), `src/embed.ts` (encrypted vector storage)
+**Tests:** `test/hybrid-search.test.ts` — search works on encrypted index after unlock, fails when locked
+**Acceptance criteria:**
+- QMD index file on disk is not readable without the vault key
+- Search works normally when vault is unlocked
+- Search returns 503 when vault is locked
+
+---
+
+#### P12-5: Passphrase UX (grove-www + CLI)
+
+**CLI:** `grove vault encrypt`, `grove vault unlock`, `grove vault lock`, `grove vault status`
+
+**grove.md:** Unlock screen when vault is locked — passphrase input, unlock button. Shown on any page when the vault is in locked state.
+
+**Files:** `src/cli.ts` (new vault subcommand), grove-www pages
+**Acceptance criteria:**
+- `grove vault encrypt` prompts for passphrase, encrypts all vault files, stores encrypted key
+- `grove vault unlock` prompts for passphrase, unlocks vault
+- grove.md shows unlock screen when vault is locked
+
+---
+
+#### Phase 12 Execution Strategy
+
+**Batch 1 (2 parallel agents):**
+- **Agent A:** P12-1 + P12-2 (crypto module + key lifecycle) — creates `src/crypto.ts`, adds DB table, API endpoints
+- **Agent B:** P12-5 (CLI + UX) — CLI commands and grove-www pages (can stub the crypto calls)
+
+```bash
+# Pane 1
+claude --worktree "Read PLAN.md tasks P12-1 and P12-2. Build encryption module and vault key lifecycle per spec. Branch: agent/p12-crypto."
+# Pane 2
+claude --worktree "Read PLAN.md task P12-5. Add vault encrypt/unlock/lock CLI commands per spec. Branch: agent/p12-cli."
+```
+
+**Batch 2 (2 parallel agents, after Batch 1):**
+- **Agent C:** P12-3 (transparent encryption layer)
+- **Agent D:** P12-4 (search index encryption)
+
+```bash
+# Pane 1
+claude --worktree "Read PLAN.md task P12-3. Add transparent encryption to vault-ops per spec. Branch: agent/p12-vault-encrypt."
+# Pane 2
+claude --worktree "Read PLAN.md task P12-4. Encrypt search index per spec. Branch: agent/p12-index-encrypt."
+```
+
+#### Phase 12 Success Criteria
+
+- `git clone` of an encrypted vault yields unreadable ciphertext
+- Server restart requires passphrase to resume serving
+- Users see "encrypted" status in grove.md and `grove vault status`
+- Search and read operations work transparently when unlocked
+- All data endpoints return 503 when locked
+- Wrong passphrase returns clear error, never garbage data
+
+---
+
+### Phase 13: Graph Health & Auto-Healing
+
+**Goal:** The knowledge graph monitors itself and fixes non-risky issues automatically. Vault owners see a health score with trends. Problems are surfaced before they compound.
+
+**Prerequisites:** Phase 7 (discovery infrastructure), Phase 11 (DELETE/move for auto-healing actions).
+
+**Context:** Current diagnostics (`vault_status diagnostics`) detect orphans, broken links, missing frontmatter, and stale inbox. But they require manual invocation and only report — never fix. Discovery (Phase 7) does entity extraction and link wiring. This phase extends both: deeper metrics stored as time series, automated monitoring via cron, and auto-healing that fixes safe issues without asking.
+
+**Auto-heal boundary (what's "non-risky"):**
+- ✅ Fix broken wikilinks when target was renamed (exact fuzzy match)
+- ✅ Re-embed notes with stale/missing embeddings
+- ✅ Add missing backlinks (wikilink exists but reciprocal doesn't)
+- ✅ Infer missing tags via config rules (same as P5-TAG-1)
+- ⚠️ Flag (but don't auto-fix) near-duplicate concepts (requires human judgment)
+- ⚠️ Flag (but don't auto-fix) long-orphaned notes (may be intentional stubs)
+- ❌ Never auto-merge, auto-delete, or auto-restructure
+
+#### P13-1: Health metrics schema (`src/db.ts`, `src/graph-health.ts`)
+
+New module and DB table for time-series graph health data.
+
+```sql
+CREATE TABLE IF NOT EXISTS graph_health (
+  id TEXT PRIMARY KEY,
+  measured_at TEXT NOT NULL,
+  metrics JSON NOT NULL,          -- full snapshot
+  score INTEGER NOT NULL          -- 0-100 composite health score
+);
+
+CREATE INDEX idx_health_date ON graph_health(measured_at);
+```
+
+**Metrics snapshot:**
+```typescript
+interface GraphHealthMetrics {
+  total_notes: number;
+  total_links: number;
+  link_density: number;           // links / notes
+  orphan_count: number;           // notes with 0 inbound + 0 outbound links
+  orphan_rate: number;            // orphan_count / total_notes
+  broken_link_count: number;      // wikilinks pointing to non-existent notes
+  embedding_coverage: number;     // notes with embeddings / total notes
+  stale_embedding_count: number;  // notes modified after last embed
+  missing_frontmatter: number;    // notes without required type/tags
+  duplicate_candidates: number;   // pairs with similarity > 0.85
+  growth_velocity_7d: number;     // notes created in last 7 days
+  growth_velocity_30d: number;    // notes created in last 30 days
+  avg_links_per_note: number;
+  cluster_count: number;          // disconnected components in the graph
+  largest_cluster_pct: number;    // % of notes in the largest cluster
+}
+```
+
+**Composite health score (0-100):**
+- Orphan rate < 5% → +20, < 10% → +10
+- Broken links = 0 → +20, < 5 → +10
+- Embedding coverage > 95% → +20, > 80% → +10
+- Link density > 2.0 → +20, > 1.0 → +10
+- Growth velocity > 0 (not stagnant) → +10
+- Missing frontmatter = 0 → +10, < 10 → +5
+
+**Files:** `src/graph-health.ts` (new — compute metrics, calculate score, store), `src/db.ts` (table)
+**Tests:** `test/graph-health.test.ts` — score calculation, metric computation against fixture vault
+**Acceptance criteria:**
+- `computeHealthMetrics()` returns all fields with correct values
+- `calculateHealthScore()` produces 0-100 score matching the rubric
+- Metrics stored in DB with timestamp
+
+---
+
+#### P13-2: Automated monitoring (`src/graph-health.ts`)
+
+Cron-driven health checks that run daily (configurable) and store metrics.
+
+**Implementation:** Add a health check function to the discovery worker's cron schedule (or a new PM2 cron process). Runs `computeHealthMetrics()`, stores snapshot in `graph_health` table, checks for alerts.
+
+**Alert thresholds (configurable):**
+- Health score drops > 10 points in 24h
+- Orphan rate exceeds 15%
+- Broken links exceed 20
+- Embedding coverage drops below 80%
+
+**Alert delivery:** Log to structured logger with `level: "warn"`. Optionally send email digest (reuse `src/email.ts`).
+
+**Files:** `src/graph-health.ts` (add `runHealthCheck`, alert logic), PM2 config (cron schedule)
+**Tests:** `test/graph-health.test.ts` — alert triggers when thresholds exceeded, no alert on healthy vault
+**Acceptance criteria:**
+- Health check runs daily via cron
+- Metrics stored as time series (queryable for trends)
+- Alert fires when health score drops significantly
+- No alert on healthy vault (no false positives)
+
+---
+
+#### P13-3: Auto-healing (`src/graph-health.ts`)
+
+After computing metrics, auto-fix non-risky issues.
+
+**Auto-fix actions (all go through write queue):**
+1. **Broken wikilinks:** If `[[Old Name]]` is broken but a note with a similar title exists (renamed), update the link. Only fix exact renames (old title matches an alias on the new note). Log each fix.
+2. **Stale embeddings:** Re-embed notes modified after their last embedding timestamp. Fire-and-forget (same as P1-10).
+3. **Missing tags:** Run `inferTags()` on notes with zero tags. Write updated frontmatter via write queue.
+4. **Missing frontmatter type:** If a note has no `type` but lives in a configured type_path (e.g., `Resources/Concepts/`), infer and add the type.
+
+**Flag-only actions (stored in `graph_health_flags` table):**
+```sql
+CREATE TABLE IF NOT EXISTS graph_health_flags (
+  id TEXT PRIMARY KEY,
+  flag_type TEXT NOT NULL,   -- "duplicate_candidate", "long_orphan", "cluster_island"
+  source_path TEXT,
+  target_path TEXT,          -- for duplicates
+  details JSON,
+  created_at TEXT NOT NULL,
+  resolved_at TEXT           -- user acknowledged/dismissed
+);
+```
+
+5. **Near-duplicates:** Pairs with embedding similarity > 0.85. Flag for user review.
+6. **Long orphans:** Notes with 0 links for > 90 days. Flag for review.
+7. **Cluster islands:** Disconnected components with < 3 notes. Flag for review.
+
+**Files:** `src/graph-health.ts` (auto-fix + flag logic), `src/db.ts` (flags table)
+**Tests:** `test/graph-health.test.ts` — broken link auto-fixed, stale embedding re-queued, duplicate flagged not auto-merged
+**Acceptance criteria:**
+- Broken wikilinks to renamed notes are auto-fixed (single commit per batch)
+- Stale embeddings are re-queued
+- Near-duplicates are flagged, never auto-merged
+- All auto-fix actions logged in structured logger
+- Flag table stores issues for user review
+
+---
+
+#### P13-4: Health dashboard (`src/proxy.ts`, grove-www)
+
+**API endpoints:**
+```
+GET /v1/admin/health/current   — latest health metrics + score
+GET /v1/admin/health/history   — time series (last 30 days)
+GET /v1/admin/health/flags     — unresolved flags
+POST /v1/admin/health/flags/:id/resolve — dismiss a flag
+```
+
+**grove-www:** New dashboard page at `/dashboard/health` showing:
+- Health score (large number + trend sparkline)
+- Metric cards (orphan rate, broken links, embedding coverage, link density)
+- Auto-fix log (recent auto-heals with what was fixed)
+- Flags list (pending issues to review — dismiss or act)
+
+**Files:** `src/proxy.ts` (new routes), grove-www dashboard page
+**Acceptance criteria:**
+- `/dashboard/health` shows health score with 30-day trend
+- Flags can be dismissed from the UI
+- Auto-fix log shows what was automatically repaired
+
+---
+
+#### Phase 13 Execution Strategy
+
+**Batch 1 (2 parallel agents):**
+- **Agent A:** P13-1 + P13-2 (metrics + monitoring) — creates `src/graph-health.ts`, DB tables, cron
+- **Agent B:** P13-4 API endpoints (REST endpoints for health data)
+
+**Batch 2 (2 parallel agents, after Batch 1):**
+- **Agent C:** P13-3 (auto-healing logic)
+- **Agent D:** P13-4 frontend (grove-www health dashboard page)
+
+#### Phase 13 Success Criteria
+
+- Vault owner logs into grove.md and sees a health score with trend line
+- Broken links to renamed notes auto-fixed overnight
+- Near-duplicate concepts flagged for review (not auto-merged)
+- Zero manual diagnostics needed for routine maintenance
+- Health score visibly improves after auto-healing runs
+
+---
+
+### Phase 14: Image System
+
+**Goal:** Images are first-class knowledge graph nodes — uploadable, auto-tagged, searchable, and visually browsable. Supports recipes, travel notes, design work, diagrams, and any visual knowledge.
+
+**Prerequisites:** None (independent track). Phase 10 (vault-agnostic) nice-to-have for configurable image note paths.
+
+**Key design decisions:**
+- **External object storage (Cloudflare R2)** — not git-tracked. Keeps vault repo lean. R2 has no egress fees.
+- **Companion .md notes** — each image gets a vault note with frontmatter, tags, and an `![]()` embed. The note is the graph node, the image is the asset.
+- **Vision auto-tagging** — Claude on upload to extract description, detected concepts, OCR text
+- **CDN for serving** — R2 public bucket or Cloudflare CDN for fast image loading
+- **Pinterest-style view** — masonry grid in grove.md for visual browsing
+
+#### P14-1: R2 storage setup (`src/image-store.ts`)
+
+Object storage client for image upload, retrieval, and deletion.
+
+```typescript
+interface ImageStore {
+  upload(key: string, data: Buffer, contentType: string): Promise<{ url: string; size: number }>;
+  delete(key: string): Promise<void>;
+  getUrl(key: string): string;  // public CDN URL
+}
+```
+
+**Storage key format:** `{vault_id}/{sha256_hash}.{ext}` — content-addressed, deduped.
+
+**Configuration:** `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME` env vars. Uses S3-compatible API (Cloudflare R2 is S3-compatible).
+
+**Files:** `src/image-store.ts` (new)
+**Tests:** `test/image-store.test.ts` — mock S3 client, verify key format, content-type handling
+**Acceptance criteria:**
+- Upload returns public URL
+- Content-addressed keys prevent duplicates
+- Delete removes from storage
+- Missing env vars throw clear error on startup
+
+---
+
+#### P14-2: Image upload endpoint (`src/proxy.ts`, `src/rest.ts`)
+
+**`POST /v1/images`** — upload an image, auto-tag it, create a companion vault note.
+
+```
+POST /v1/images
+Authorization: Bearer grove_live_xxx
+Content-Type: multipart/form-data
+
+file: <binary image data>
+path: "Resources/Images/architecture-diagram.md"  (optional — auto-generated if omitted)
+tags: "ai,architecture"  (optional — supplemental to auto-detected)
+
+→ 201 Created
+{
+  "image_url": "https://assets.grove.md/{vault_id}/{hash}.png",
+  "note_path": "Resources/Images/architecture-diagram.md",
+  "content_hash": "abc123",
+  "auto_tags": ["diagram", "architecture", "software"],
+  "description": "System architecture diagram showing microservices...",
+  "ocr_text": "API Gateway → Auth Service → ...",
+  "dimensions": { "width": 1920, "height": 1080 }
+}
+
+→ 400 Bad Request (unsupported format, too large)
+→ 413 Payload Too Large (>10MB)
+```
+
+**Upload pipeline:**
+1. Validate: file type (PNG, JPG, WebP, GIF), size (<10MB)
+2. Upload to R2 (content-addressed key)
+3. Generate thumbnail (resize to 400px width, WebP format) → upload to R2 as `{hash}_thumb.webp`
+4. Auto-tag via Claude Vision API (claude-haiku-4-5):
+   - Description (1-2 sentences)
+   - Detected concepts (match against vault entity vocabulary)
+   - OCR text (if any text in the image)
+   - Suggested tags
+5. Create companion vault note:
+   ```markdown
+   ---
+   type: image
+   tags: [diagram, architecture, ai]
+   image_url: https://assets.grove.md/{vault_id}/{hash}.png
+   thumbnail_url: https://assets.grove.md/{vault_id}/{hash}_thumb.webp
+   dimensions: {width: 1920, height: 1080}
+   ocr_text: "API Gateway → Auth Service → ..."
+   uploaded_at: 2026-04-20T12:00:00Z
+   ---
+   # Architecture Diagram
+
+   System architecture diagram showing microservices...
+
+   ![Architecture Diagram](https://assets.grove.md/{vault_id}/{hash}.png)
+   ```
+6. Commit + reindex + embed (same pipeline as write_note)
+7. Enqueue for discovery (concept extraction from description + OCR)
+
+**Files:** `src/proxy.ts` (new route), `src/rest.ts` (add `handleImageUpload`), `src/image-store.ts` (storage), image processing (sharp or similar for resize)
+**Tests:** `test/image-upload.test.ts` — upload creates note + stores image, auto-tagging populates frontmatter, size limit enforced
+**Acceptance criteria:**
+- Upload PNG → R2 storage + companion vault note created
+- Auto-tagging extracts description, concepts, OCR text
+- Thumbnail generated at 400px width
+- Note searchable by description and OCR text
+- Discovery enqueued for concept extraction
+- Trail-scoped keys can only upload to allowed paths
+
+---
+
+#### P14-3: Image search integration (`src/hybrid-search.ts`)
+
+Image notes are already searchable by their text content (description + OCR). Ensure:
+1. Image descriptions and OCR text are embedded for vector search
+2. `query` results for image notes include `thumbnail_url` in the response
+3. `get` on an image note returns full metadata including `image_url`, `thumbnail_url`, `dimensions`
+
+**Files:** `src/hybrid-search.ts` (add thumbnail to results), `src/server.ts` (enrich get response for image notes)
+**Tests:** `test/hybrid-search.test.ts` — search for "architecture diagram" finds image note
+**Acceptance criteria:**
+- `query({searches: [{type: "vec", query: "system architecture"}]})` returns image notes with thumbnail URLs
+- `get({file: "path/to/image-note.md"})` returns full image metadata
+
+---
+
+#### P14-4: Pinterest-style image view (grove-www)
+
+Masonry grid component in grove.md for browsing image notes visually.
+
+**Route:** `/images` (owner) and scoped within trail pages (trail consumers)
+
+**Layout:**
+- Masonry grid of image thumbnails (responsive: 2 cols mobile, 3 tablet, 4 desktop)
+- Lazy loading with intersection observer
+- Click thumbnail → slide-out panel with: full-size image, note title, tags, description, backlinks, related images
+- Filter bar: by tag, by date range, by connected concept (e.g., "show images linked to [[Italy Trip]]")
+- Sort: newest first (default), most connected, by tag
+
+**Data source:** `GET /v1/list?prefix=&type=image` (list all image notes) + `GET /v1/notes/{path}` for detail
+
+**API addition:** Extend `GET /v1/list` to accept `type` query parameter for filtering by frontmatter type.
+
+**Trail scoping:** Trail consumers see only images within their trail scope (server-side filtering handles this).
+
+**Files:** grove-www — `src/app/images/page.tsx`, `src/components/image-grid.tsx` (client component), `src/components/image-detail.tsx`
+**Acceptance criteria:**
+- `/images` shows masonry grid of all image thumbnails
+- Clicking an image opens detail panel with metadata and backlinks
+- Filtering by tag narrows the grid
+- Trail-scoped users see only their trail's images
+- Grid handles 100+ images without jank (lazy loading + virtualization if needed)
+
+---
+
+#### Phase 14 Execution Strategy
+
+**Batch 1 (2 parallel agents):**
+- **Agent A:** P14-1 + P14-2 (R2 storage + upload endpoint) — creates `src/image-store.ts`, upload handler
+- **Agent B:** P14-3 (search integration) — extends hybrid-search and server for image metadata
+
+**Batch 2 (1 agent, after Batch 1):**
+- **Agent C:** P14-4 (Pinterest view in grove-www)
+
+#### Phase 14 Success Criteria
+
+- Upload a photo via API → auto-tagged note appears in vault → searching "architecture diagram" finds it
+- `/images` in grove.md shows a visual grid of all vault images
+- Trail consumer sees only their scoped images
+- Thumbnails load fast via CDN
+- Image notes participate fully in the knowledge graph (backlinks, search, discovery)
+
+---
+
+### Phase 15: Profile & Settings UX
+
+**Goal:** Vault owners and trail consumers can manage their identity and settings through grove.md. Owners get a visual trail scope editor. Non-owners see their profile and access.
+
+**Prerequisites:** Phase 9 (multi-user), Phase 4 (dashboard).
+
+**Context:** Phase 4 built the owner dashboard (keys, trails, usage, health). Phase 9 added user roles and invite flow. But the dashboard is owner-only. Trail consumers have no self-service — they can't see their profile, change their email, manage their sessions, or understand what they have access to. Owners also lack a visual trail scope editor (currently: raw JSON fields in a form).
+
+#### P15-1: User profile page (grove-www)
+
+**Route:** `/profile` — available to all authenticated users (owner + members + viewers).
+
+**Layout:**
+- Email (read-only, shows current)
+- Display name (editable, stored in users table)
+- Active sessions (list with device/browser info, "Sign out" per session, "Sign out all" button)
+- API keys (list their own keys, create new ones if role allows)
+- Trail access (list trails they have access to, with trail name, description, note count)
+
+**API additions (grove repo):**
+```
+GET /v1/me                     — current user profile (email, role, trails, keys)
+PATCH /v1/me                   — update display name
+DELETE /v1/me/sessions/:id     — revoke a specific session
+DELETE /v1/me/sessions         — revoke all sessions except current
+```
+
+**Files:** `src/proxy.ts` (new routes), `src/users.ts` (add display_name, session listing), grove-www `src/app/profile/page.tsx`
+**Tests:** `test/users.test.ts` — profile endpoint returns correct data per role, session revocation works
+**Acceptance criteria:**
+- All users can view their profile at `/profile`
+- Users can update their display name
+- Users can see and revoke their own sessions
+- Viewers see their trail access list
+- Owners see everything (same as before, plus profile)
+
+---
+
+#### P15-2: Visual trail scope editor (grove-www)
+
+Replace the raw text inputs for trail allow/deny configuration with a visual editor.
+
+**Current state:** Trail create/edit form has text inputs for comma-separated tags and paths. Error-prone, no validation feedback.
+
+**New UX:**
+- **Path picker:** tree view of vault folders (fetched via `GET /v1/list`). Click to add to allow/deny. Green = allowed, red = denied, gray = unset.
+- **Tag picker:** autocomplete from existing tags in the vault. Chips for selected tags with allow (green) / deny (red) toggle.
+- **Type picker:** checkbox grid of known note types.
+- **Preview panel:** live count of "N notes match this scope" — updates as filters change. Shows sample note titles.
+- **Test mode:** "Would this note be visible?" — enter a note path, shows yes/no with which rule matched.
+
+**API addition:** `GET /v1/admin/trails/:id/preview?allow_tags=...&deny_paths=...` — returns count + sample paths matching the proposed scope.
+
+**Files:** grove-www — `src/components/trail-editor.tsx` (client component), `src/app/dashboard/trails/[id]/page.tsx`, `src/proxy.ts` (preview endpoint)
+**Tests:** Trail preview endpoint returns correct counts for filter combinations
+**Acceptance criteria:**
+- Trail creation uses visual path/tag/type pickers instead of raw text
+- Preview shows live note count as scope changes
+- Test mode validates specific notes against proposed scope
+- Existing trail editing preserves current scope configuration
+
+---
+
+#### P15-3: Non-owner dashboard (grove-www)
+
+When a member or viewer signs in, they see a simplified dashboard scoped to their access.
+
+**Layout for non-owners:**
+- **Home page:** their trail(s) with note count, last activity, search box scoped to trail
+- **Profile:** (P15-1)
+- **No access to:** Keys management (except their own), trail management, user management, system health
+- **Navigation:** simplified header — trail name, search, profile. No "Dashboard" link.
+
+**Files:** grove-www — `src/app/layout.tsx` (role-based navigation), `src/app/home/page.tsx` (non-owner home)
+**Acceptance criteria:**
+- Non-owner signs in → sees their trail(s) as the home page
+- Navigation shows only relevant items (no admin sections)
+- Search is automatically scoped to their trail
+- Profile page works for all roles
+
+---
+
+#### Phase 15 Execution Strategy
+
+**Batch 1 (2 parallel agents):**
+- **Agent A:** P15-1 backend + frontend (profile page + API endpoints)
+- **Agent B:** P15-2 (visual trail editor) — independent of A
+
+**Batch 2 (1 agent, after Batch 1):**
+- **Agent C:** P15-3 (non-owner dashboard) — needs profile page from A
+
+#### Phase 15 Success Criteria
+
+- A trail consumer signs in → sees their trail as home → can view profile and manage sessions
+- Vault owner creates a trail using the visual editor with live preview → invites a user → user sees scoped experience
+- No admin UI exposed to non-owners
+- Trail scope editing is intuitive enough that non-technical vault owners can configure it
+
+---
+
 ## Design Decisions Log
 
 Decisions made during planning. Reference these when implementing — don't re-litigate settled questions.
@@ -2028,7 +3115,7 @@ Decisions made during planning. Reference these when implementing — don't re-l
 | Language | TypeScript | Go, Python | QMD is TypeScript. MCP SDK is TypeScript. Same ecosystem. |
 | HTTP framework | None (raw node:http) | Express, Fastify | Server is <2K LOC. No framework needed. |
 | TLS | nginx + certbot | Caddy, built-in | Already running on VPS, certbot auto-renews. |
-| Agent deletes | Not allowed | Allowed with scope | Probabilistic systems should not delete personal data. |
+| Agent deletes | Soft delete (archive) by default, hard delete opt-in | Not allowed, allowed with scope | Agents can archive notes safely. Hard delete requires explicit opt-in (`?hard=true` or `--hard --yes`). Archive preserves data in configured archive path. |
 | Git push cadence | Batched every 30s | Per-write | Cleaner history, fewer push/pull races. |
 | Scoped access naming | Trails | Views, lenses, channels, gardens | Extends the grove metaphor naturally — trails are paths through a grove. |
 | Trail boundaries | Tag/type/path prefilter only | + LLM judge, semantic-only | Prefilter is fast, deterministic, covers 90%+. LLM judge cancelled — solution looking for a problem. If filtering proves too coarse, use Claude API as rerank signal. |
@@ -2058,13 +3145,20 @@ Decisions made during planning. Reference these when implementing — don't re-l
 | Portal framework | Next.js on Vercel | Extend node:http server with HTML routes | API server stays minimal (raw node:http). Portal is a separate app with real framework needs (routing, auth middleware, SSR). Vercel deployment is free for this scale. |
 | Portal scope | Ops first, knowledge views later | Ship graph explorer immediately | Ops dashboard is needed now (key/trail management). Knowledge views are nice-to-have — design the shell so they can grow in, but don't block shipping on them. |
 | Portal auth | Admin key + JWT session cookie | OAuth provider, passkey | Single user, single key. Simplest thing that works. Re-evaluate if trail consumers need portal access. |
+| Vault structure | Convention-based defaults + `.grove/config.yaml` | Hard-coded PARA, type-only | Smart defaults that match current PARA behavior. Config file is dead simple. Auto-detection for new vaults. Frontmatter `type` is always authoritative over folder. |
+| Encryption model | Encrypted at rest, plaintext in memory | True E2E (client-side), no encryption | Server needs plaintext for search/discovery/embedding. Encrypt disk, git, backups. Trust story: "we can't read your data without your passphrase." |
+| Encryption keys | Per-vault, server-escrowed with passphrase | Per-note, per-trail, user-held only | Per-vault is simple. Passphrase escrow enables multi-device. Trail scoping remains server-enforced. Lost passphrase = lost access (by design). |
+| Image storage | Cloudflare R2 (external object storage) | Git-tracked, Git LFS | Git repos bloat with binaries. R2 has no egress fees, S3-compatible API, CDN-friendly. Vault note references image by URL. |
+| Delete semantics | Soft delete (archive) by default, hard delete opt-in | Hard delete only, no delete | Archive preserves data, user can undo. Hard delete available for intentional cleanup. Both create git commits. |
+| Graph auto-healing | Auto-fix non-risky only, flag everything else | Fully automatic, manual-only | Broken link repair and re-embedding are safe. Merging duplicates or deleting orphans requires human judgment. |
+| Product model | Hosted SaaS (grove.md) + open source self-host | SaaS only, self-host only | Primary offering is hosted. Open source allows sovereignty. Like Plausible or GitLab. |
 
 ---
 
 ## Constraints
 
 - **No new frontmatter types** without updating the validation list in notes service.
-- **No agent-facing delete** — archive only, admin scope only.
+- **Agent-facing delete is soft delete (archive) by default.** Hard delete requires explicit opt-in. Both require write scope.
 - **Max note size:** 100KB. Reject larger writes.
 - **Max batch size:** 50 notes per batch_read.
 - **Max search results:** 50 per query.
@@ -2219,5 +3313,23 @@ Decisions made during planning. Reference these when implementing — don't re-l
 - P4-10 (graph explorer), P4-11 (lifecycle dashboard) — deferred, spec when dashboard proves useful
 
 **~~Phase 6~~** — LLM judge: REMOVED FROM SCOPE
-**Phase 8** — Multi-vault: deferred (work vault is read-only and auto-generated; low priority)
+**Phase 8** — Multi-vault: deferred until Phase 10 (vault-agnostic) lands
 **~~Phase 9c~~** — Annotations: REMOVED FROM SCOPE
+
+**Phase 10 — Vault-Agnostic Structure (independent, foundational for multi-vault SaaS):**
+- Vault config system, decouple validation/discovery/tagging from PARA, auto-detection
+
+**Phase 11 — Note Lifecycle Operations (after Phase 10):**
+- DELETE (soft+hard), move with wikilink update, CLI commands
+
+**Phase 12 — Encryption at Rest (independent):**
+- Per-vault encryption key, passphrase escrow, encrypted git/disk, in-memory-only plaintext
+
+**Phase 13 — Graph Health & Auto-Healing (after Phase 7):**
+- Deeper metrics, automated monitoring, non-risky auto-fixes, health dashboard
+
+**Phase 14 — Image System (independent):**
+- R2 storage, upload API, vision auto-tagging, image reference notes, Pinterest grid view
+
+**Phase 15 — Profile & Settings UX (after Phase 9):**
+- User profile pages, visual trail editor, non-owner dashboard views

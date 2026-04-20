@@ -25,7 +25,7 @@ TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 # Agents within a batch run in parallel.
 # Merge order = definition order (first defined = first merged).
 
-ALL_BATCHES="p4-prereq p4b-1 rest cli-a cli-b p5-tag p7-1 p7-2 p7-3 p9-1 p9-2 p9-3"
+ALL_BATCHES="p4-prereq p4b-1 rest cli-a cli-b p5-tag p7-1 p7-2 p7-3 p9-1 p9-2 p9-3 p10-1 p10-2 p11-1 p11-2 p12-1 p12-2 p13-1 p13-2 p14-1 p14-2 p15-1 p15-2"
 
 get_batch() {
   ENTRIES=()
@@ -77,6 +77,65 @@ get_batch() {
     p9-3)
       ENTRIES+=("p9-share|Read PLAN.md task P9-7. Build share-a-note links per spec. Run npm test before committing.")
       ;;
+
+    # ── Phase 10: Vault-Agnostic Structure ──
+    p10-1)
+      ENTRIES+=("p10-config|Read PLAN.md tasks P10-1 and P10-5. Create vault config module with schema, loading, defaults, and auto-detection per spec. Run npm test before committing.")
+      ENTRIES+=("p10-validate|Read PLAN.md task P10-2. Decouple notes-validate.ts from hard-coded PARA paths per spec. Run npm test before committing.")
+      ;;
+    p10-2)
+      ENTRIES+=("p10-discovery|Read PLAN.md task P10-3. Decouple discovery-extract.ts, discovery-link.ts, discovery-bookmarks.ts, db.ts, server.ts, rest.ts, and cli.ts from PARA paths per spec. Run npm test before committing.")
+      ENTRIES+=("p10-stats|Read PLAN.md task P10-4. Decouple vault-stats.ts from PARA paths per spec. Run npm test before committing.")
+      ENTRIES+=("p10-cli|Read PLAN.md task P10-6. Add grove config CLI command per spec. Run npm test before committing.")
+      ;;
+
+    # ── Phase 11: Note Lifecycle (DELETE/Move) ──
+    p11-1)
+      ENTRIES+=("p11-lifecycle|Read PLAN.md tasks P11-1 and P11-2. Implement DELETE and PATCH (move) endpoints per spec. Run npm test before committing.")
+      ENTRIES+=("p11-cli|Read PLAN.md task P11-4. Add grove delete and grove move CLI commands per spec. Run npm test before committing.")
+      ;;
+    p11-2)
+      ENTRIES+=("p11-mcp|Read PLAN.md task P11-3. Extend write_note MCP tool with delete/move actions per spec. Run npm test before committing.")
+      ;;
+
+    # ── Phase 12: Encryption at Rest ──
+    p12-1)
+      ENTRIES+=("p12-crypto|Read PLAN.md tasks P12-1 and P12-2. Build encryption module and vault key lifecycle per spec. Run npm test before committing.")
+      ENTRIES+=("p12-cli|Read PLAN.md task P12-5. Add vault encrypt/unlock/lock CLI commands per spec. Run npm test before committing.")
+      ;;
+    p12-2)
+      ENTRIES+=("p12-vault-encrypt|Read PLAN.md task P12-3. Add transparent encryption to vault-ops per spec. Run npm test before committing.")
+      ENTRIES+=("p12-index-encrypt|Read PLAN.md task P12-4. Encrypt search index per spec. Run npm test before committing.")
+      ;;
+
+    # ── Phase 13: Graph Health & Auto-Healing ──
+    p13-1)
+      ENTRIES+=("p13-metrics|Read PLAN.md tasks P13-1 and P13-2. Build graph health metrics, scoring, and automated monitoring per spec. Run npm test before committing.")
+      ENTRIES+=("p13-api|Read PLAN.md task P13-4. Add health REST API endpoints per spec. Run npm test before committing.")
+      ;;
+    p13-2)
+      ENTRIES+=("p13-autohealer|Read PLAN.md task P13-3. Build graph auto-healing logic per spec. Run npm test before committing.")
+      ENTRIES+=("p13-dashboard|Read PLAN.md task P13-4 frontend. Build health dashboard page in grove-www per spec. Run npm test before committing.")
+      ;;
+
+    # ── Phase 14: Image System ──
+    p14-1)
+      ENTRIES+=("p14-storage|Read PLAN.md tasks P14-1 and P14-2. Build R2 storage client and image upload endpoint per spec. Run npm test before committing.")
+      ENTRIES+=("p14-search|Read PLAN.md task P14-3. Add image metadata to search results per spec. Run npm test before committing.")
+      ;;
+    p14-2)
+      ENTRIES+=("p14-pinterest|Read PLAN.md task P14-4. Build Pinterest-style image view in grove-www per spec. Run npm test before committing.")
+      ;;
+
+    # ── Phase 15: Profile & Settings UX ──
+    p15-1)
+      ENTRIES+=("p15-profile|Read PLAN.md task P15-1. Build user profile page with backend API per spec. Run npm test before committing.")
+      ENTRIES+=("p15-trail-editor|Read PLAN.md task P15-2. Build visual trail scope editor per spec. Run npm test before committing.")
+      ;;
+    p15-2)
+      ENTRIES+=("p15-nonowner|Read PLAN.md task P15-3. Build non-owner dashboard experience per spec. Run npm test before committing.")
+      ;;
+
     *)
       return 1
       ;;
@@ -98,6 +157,12 @@ list_batches() {
   echo "  p5-tag (independent, anytime)"
   echo "  p7-1 → p7-2 → p7-3"
   echo "  p9-1 → p9-2 → p9-3"
+  echo "  p10-1 → p10-2 (vault-agnostic)"
+  echo "  p11-1 → p11-2 (delete/move, after p10)"
+  echo "  p12-1 → p12-2 (encryption, independent)"
+  echo "  p13-1 → p13-2 (graph health, after p7 + p11)"
+  echo "  p14-1 → p14-2 (images, independent)"
+  echo "  p15-1 → p15-2 (profile UX, after p9)"
 }
 
 log() {
