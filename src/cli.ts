@@ -1005,22 +1005,9 @@ async function cmdShare(config: Config, notePath: string, flags: Record<string, 
 // ── Invite (remote, via /v1/admin/invite API) ──────────────────
 
 async function cmdInvite(config: Config, email: string, flags: Record<string, string | boolean>): Promise<CmdResult> {
-  if (!email) throw new CliError("bad_request", "Usage: grove invite <email> <trail-name-or-id> [--role viewer]", 1);
-  let trailId = flags.trail as string;
-  if (!trailId) throw new CliError("bad_request", "Usage: grove invite <email> <trail-name-or-id> [--role viewer]", 1);
-
-  // Resolve trail name to ID if it doesn't look like an ID
-  if (!trailId.startsWith("trail_")) {
-    const listRes = await trailsPost(config, { action: "list" });
-    handleHttpStatus(listRes);
-    const trails = (tryParseJson(listRes.body) ?? {}).trails ?? [];
-    const match = trails.find((t: { id: string; name: string }) =>
-      t.name.toLowerCase() === trailId.toLowerCase(),
-    );
-    if (!match) throw new CliError("bad_request", `Trail not found: "${trailId}"\nAvailable: ${trails.map((t: { name: string }) => t.name).join(", ") || "none"}`, 1);
-    trailId = match.id;
-  }
-
+  if (!email) throw new CliError("bad_request", "Usage: grove invite <email> --trail <trail-id> [--role viewer]\nRun `grove trails list` to see available trails.", 1);
+  const trailId = flags.trail as string;
+  if (!trailId) throw new CliError("bad_request", "Usage: grove invite <email> --trail <trail-id> [--role viewer]\nRun `grove trails list` to see available trails.", 1);
   const role = (flags.role as string) ?? "viewer";
 
   const url = new URL("/v1/admin/invite", config.server);
@@ -1542,10 +1529,8 @@ async function main() {
       return;
     }
 
-    // Invite — grove invite <email> <trail-name-or-id> [--role viewer]
+    // Invite
     if (command === "invite") {
-      const trailArg = process.argv.slice(4).find(a => !a.startsWith("-")) ?? flags.trail as string;
-      if (trailArg) flags.trail = trailArg;
       result = await cmdInvite(config, positional, flags);
       emitResult(result, json);
       return;
