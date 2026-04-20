@@ -29,7 +29,7 @@ const vaultPath = process.env.GROVE_VAULT ?? join(homedir(), "life");
 const healthIntervalMs = process.env.GROVE_HEALTH_INTERVAL_MS
   ? Number(process.env.GROVE_HEALTH_INTERVAL_MS)
   : DEFAULT_HEALTH_INTERVAL_MS;
-startHealthCronLoop(vaultPath, { intervalMs: healthIntervalMs });
+startHealthCronLoop(vaultPath, { intervalMs: healthIntervalMs, runImmediately: true });
 
 // Graceful shutdown
 let shuttingDown = false;
