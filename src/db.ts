@@ -194,6 +194,21 @@ CREATE TABLE IF NOT EXISTS graph_health (
 );
 
 CREATE INDEX IF NOT EXISTS idx_health_date ON graph_health(measured_at);
+
+CREATE TABLE IF NOT EXISTS graph_health_flags (
+  id TEXT PRIMARY KEY,
+  flag_type TEXT NOT NULL,
+  source_path TEXT,
+  target_path TEXT,
+  details TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  resolved_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_health_flags_type ON graph_health_flags(flag_type, resolved_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_health_flags_unique
+  ON graph_health_flags(flag_type, coalesce(source_path, ''), coalesce(target_path, ''))
+  WHERE resolved_at IS NULL;
 `;
 
 export function createSchema(): void {
@@ -552,6 +567,84 @@ export function getSurprisingConnections(limit = 10): SurprisingConnection[] {
        LIMIT ?`,
     )
     .all(limit) as SurprisingConnection[];
+}
+
+// ── Graph health flags helpers ───────────────────────────────────
+
+export type HealthFlagType =
+  | "duplicate_candidate"
+  | "long_orphan"
+  | "cluster_island";
+
+export interface HealthFlagRow {
+  id: string;
+  flag_type: HealthFlagType;
+  source_path: string | null;
+  target_path: string | null;
+  details: string;
+  created_at: string;
+  resolved_at: string | null;
+}
+
+/**
+ * Insert a health flag if there isn't already an unresolved one for the
+ * same (flag_type, source_path, target_path) tuple. Returns the id of the
+ * inserted row, or null when the flag was already present.
+ */
+export function insertHealthFlag(
+  id: string,
+  flagType: HealthFlagType,
+  sourcePath: string | null,
+  targetPath: string | null,
+  details: Record<string, unknown>,
+): string | null {
+  const database = getDb();
+  const result = database
+    .prepare(
+      `INSERT INTO graph_health_flags (id, flag_type, source_path, target_path, details)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT DO NOTHING`,
+    )
+    .run(id, flagType, sourcePath, targetPath, JSON.stringify(details));
+  return result.changes > 0 ? id : null;
+}
+
+export function getHealthFlags(opts: {
+  resolved?: boolean;
+  flagType?: HealthFlagType;
+  limit?: number;
+} = {}): HealthFlagRow[] {
+  const database = getDb();
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+  if (opts.resolved === false) clauses.push("resolved_at IS NULL");
+  else if (opts.resolved === true) clauses.push("resolved_at IS NOT NULL");
+  if (opts.flagType) {
+    clauses.push("flag_type = ?");
+    params.push(opts.flagType);
+  }
+  const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+  const limit = opts.limit ?? 200;
+  params.push(limit);
+  return database
+    .prepare(
+      `SELECT id, flag_type, source_path, target_path, details, created_at, resolved_at
+       FROM graph_health_flags
+       ${where}
+       ORDER BY created_at DESC
+       LIMIT ?`,
+    )
+    .all(...params) as HealthFlagRow[];
+}
+
+export function resolveHealthFlag(id: string): boolean {
+  const database = getDb();
+  const result = database
+    .prepare(
+      "UPDATE graph_health_flags SET resolved_at = datetime('now') WHERE id = ? AND resolved_at IS NULL",
+    )
+    .run(id);
+  return result.changes > 0;
 }
 
 /** Get the most recent processed_at timestamp. */
