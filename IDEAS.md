@@ -16,6 +16,12 @@ Tell me an idea — a sentence, a half-thought, a "what if." I'll capture it as 
 ## Sparks
 
 - **Growth prompting heartbeat** — proactive system that prompts the user with questions designed to grow the graph in the right direction (fill gaps, connect islands, deepen thin concepts)
+- **Extract learnings from autonomous runs** — systematically capture what autonomous Grove/agent runs discover so lessons compound instead of evaporating
+- **Core product capacities list** — canonical list of Grove's capabilities, kept consistent across docs, marketing, and product surfaces
+- **Open source calibration** — decide what's the right amount of Grove to open-source (SDK? proxy? nothing? everything minus hosted infra?)
+- **Extract design system** — pull a coherent design system out of the current Grove UI so future surfaces stay visually consistent
+- **SOC2 baseline** — SSO, encryption at rest/transit, access logs, no prod access without MFA — the minimum surface to be SOC2-ready
+- **Mobile-optimized pages** — fix pages that have horizontal scroll outside the viewport on mobile
 
 ---
 
