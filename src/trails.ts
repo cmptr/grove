@@ -73,8 +73,8 @@ function rowToConfig(row: TrailRow, keyId: string): TrailConfig {
 
 export function loadTrails(): TrailConfig[] {
   const db = getDb();
-  const rows = db.prepare("SELECT t.*, tg.grantee_id FROM trails t LEFT JOIN trail_grants tg ON t.id = tg.trail_id AND tg.grantee_type = 'token'").all() as (TrailRow & { grantee_id: string | null })[];
-  return rows.map((r) => rowToConfig(r, r.grantee_id ?? ""));
+  const rows = db.prepare("SELECT * FROM trails").all() as TrailRow[];
+  return rows.map((r) => rowToConfig(r, ""));
 }
 
 export function generateTrailId(): string {
