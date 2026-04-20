@@ -810,7 +810,7 @@ const server = createServer(async (req, res) => {
     checks["grove-server"] = groveOk;
     checks.qmd = qmdOk;
     checks.embed = embedOk;
-    const allOk = groveOk && qmdOk;
+    const allOk = groveOk && qmdOk && embedOk;
     sendJson(res, allOk ? 200 : 503, { ok: allOk, checks });
     return;
   }
