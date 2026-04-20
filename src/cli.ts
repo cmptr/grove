@@ -49,6 +49,7 @@ import {
   completionZsh,
   completionFish,
 } from "./cli/phase3.js";
+import { runEdit, type EditDeps } from "./cli/edit.js";
 
 // ── Vault path (local git operations) ────────────────────────────
 const VAULT_PATH = process.env.GROVE_VAULT ?? join(homedir(), "life");
@@ -977,6 +978,172 @@ async function cmdKeysRevoke(config: Config, id: string): Promise<CmdResult> {
   return { ok: true, revoked: data.revoked, _fmt: () => `Revoked key: ${data.revoked}` };
 }
 
+// ── Key rotate (client-side atomic swap) ──────────────────────────
+//
+// Server has no single "rotate" endpoint — we implement it as create-new
+// then revoke-old. An optional --grace <seconds> keeps the old key active
+// briefly so clients can update their config without a hard cutover. In
+// --grace mode we sleep between the two calls. Default grace is 0 (immediate).
+
+async function cmdKeyRotate(
+  config: Config,
+  id: string,
+  flags: Record<string, string | boolean>,
+): Promise<CmdResult> {
+  if (!id) throw new CliError("bad_request", "Usage: grove key rotate <old-key-id> [--name <new-name>] [--grace <seconds>]", 1);
+
+  // Step 1: discover the old key's name (so we can preserve it by default).
+  const listRes = await keysPost(config, { action: "list" });
+  handleHttpStatus(listRes);
+  const listData = tryParseJson(listRes.body) ?? {};
+  const oldKey = (listData.keys ?? []).find((k: any) => k.id === id);
+  if (!oldKey) throw new CliError("not_found", `No such key: ${id}`, 1);
+
+  const newName = (flags.name as string) ?? `${oldKey.name}-rotated`;
+  const graceSec = flags.grace ? Number(flags.grace) : 0;
+  if (!Number.isFinite(graceSec) || graceSec < 0) {
+    throw new CliError("bad_request", "--grace must be a non-negative integer (seconds)", 1);
+  }
+
+  // Step 2: create new key with the chosen name.
+  const createRes = await keysPost(config, { action: "create", name: newName });
+  handleHttpStatus(createRes);
+  const createData = tryParseJson(createRes.body) ?? {};
+  if (!createData.id || !createData.token) {
+    throw new CliError("server_error", `Create returned unexpected shape: ${JSON.stringify(createData)}`, 3);
+  }
+  const newId = createData.id;
+  const newToken = createData.token;
+
+  // Step 3: optional grace — old key keeps working while user updates configs.
+  if (graceSec > 0) {
+    process.stderr.write(`new key ${newId} issued; old key ${id} will be revoked in ${graceSec}s...\n`);
+    await new Promise((r) => setTimeout(r, graceSec * 1000));
+  }
+
+  // Step 4: revoke the old key. If this step fails the user has an orphan new
+  // key — we still return the new token so they don't lose it.
+  let oldRevoked = false;
+  let revokeError: string | undefined;
+  try {
+    const revRes = await keysPost(config, { action: "revoke", id });
+    handleHttpStatus(revRes);
+    const revData = tryParseJson(revRes.body) ?? {};
+    oldRevoked = !!revData.revoked;
+  } catch (e) {
+    revokeError = e instanceof Error ? e.message : String(e);
+  }
+
+  return {
+    ok: true,
+    rotated: true,
+    new_id: newId,
+    new_name: newName,
+    token: newToken,
+    old_id: id,
+    old_revoked: oldRevoked,
+    ...(revokeError ? { revoke_error: revokeError } : {}),
+    grace_seconds: graceSec,
+    _fmt: () => {
+      const lines: string[] = [];
+      lines.push(`\nRotated key ${id}`);
+      lines.push(`New key:    ${newId} (${newName})`);
+      lines.push(`Old key:    ${oldRevoked ? "revoked" : `NOT revoked — ${revokeError ?? "unknown error"}`}`);
+      lines.push("");
+      lines.push(`New token (shown once, save it now):`);
+      lines.push(`\n  ${newToken}\n`);
+      if (!oldRevoked) {
+        lines.push(`WARNING: old key still active. Run manually: grove key revoke ${id}`);
+      }
+      return lines.join("\n");
+    },
+  };
+}
+
+// ── User management (admin) ───────────────────────────────────────
+
+async function cmdUsersList(config: Config): Promise<CmdResult> {
+  const data = await restGet(config, "/v1/admin/users");
+  const users = data.users ?? [];
+  return {
+    ok: true,
+    users,
+    count: users.length,
+    _fmt: () => {
+      if (users.length === 0) return "No users.";
+      const lines: string[] = [];
+      lines.push("\nID              Email                           Role      Created      Last login");
+      lines.push("─".repeat(95));
+      for (const u of users) {
+        const created = u.created_at?.slice(0, 10) ?? "-";
+        const last = u.last_login_at?.slice(0, 10) ?? "never";
+        lines.push(
+          `${(u.id ?? "").padEnd(16)}${(u.email ?? "").padEnd(32)}${(u.role ?? "").padEnd(10)}${created.padEnd(13)}${last}`,
+        );
+      }
+      lines.push("");
+      return lines.join("\n");
+    },
+  };
+}
+
+async function cmdUserDelete(config: Config, id: string): Promise<CmdResult> {
+  if (!id) throw new CliError("bad_request", "Usage: grove user delete <user-id>", 1);
+  const url = new URL(`/v1/admin/users/${encodeURIComponent(id)}`, config.server);
+  const res = await httpDo("DELETE", url, { Authorization: `Bearer ${config.token}` });
+  handleHttpStatus(res);
+  const data = tryParseJson(res.body) ?? {};
+  if (!data.deleted) throw new CliError("not_found", `Failed to delete user: ${JSON.stringify(data)}`, 1);
+  return { ok: true, deleted: data.deleted, _fmt: () => `Deleted user: ${data.deleted}` };
+}
+
+// ── Trail update (partial) ──────────────────────────────────────
+
+async function cmdTrailUpdate(
+  config: Config,
+  id: string,
+  flags: Record<string, string | boolean>,
+): Promise<CmdResult> {
+  if (!id) {
+    throw new CliError(
+      "bad_request",
+      "Usage: grove trail update <id> [--name N] [--description D] [--allow-tags t1,t2] [--deny-tags t1,t2] [--allow-types t1,t2] [--allow-paths p1,p2] [--enabled true|false]",
+      1,
+    );
+  }
+  const splitFlag = (f: string | boolean | undefined) =>
+    typeof f === "string" ? f.split(",").map((s) => s.trim()).filter(Boolean) : undefined;
+
+  const body: Record<string, unknown> = { action: "update", id };
+  if (typeof flags.name === "string") body.name = flags.name;
+  if (typeof flags.description === "string") body.description = flags.description;
+  if (flags.enabled === true || flags.enabled === "true") body.enabled = true;
+  if (flags.enabled === false || flags.enabled === "false") body.enabled = false;
+  const tagsA = splitFlag(flags["allow-tags"]);
+  if (tagsA) body.allow_tags = tagsA;
+  const tagsD = splitFlag(flags["deny-tags"]);
+  if (tagsD) body.deny_tags = tagsD;
+  const typesA = splitFlag(flags["allow-types"]);
+  if (typesA) body.allow_types = typesA;
+  const typesD = splitFlag(flags["deny-types"]);
+  if (typesD) body.deny_types = typesD;
+  const pathsA = splitFlag(flags["allow-paths"]);
+  if (pathsA) body.allow_paths = pathsA;
+  const pathsD = splitFlag(flags["deny-paths"]);
+  if (pathsD) body.deny_paths = pathsD;
+
+  // Require at least one mutating field beyond action+id.
+  if (Object.keys(body).length <= 2) {
+    throw new CliError("bad_request", "grove trail update requires at least one field to change (e.g., --name, --enabled, --allow-tags).", 1);
+  }
+
+  const res = await trailsPost(config, body);
+  handleHttpStatus(res);
+  const data = tryParseJson(res.body) ?? {};
+  if (!data.updated) throw new CliError("not_found", `Failed to update trail: ${JSON.stringify(data)}`, 1);
+  return { ok: true, updated: data.updated, changes: Object.keys(body).filter((k) => k !== "action" && k !== "id"), _fmt: () => `Updated trail: ${data.updated}` };
+}
+
 // ── Trail management (remote, via /v1/admin/trails API) ──────────────
 
 function trailsPost(config: Config, body: unknown): Promise<{ status: number; body: string }> {
@@ -1617,10 +1784,16 @@ function emitError(err: CliError | GroveCliError, flags: Record<string, string |
 /**
  * Legacy CliError → exit code mapping.
  * New GroveCliError uses `newExitCodeFor(code)` for the 0/1/2/3/4 scheme.
- * Legacy CliError keeps its `.exitCode` property (1/2/3).
+ * For legacy CliError, if the `code` string maps to a modern class (e.g.,
+ * "not_found" or "conflict"), prefer the modern exit code; otherwise fall
+ * back to the legacy `.exitCode` property.
  */
 function exitCodeFor(err: CliError | GroveCliError): number {
   if (err instanceof GroveCliError) return err.exitCode;
+  const legacyCode = (err as CliError).code;
+  // Translate legacy codes to modern exit codes where the class is obvious.
+  if (legacyCode === "not_found") return 4;
+  if (legacyCode === "conflict") return 4;
   return (err as CliError).exitCode;
 }
 
@@ -1728,19 +1901,37 @@ async function main() {
 
     const config = loadConfig();
 
-    // Key management
-    if (command === "keys") {
+    // Key management — plural "keys" legacy and singular "key" canonical.
+    if (command === "keys" || command === "key") {
       const sub = positional || "list";
       const subArg = process.argv.slice(4)[0] ?? "";
       switch (sub) {
         case "list":   result = await cmdKeysList(config); break;
         case "create": result = await cmdKeysCreate(config, subArg); break;
         case "revoke":
-          // Destructive: typed confirm with the key id.
           await confirmTyped(subArg, `revoke API key "${subArg}" — this is immediate and irreversible.`);
           result = await cmdKeysRevoke(config, subArg); break;
+        case "rotate":
+          result = await cmdKeyRotate(config, subArg, flags); break;
         default:
-          throw new CliError("bad_request", `Unknown keys subcommand: ${sub}\nUsage: grove keys [list|create|revoke]`, 1);
+          throw new CliError("bad_request", `Unknown key subcommand: ${sub}\nUsage: grove key [list|create|revoke|rotate]`, 1);
+      }
+      emitResult(result, flags);
+      return;
+    }
+
+    // User management (admin-only, server enforces owner role).
+    if (command === "user" || command === "users") {
+      const sub = positional || "list";
+      const subArg = process.argv.slice(4)[0] ?? "";
+      switch (sub) {
+        case "list":   result = await cmdUsersList(config); break;
+        case "delete":
+          if (!subArg) throw new CliError("bad_request", "Usage: grove user delete <user-id>", 1);
+          await confirmTyped(subArg, `delete user "${subArg}" — this removes the user AND all their data. Irreversible.`);
+          result = await cmdUserDelete(config, subArg); break;
+        default:
+          throw new CliError("bad_request", `Unknown user subcommand: ${sub}\nUsage: grove user [list|delete]`, 1);
       }
       emitResult(result, flags);
       return;
@@ -1760,21 +1951,56 @@ async function main() {
       return;
     }
 
-    // Trail management
-    if (command === "trails") {
+    // Trail management — plural "trails" legacy and singular "trail" canonical.
+    if (command === "trails" || command === "trail") {
       const sub = positional || "list";
       const subArg = process.argv.slice(4)[0] ?? "";
       switch (sub) {
         case "list":    result = await cmdTrailsList(config); break;
         case "create":  result = await cmdTrailCreate(config, subArg, flags); break;
+        case "update":  result = await cmdTrailUpdate(config, subArg, flags); break;
         case "disable": result = await cmdTrailDisable(config, subArg); break;
         case "delete":
-          // Destructive: typed confirm with trail id.
           await confirmTyped(subArg, `delete trail "${subArg}" — this is permanent.`);
           result = await cmdTrailDelete(config, subArg, flags); break;
         default:
-          throw new CliError("bad_request", `Unknown trails subcommand: ${sub}\nUsage: grove trails [list|create|disable|delete]`, 1);
+          throw new CliError("bad_request", `Unknown trail subcommand: ${sub}\nUsage: grove trail [list|create|update|disable|delete]`, 1);
       }
+      emitResult(result, flags);
+      return;
+    }
+
+    // grove edit — TTY-only interactive edit with conflict-recovery UX.
+    if (command === "edit") {
+      if (!positional) throw new CliError("bad_request", "Usage: grove edit <path>", 1);
+      const deps: EditDeps = {
+        getNote: async (p) => {
+          const data = await restGet(config, `/v1/notes/${encodeURIComponent(p)}`);
+          return { content: data.content ?? "", content_hash: data.content_hash ?? "", frontmatter: data.frontmatter };
+        },
+        putNote: async (p, content, ifHash) => {
+          // Preserve existing frontmatter — grove edit doesn't restructure it.
+          const current = await restGet(config, `/v1/notes/${encodeURIComponent(p)}`);
+          const body = { frontmatter: current.frontmatter ?? {}, content };
+          return await restPut(config, `/v1/notes/${encodeURIComponent(p)}`, body, { "If-Match": `"${ifHash}"` });
+        },
+      };
+      const outcome = await runEdit(positional, deps);
+      result = {
+        ok: true,
+        action: outcome.status,
+        path: outcome.path,
+        new_content_hash: outcome.new_content_hash,
+        ...(outcome.tempfile ? { tempfile: outcome.tempfile } : {}),
+        _fmt: () => {
+          switch (outcome.status) {
+            case "unchanged":   return `no changes to ${outcome.path}`;
+            case "written":     return `updated ${outcome.path}`;
+            case "overwritten": return `overwrote ${outcome.path} (server change discarded)`;
+            case "aborted":     return `aborted — edits at ${outcome.tempfile}`;
+          }
+        },
+      } as CmdResult;
       emitResult(result, flags);
       return;
     }
