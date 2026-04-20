@@ -12,6 +12,7 @@ import { join, relative, basename } from "node:path";
 import { parse as yamlParse } from "yaml";
 import Database from "better-sqlite3";
 import { analyzeGraph, computeDigest } from "./vault-graph.js";
+import { loadVaultConfig, type VaultConfig } from "./vault-config.js";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -127,6 +128,7 @@ interface FileInfo {
 function computeVaultSection(
   vaultPath: string,
   files: string[],
+  config: VaultConfig,
 ): { section: VaultSection; fileInfos: FileInfo[] } {
   const by_folder: Record<string, number> = {};
   const by_type: Record<string, number> = {};
@@ -134,10 +136,21 @@ function computeVaultSection(
   let completeCount = 0;
   const fileInfos: FileInfo[] = [];
 
+  // by_folder buckets are config-driven: one entry per type_paths prefix.
+  // Empty type_paths → no folder breakdown (by_type covers it).
+  const typePathPrefixes = Object.values(config.structure.type_paths);
+
   for (const abs of files) {
     const rel = relative(vaultPath, abs);
-    const topFolder = rel.split("/")[0];
-    by_folder[topFolder] = (by_folder[topFolder] ?? 0) + 1;
+    if (typePathPrefixes.length > 0) {
+      for (const prefix of typePathPrefixes) {
+        if (rel.startsWith(prefix)) {
+          const key = prefix.replace(/\/$/, "");
+          by_folder[key] = (by_folder[key] ?? 0) + 1;
+          break;
+        }
+      }
+    }
 
     let head: string;
     let mtime: Date;
@@ -358,10 +371,12 @@ function computeGitSection(vaultPath: string): VaultStats["git"] {
 
 export async function computeVaultStats(
   vaultPath: string,
+  config?: VaultConfig,
 ): Promise<VaultStats> {
+  const cfg = config ?? loadVaultConfig(vaultPath);
   const t0 = Date.now();
   const files = walkMd(vaultPath);
-  const { section: vault, fileInfos } = computeVaultSection(vaultPath, files);
+  const { section: vault, fileInfos } = computeVaultSection(vaultPath, files, cfg);
   const freshness = computeFreshness(fileInfos);
   const index = computeIndexSection(vault.total_notes);
   const git = computeGitSection(vaultPath);

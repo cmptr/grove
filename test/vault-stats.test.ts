@@ -20,6 +20,8 @@ import {
   stopStatsTimer,
 } from "../src/vault-stats.js";
 import type { VaultStats } from "../src/vault-stats.js";
+import { getDefaultConfig } from "../src/vault-config.js";
+import type { VaultConfig } from "../src/vault-config.js";
 
 // ── Fixture vault ───────────────────────────────────────────────────
 
@@ -99,14 +101,13 @@ describe("computeVaultStats", () => {
     expect(stats.vault.total_notes).toBe(7);
   });
 
-  it("groups by folder", () => {
-    const folders = Object.keys(stats.vault.by_folder);
-    expect(folders).toContain("Areas");
-    expect(folders).toContain("Resources");
-    expect(folders).toContain("Journal");
-    expect(folders).toContain("Inbox");
-    expect(stats.vault.by_folder["Areas"]).toBe(3);
-    expect(stats.vault.by_folder["Resources"]).toBe(2);
+  it("groups by folder using default (PARA) type_paths", () => {
+    // Default config maps type_paths to PARA prefixes like Resources/Concepts/, Journal/.
+    // Files outside any configured prefix (Areas/*, Inbox/*) are not counted in by_folder.
+    expect(stats.vault.by_folder["Resources/Concepts"]).toBe(2);
+    expect(stats.vault.by_folder["Journal"]).toBe(1);
+    expect(stats.vault.by_folder["Areas"]).toBeUndefined();
+    expect(stats.vault.by_folder["Inbox"]).toBeUndefined();
   });
 
   it("freshness section has valid numbers", () => {
@@ -141,6 +142,61 @@ describe("computeVaultStats", () => {
 
   it("git section returns null for non-git directory", () => {
     expect(stats.git).toBeNull();
+  });
+});
+
+describe("custom config", () => {
+  it("counts notes using custom type_paths", async () => {
+    const customConfig: VaultConfig = {
+      ...getDefaultConfig(),
+      structure: {
+        ...getDefaultConfig().structure,
+        type_paths: {
+          area: "Areas/",
+          concept: "Resources/Concepts/",
+          journal: "Journal/",
+        },
+      },
+    };
+    const stats = await computeVaultStats(vaultDir, customConfig);
+    expect(stats.vault.by_folder["Areas"]).toBe(3);
+    expect(stats.vault.by_folder["Resources/Concepts"]).toBe(2);
+    expect(stats.vault.by_folder["Journal"]).toBe(1);
+    expect(stats.vault.by_folder["Inbox"]).toBeUndefined();
+  });
+
+  it("omits by_folder breakdown when type_paths is empty", async () => {
+    const minimalConfig: VaultConfig = {
+      ...getDefaultConfig(),
+      structure: {
+        ...getDefaultConfig().structure,
+        type_paths: {},
+      },
+    };
+    const stats = await computeVaultStats(vaultDir, minimalConfig);
+    expect(stats.vault.by_folder).toEqual({});
+    // by_type still counts frontmatter types
+    expect(stats.vault.by_type["area"]).toBe(3);
+    expect(stats.vault.by_type["concept"]).toBe(2);
+    expect(stats.vault.by_type["untyped"]).toBe(2);
+  });
+
+  it("lifecycle classification unchanged by config", async () => {
+    const minimalConfig: VaultConfig = {
+      ...getDefaultConfig(),
+      structure: {
+        ...getDefaultConfig().structure,
+        type_paths: {},
+      },
+    };
+    const stats = await computeVaultStats(vaultDir, minimalConfig);
+    const { lifecycle } = stats;
+    expect(typeof lifecycle.seeds).toBe("number");
+    expect(typeof lifecycle.sprouts).toBe("number");
+    expect(typeof lifecycle.growing).toBe("number");
+    expect(typeof lifecycle.mature).toBe("number");
+    expect(typeof lifecycle.dormant).toBe("number");
+    expect(typeof lifecycle.withering).toBe("number");
   });
 });
 
