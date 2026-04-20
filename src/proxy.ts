@@ -42,6 +42,7 @@ import {
 } from "./auth.js";
 import { getUserRole, deleteUser, listUsersWithMeta } from "./users.js";
 import { generateRequestId, log as structuredLog, auditRead, auditWrite } from "./logger.js";
+import { installCrashHandlers } from "./crash-handlers.js";
 import { metrics, searchMetrics } from "./metrics.js";
 import { resolveTrail, loadTrails, createTrail, updateTrail, disableTrail, deleteTrail, type TrailConfig } from "./trails.js";
 import {
@@ -53,6 +54,8 @@ import {
 import { startStatsTimer } from "./vault-stats.js";
 import { inviteUser } from "./invite.js";
 import { createShareLink, resolveShareLink } from "./share.js";
+
+installCrashHandlers("grove-proxy");
 
 const QMD_PORT = Number(process.env.QMD_PORT ?? 8181);
 const GROVE_SERVER_PORT = Number(process.env.GROVE_SERVER_PORT ?? 8190);

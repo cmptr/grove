@@ -34,6 +34,7 @@ import { analyzeGraph, computeDigest } from "./vault-graph.js";
 import { getStats, startStatsTimer } from "./vault-stats.js";
 import { RateLimiter, IdempotencyCache } from "./rate-limit.js";
 import { log as structuredLog, auditRead } from "./logger.js";
+import { installCrashHandlers } from "./crash-handlers.js";
 import { filterByTrail, logTrailAccess, type TrailConfig, type NoteMetadata } from "./trails.js";
 import {
   runMigration,
@@ -44,6 +45,8 @@ import {
   getSurprisingConnections,
   getLastProcessedAt,
 } from "./db.js";
+
+installCrashHandlers("grove-server");
 
 // ── Path traversal guard ─────────────────────────────────────────
 // Resolves a relative path against the vault and rejects any attempt
