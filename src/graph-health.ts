@@ -5,7 +5,8 @@
  * broken links, embedding coverage, clustering, growth), calculates a
  * composite 0–100 score, and stores each run as a time-series row in
  * `graph_health`. A cron loop runs the check on a configurable interval
- * and emits structured alerts when thresholds are exceeded.
+ * and emits structured alerts when thresholds are exceeded. Also exposes
+ * read-side query helpers used by the admin REST layer.
  */
 
 import { readdirSync, readFileSync, statSync, existsSync, writeFileSync } from "node:fs";
@@ -537,13 +538,22 @@ export function getLatestHealthSnapshot(): HealthSnapshot | null {
   return row ? parseSnapshotRow(row) : null;
 }
 
-export function getHealthHistory(limit = 30): HealthSnapshot[] {
+/**
+ * Return health snapshots from the last `days` days, oldest first.
+ * Default window is 30 days; clamped to [1, 365]. Oldest-first ordering
+ * suits dashboard trend lines (time flows left to right).
+ */
+export function getHealthHistory(days = 30): HealthSnapshot[] {
   const db = getDb();
+  const window = Math.min(365, Math.max(1, Math.floor(days)));
   const rows = db
     .prepare(
-      "SELECT id, measured_at, metrics, score FROM graph_health ORDER BY measured_at DESC LIMIT ?",
+      `SELECT id, measured_at, metrics, score
+         FROM graph_health
+        WHERE measured_at >= datetime('now', ?)
+        ORDER BY measured_at ASC`,
     )
-    .all(limit) as {
+    .all(`-${window} days`) as {
     id: string;
     measured_at: string;
     metrics: string;
@@ -1279,4 +1289,71 @@ export async function autoHeal(
   });
 
   return stats;
+}
+
+// ── Admin health API helpers (P13-4) ─────────────────────────────────
+
+export interface HealthFlag {
+  id: string;
+  flag_type: string;
+  source_path: string | null;
+  target_path: string | null;
+  details: Record<string, unknown> | null;
+  created_at: string;
+  resolved_at: string | null;
+}
+
+interface FlagRow {
+  id: string;
+  flag_type: string;
+  source_path: string | null;
+  target_path: string | null;
+  details: string | null;
+  created_at: string;
+  resolved_at: string | null;
+}
+
+function hydrateFlag(row: FlagRow): HealthFlag {
+  return {
+    id: row.id,
+    flag_type: row.flag_type,
+    source_path: row.source_path,
+    target_path: row.target_path,
+    details: row.details ? (JSON.parse(row.details) as Record<string, unknown>) : null,
+    created_at: row.created_at,
+    resolved_at: row.resolved_at,
+  };
+}
+
+/** Alias for the admin API — returns the most recent health snapshot. */
+export function getCurrentHealth(): HealthSnapshot | null {
+  return getLatestHealthSnapshot();
+}
+
+/** Return unresolved health flags, most recent first. */
+export function getUnresolvedFlags(): HealthFlag[] {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT id, flag_type, source_path, target_path, details, created_at, resolved_at
+         FROM graph_health_flags
+        WHERE resolved_at IS NULL
+        ORDER BY created_at DESC`,
+    )
+    .all() as FlagRow[];
+  return rows.map(hydrateFlag);
+}
+
+/**
+ * Mark a flag as resolved. Returns true if a row was updated, false if the
+ * flag did not exist or was already resolved.
+ */
+export function resolveFlag(id: string): boolean {
+  const db = getDb();
+  const result = db
+    .prepare(
+      "UPDATE graph_health_flags SET resolved_at = datetime('now') WHERE id = ? AND resolved_at IS NULL",
+    )
+    .run(id);
+  return result.changes > 0;
 }

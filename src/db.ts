@@ -206,6 +206,7 @@ CREATE TABLE IF NOT EXISTS graph_health_flags (
 );
 
 CREATE INDEX IF NOT EXISTS idx_health_flags_type ON graph_health_flags(flag_type, resolved_at);
+CREATE INDEX IF NOT EXISTS idx_flags_unresolved ON graph_health_flags(resolved_at, created_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_health_flags_unique
   ON graph_health_flags(flag_type, coalesce(source_path, ''), coalesce(target_path, ''))
   WHERE resolved_at IS NULL;
