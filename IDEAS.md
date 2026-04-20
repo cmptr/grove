@@ -22,6 +22,7 @@ Tell me an idea — a sentence, a half-thought, a "what if." I'll capture it as 
 - **Image uploads as graph nodes** — support uploading popular image formats (PNG, JPG, WebP), auto-tag them with concepts, and treat them as first-class nodes in the knowledge graph
 - **Pinterest-style image view** — visual grid/masonry layout for browsing image nodes in the vault, filterable by tags and connections
 - **Vault-agnostic structure** — decouple Grove from PARA folder conventions (Areas/, Resources/, Journal/, etc.) so it works with any Obsidian vault organization. Folder semantics should be configurable or inferred, not hard-coded.
+- **DELETE/move endpoint** — Grove can only write_note (create/update in place). No way to delete or move notes between paths. Needed for vault reorganization, inbox processing, and lifecycle management (e.g. composting withered notes).
 
 ---
 
