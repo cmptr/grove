@@ -49,8 +49,10 @@ import {
   handleGetNote, handleSearch, handleListNotes, handleStats, handleWriteNote,
   handleStatusHealth, handleStatusHistory, handleStatusDiagnostics,
   handleStatusGraph, handleStatusDigest, handleTrailInfo, VALID_STATUS_MODES,
+  handleImageUpload,
   type StatusMode,
 } from "./rest.js";
+import { parseMultipart, parseBoundary } from "./multipart.js";
 import { startStatsTimer } from "./vault-stats.js";
 import { inviteUser } from "./invite.js";
 import { createShareLink, resolveShareLink } from "./share.js";
@@ -708,6 +710,7 @@ function sendJson(res: ServerResponse, status: number, body: unknown) {
 }
 
 const MAX_BODY = 1048576; // 1MB body size limit
+const MAX_IMAGE_BODY = 12 * 1024 * 1024; // 12MB raw (10MB file + multipart overhead)
 
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -723,6 +726,24 @@ function readBody(req: IncomingMessage): Promise<string> {
       chunks.push(c);
     });
     req.on("end", () => resolve(Buffer.concat(chunks).toString()));
+    req.on("error", reject);
+  });
+}
+
+function readBodyBuffer(req: IncomingMessage, maxBytes: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    req.on("data", (c) => {
+      size += c.length;
+      if (size > maxBytes) {
+        req.destroy();
+        reject(new Error("payload too large"));
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks)));
     req.on("error", reject);
   });
 }
@@ -1235,8 +1256,10 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // Rate limit (REST bucket — write bucket for PUT, read bucket otherwise)
-    const restRateBucket = req.method === "PUT" ? "write" as const : "read" as const;
+    // Rate limit (REST bucket — write bucket for PUT/POST/DELETE, read bucket otherwise)
+    const restRateBucket = (req.method === "PUT" || req.method === "POST" || req.method === "DELETE")
+      ? "write" as const
+      : "read" as const;
     const restRateResult = rateLimiter.check(restKey.id, restRateBucket);
     if (!restRateResult.allowed) {
       res.writeHead(429, { "Content-Type": "application/json", "Access-Control-Allow-Origin": REST_CORS_ORIGIN });
@@ -1349,6 +1372,84 @@ const server = createServer(async (req, res) => {
           res.end(JSON.stringify({ error: err.message, errors: err.errors }));
         } else {
           console.error("[rest] put_note error:", err);
+          res.writeHead(500, restHeaders);
+          res.end(JSON.stringify({ error: "internal error" }));
+        }
+      }
+      return;
+    }
+
+    // POST /v1/images — upload an image + companion note
+    if (url.pathname === "/v1/images" && req.method === "POST") {
+      const boundary = parseBoundary(req.headers["content-type"]);
+      if (!boundary) {
+        res.writeHead(400, restHeaders);
+        res.end(JSON.stringify({ error: "expected multipart/form-data with boundary" }));
+        return;
+      }
+
+      let raw: Buffer;
+      try { raw = await readBodyBuffer(req, MAX_IMAGE_BODY); } catch (err: unknown) {
+        if ((err as Error).message === "payload too large") {
+          res.writeHead(413, restHeaders);
+          res.end(JSON.stringify({ error: "payload too large (max 10MB)" }));
+          return;
+        }
+        res.writeHead(400, restHeaders);
+        res.end(JSON.stringify({ error: "read error" }));
+        return;
+      }
+
+      let fields;
+      try { fields = parseMultipart(raw, boundary); } catch (err: unknown) {
+        res.writeHead(400, restHeaders);
+        res.end(JSON.stringify({ error: `invalid multipart: ${(err as Error).message}` }));
+        return;
+      }
+
+      const fileField = fields.find((f) => f.name === "file");
+      if (!fileField || !fileField.contentType) {
+        res.writeHead(400, restHeaders);
+        res.end(JSON.stringify({ error: "missing 'file' field" }));
+        return;
+      }
+      const pathField = fields.find((f) => f.name === "path");
+      const tagsField = fields.find((f) => f.name === "tags");
+      const pathValue = pathField?.data.toString("utf-8").trim();
+      const tagsValue = tagsField?.data.toString("utf-8").trim();
+
+      structuredLog("info", "rest.image_upload", rid, {
+        key_id: restKey.id,
+        key_name: restKey.name,
+        content_type: fileField.contentType,
+        size: fileField.data.length,
+      });
+
+      try {
+        const result = await handleImageUpload(
+          {
+            file: fileField.data,
+            contentType: fileField.contentType,
+            filename: fileField.filename,
+            path: pathValue || undefined,
+            tags: tagsValue ? tagsValue.split(",").map((t) => t.trim()).filter(Boolean) : undefined,
+          },
+          { trail: restTrail, keyName: restKey.name },
+        );
+        res.writeHead(201, restHeaders);
+        res.end(JSON.stringify(result));
+      } catch (err: any) {
+        if (err.code === "TRAIL_DENIED") {
+          res.writeHead(403, restHeaders);
+          res.end(JSON.stringify({ error: err.message }));
+        } else if (err.code === "VALIDATION") {
+          res.writeHead(400, restHeaders);
+          res.end(JSON.stringify({ error: err.message, errors: err.errors }));
+        } else if (err.code === "PAYLOAD_TOO_LARGE") {
+          res.writeHead(413, restHeaders);
+          res.end(JSON.stringify({ error: err.message }));
+        } else {
+          console.error("[rest] image_upload error:", err);
           res.writeHead(500, restHeaders);
           res.end(JSON.stringify({ error: "internal error" }));
         }
