@@ -193,17 +193,40 @@ async function mcpCall(config: Config, tool: string, args: Record<string, unknow
 
 // ── Argument parsing ─────────────────────────────────────────────
 
+// Flags that never take a value — used so `grove --json search foo` doesn't
+// consume `search` as the value of `--json`.
+const BOOLEAN_FLAGS = new Set([
+  "json",
+  "help",
+  "paths",
+  "aliases",
+  "yes",
+  "dry-run",
+  "v",
+  "h",
+]);
+
 export function parseArgs(argv: string[]): { command: string; positional: string; flags: Record<string, string | boolean> } {
-  const command = argv[0] ?? "help";
+  let command = "help";
+  let commandSet = false;
   let positional = "";
   const flags: Record<string, string | boolean> = {};
 
-  for (let i = 1; i < argv.length; i++) {
+  const looksLikeFlag = (s: string | undefined): boolean =>
+    !!s && (/^--[a-zA-Z]/.test(s) || /^-[a-zA-Z]$/.test(s));
+
+  for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg.startsWith("--")) {
-      const key = arg.slice(2);
+      const body = arg.slice(2);
+      const eq = body.indexOf("=");
+      if (eq >= 0) {
+        flags[body.slice(0, eq)] = body.slice(eq + 1);
+        continue;
+      }
+      const key = body;
       const next = argv[i + 1];
-      if (next && !next.startsWith("-")) {
+      if (!BOOLEAN_FLAGS.has(key) && next !== undefined && !looksLikeFlag(next)) {
         flags[key] = next;
         i++;
       } else {
@@ -212,12 +235,15 @@ export function parseArgs(argv: string[]): { command: string; positional: string
     } else if (arg.startsWith("-") && arg.length === 2) {
       const key = arg.slice(1);
       const next = argv[i + 1];
-      if (next && !next.startsWith("-")) {
+      if (!BOOLEAN_FLAGS.has(key) && next !== undefined && !looksLikeFlag(next)) {
         flags[key] = next;
         i++;
       } else {
         flags[key] = true;
       }
+    } else if (!commandSet) {
+      command = arg;
+      commandSet = true;
     } else if (!positional) {
       positional = arg;
     }
@@ -295,16 +321,52 @@ function formatHistory(data: { entries: any[] }): string {
 function formatStatus(data: Record<string, unknown>): string {
   const lines: string[] = [];
   for (const [k, v] of Object.entries(data)) {
-    if (typeof v === "object" && v !== null) {
+    if (k === "_fmt") continue;
+    if (v !== null && typeof v === "object" && !Array.isArray(v)) {
       lines.push(`${k}:`);
       for (const [k2, v2] of Object.entries(v as Record<string, unknown>)) {
-        lines.push(`  ${k2}: ${v2}`);
+        lines.push(...renderField(k2, v2, "  "));
       }
     } else {
-      lines.push(`${k}: ${v}`);
+      lines.push(...renderField(k, v, ""));
     }
   }
   return lines.join("\n");
+}
+
+function renderField(key: string, value: unknown, indent: string): string[] {
+  if (value === null || value === undefined) return [`${indent}${key}: ${value ?? ""}`];
+  if (Array.isArray(value)) {
+    if (value.length === 0) return [`${indent}${key}: (none)`];
+    const inner = indent + "  ";
+    const items = value.map((item) => {
+      if (item === null || typeof item !== "object") return `${inner}- ${item}`;
+      return `${inner}- ${summarizeObject(item as Record<string, unknown>)}`;
+    });
+    return [`${indent}${key}:`, ...items];
+  }
+  if (typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>);
+    if (entries.length === 0) return [`${indent}${key}: (empty)`];
+    const inner = indent + "  ";
+    return [`${indent}${key}:`, ...entries.map(([k2, v2]) => `${inner}${k2}: ${v2}`)];
+  }
+  return [`${indent}${key}: ${value}`];
+}
+
+function summarizeObject(obj: Record<string, unknown>): string {
+  const entries = Object.entries(obj);
+  if (entries.length === 2) {
+    const [[, a], [, b]] = entries;
+    return `${a} (${b})`;
+  }
+  if ("name" in obj || "tag" in obj || "path" in obj) {
+    const label = obj.name ?? obj.tag ?? obj.path;
+    const rest = entries.filter(([k]) => k !== "name" && k !== "tag" && k !== "path");
+    if (rest.length === 0) return String(label);
+    return `${label} — ${rest.map(([k, v]) => `${k}: ${v}`).join(", ")}`;
+  }
+  return entries.map(([k, v]) => `${k}: ${v}`).join(", ");
 }
 
 function formatDiagnostics(data: Record<string, unknown>): string {
@@ -664,8 +726,8 @@ async function cmdIngest(config: Config, dir: string, flags: Record<string, stri
   } catch {
     throw new CliError("bad_request", `Cannot read directory: ${dir}`, 1);
   }
-  const mdFiles = dirEntries.filter((e) => e.isFile() && e.name.endsWith(".md"));
-  if (mdFiles.length === 0) throw new CliError("bad_request", `No .md files found in ${dir}`, 1);
+  const mdFiles = dirEntries.filter((e) => e.isFile() && (e.name.endsWith(".md") || e.name.endsWith(".txt")));
+  if (mdFiles.length === 0) throw new CliError("bad_request", `No .md or .txt files found in ${dir}`, 1);
 
   // Parse each file and determine target path
   interface IngestCandidate {
@@ -683,8 +745,9 @@ async function cmdIngest(config: Config, dir: string, flags: Record<string, stri
     const { frontmatter, content } = parseNote(raw);
     const type = typeof frontmatter.type === "string" ? frontmatter.type : undefined;
     const prefix = type && INGEST_TYPE_PATHS[type] ? INGEST_TYPE_PATHS[type] : "Inbox/";
-    const targetPath = prefix + entry.name;
-    const title = entry.name.replace(/\.md$/, "").toLowerCase();
+    const mdName = entry.name.replace(/\.txt$/, ".md");
+    const targetPath = prefix + mdName;
+    const title = mdName.replace(/\.md$/, "").toLowerCase();
 
     prefixesNeeded.add(prefix.replace(/\/$/, ""));
     candidates.push({ filename: entry.name, targetPath, frontmatter, content, title });
@@ -1340,7 +1403,7 @@ export const HELP: Record<string, CmdHelp> = {
   },
   ingest: {
     usage: "grove ingest <dir> [--dry-run] [--json]",
-    description: "Import .md files into the vault. Deduplicates by title against existing notes. Creates a snapshot before starting.",
+    description: "Import .md or .txt files into the vault (.txt is renamed to .md). Deduplicates by title against existing notes. Creates a snapshot before starting.",
     flags: ["--dry-run  Show what would be imported", "--json     JSON output"],
     json_schema: "{ok, action, imported, failed, skipped, enqueued, total, results: [{path, status}]}",
     exit_codes: EXIT_CODES,
@@ -1429,7 +1492,7 @@ Commands:
   keys                    Manage API keys
   trails                  Manage trails (scoped access)
   sync <dir>              Sync archived Sources
-  ingest <dir>            Import .md files into vault
+  ingest <dir>            Import .md or .txt files into vault
   lint <dir>              Normalize frontmatter
   tag-backfill            Backfill inferred tags on untagged notes
   snapshot                Create/list vault snapshots

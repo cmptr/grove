@@ -70,6 +70,20 @@ describe("parseArgs", () => {
     expect(result.flags.json).toBe(true);
   });
 
+  it("accepts a leading boolean flag before the command", () => {
+    const result = parseArgs(["--json", "search", "knowledge graph"]);
+    expect(result.command).toBe("search");
+    expect(result.positional).toBe("knowledge graph");
+    expect(result.flags.json).toBe(true);
+  });
+
+  it("accepts a leading value flag before the command", () => {
+    const result = parseArgs(["-n", "5", "search", "taste"]);
+    expect(result.command).toBe("search");
+    expect(result.positional).toBe("taste");
+    expect(result.flags.n).toBe("5");
+  });
+
   it("auto-enables json when stdout is not a TTY", () => {
     Object.defineProperty(process.stdout, "isTTY", { value: undefined, configurable: true });
     const result = parseArgs(["search", "test"]);
