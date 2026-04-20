@@ -32,6 +32,7 @@ interface HybridResult {
   rrf_score: number;
   snippet: string;
   sources: string[];  // which backends contributed: ["bm25", "vector"]
+  thumbnail_url?: string; // for image notes (populated post-search by enrichImageMetadata)
 }
 
 /**
@@ -485,7 +486,8 @@ export function formatResults(results: HybridResult[], resolveRealPath?: (vaultP
       (r) => {
         const displayPath = resolveRealPath ? resolveRealPath(r.vault_path, r.title) : r.vault_path;
         const url = "https://grove.md/" + displayPath.replace(/\.md$/, "").split("/").map(encodeURIComponent).join("/");
-        return `**${r.title}** (${url})\n${r.snippet ?? ""}`;
+        const thumb = r.thumbnail_url ? `\n![thumbnail](${r.thumbnail_url})` : "";
+        return `**${r.title}** (${url})${thumb}\n${r.snippet ?? ""}`;
       }
     )
     .join("\n\n---\n\n");

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { stripWikilinks } from "../src/hybrid-search.js";
+import { stripWikilinks, formatResults as realFormatResults } from "../src/hybrid-search.js";
 
 // ── RRF Fusion logic ────────────────────────────────────────────────
 // Re-implement the pure rrfFuse function for testing since it's not exported.
@@ -206,5 +206,38 @@ describe("formatResults", () => {
     const output = formatResults(results);
     expect(output).toContain("---");
     expect(output.split("---")).toHaveLength(2);
+  });
+});
+
+// ── Image metadata enrichment (P14-3) ───────────────────────────────
+
+describe("formatResults (exported) — image metadata", () => {
+  it("includes thumbnail_url as markdown image when present", () => {
+    const output = realFormatResults([
+      {
+        vault_path: "resources/images/arch-diagram.md",
+        title: "Architecture Diagram",
+        rrf_score: 0.9,
+        snippet: "System architecture diagram",
+        sources: ["vector"],
+        thumbnail_url: "https://assets.grove.md/v1/abc_thumb.webp",
+      },
+    ]);
+    expect(output).toContain("![thumbnail](https://assets.grove.md/v1/abc_thumb.webp)");
+    expect(output).toContain("**Architecture Diagram**");
+    expect(output).toContain("System architecture diagram");
+  });
+
+  it("omits thumbnail markdown when thumbnail_url is absent", () => {
+    const output = realFormatResults([
+      {
+        vault_path: "resources/concepts/agent.md",
+        title: "Agent",
+        rrf_score: 0.9,
+        snippet: "text",
+        sources: ["bm25"],
+      },
+    ]);
+    expect(output).not.toContain("![thumbnail]");
   });
 });

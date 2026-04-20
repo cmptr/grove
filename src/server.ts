@@ -171,6 +171,22 @@ Example: searches=[{type:'lex', query:'salary'}, {type:'vec', query:'how much do
         logTrailAccess("query", activeTrail.id, activeTrail.name, "query", totalFound, filtered.length);
       }
 
+      // Enrich image notes with thumbnail_url from frontmatter (P14-3)
+      for (const r of filtered) {
+        const vp = r.vault_path.toLowerCase();
+        const note = allNotes.find((n: { path: string; name: string }) => n.path.toLowerCase() === vp || n.name === r.title);
+        if (!note) continue;
+        try {
+          const raw = readFileSync(join(VAULT_PATH, note.path), "utf-8");
+          const { frontmatter } = parseNote(raw);
+          if (frontmatter.type === "image" && typeof frontmatter.thumbnail_url === "string") {
+            r.thumbnail_url = frontmatter.thumbnail_url;
+          }
+        } catch {
+          // note unreadable — skip enrichment
+        }
+      }
+
       const formatted = formatResults(filtered, resolveRealPath);
       const filteredCount = activeTrail ? `\n\n[filtered_count: ${filtered.length}/${totalFound}]` : "";
       return { content: [{ type: "text" as const, text: (formatted || "No results found.") + filteredCount }] };
