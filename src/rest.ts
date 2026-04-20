@@ -434,6 +434,178 @@ export function handleListNotes(prefix: string, trail?: TrailConfig | null): Lis
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
+export interface TrailPreviewScope {
+  allow_tags?: string[];
+  deny_tags?: string[];
+  allow_types?: string[];
+  deny_types?: string[];
+  allow_paths?: string[];
+  deny_paths?: string[];
+}
+
+export interface TrailPreviewSample {
+  path: string;
+  name: string;
+  type: string | null;
+  tags: string[];
+}
+
+export interface TrailPreviewResult {
+  total_notes: number;
+  match_count: number;
+  samples: TrailPreviewSample[];
+  all_tags: string[];
+  all_types: string[];
+}
+
+/**
+ * Preview how many notes match a proposed trail scope, plus a sample of matching notes
+ * and the full lists of tags/types in the vault (for the editor's autocomplete).
+ *
+ * Builds an ephemeral TrailConfig from the scope and runs filterByTrail against every note.
+ */
+export function handleTrailPreview(
+  scope: TrailPreviewScope,
+  sampleLimit: number = 10,
+): TrailPreviewResult {
+  const ephemeral: TrailConfig = {
+    id: "preview",
+    name: "preview",
+    description: "",
+    key_id: "",
+    enabled: true,
+    created_at: new Date().toISOString(),
+    allow_tags: scope.allow_tags ?? [],
+    deny_tags: scope.deny_tags ?? [],
+    allow_types: scope.allow_types ?? [],
+    deny_types: scope.deny_types ?? [],
+    allow_paths: scope.allow_paths ?? [],
+    deny_paths: scope.deny_paths ?? [],
+    rate_limit_reads: 60,
+    rate_limit_writes: 0,
+  };
+
+  const allNotes = listNotes(VAULT_PATH, "*");
+  const tagSet = new Set<string>();
+  const typeSet = new Set<string>();
+  for (const n of allNotes) {
+    if (n.tags) for (const t of n.tags) tagSet.add(t);
+    if (n.type) typeSet.add(n.type);
+  }
+
+  const matches = allNotes.filter((n) =>
+    filterByTrail(ephemeral, {
+      path: n.path,
+      type: n.type ?? undefined,
+      tags: n.tags ?? [],
+      private: n.private,
+    }),
+  );
+
+  const samples: TrailPreviewSample[] = matches
+    .slice()
+    .sort((a, b) => a.path.localeCompare(b.path))
+    .slice(0, sampleLimit)
+    .map((n) => ({
+      path: n.path,
+      name: n.name,
+      type: n.type,
+      tags: n.tags ?? [],
+    }));
+
+  return {
+    total_notes: allNotes.length,
+    match_count: matches.length,
+    samples,
+    all_tags: [...tagSet].sort(),
+    all_types: [...typeSet].sort(),
+  };
+}
+
+/**
+ * Test whether a specific note is visible under a proposed scope, with an explanation
+ * of which rule matched. Returns null if the note doesn't exist.
+ */
+export interface TrailPreviewTestResult {
+  path: string;
+  visible: boolean;
+  reason: string;
+  note: {
+    type: string | null;
+    tags: string[];
+    private: boolean;
+  };
+}
+
+export function handleTrailPreviewTest(
+  notePath: string,
+  scope: TrailPreviewScope,
+): TrailPreviewTestResult | null {
+  const allNotes = listNotes(VAULT_PATH, "*");
+  const note = allNotes.find((n) => n.path === notePath);
+  if (!note) return null;
+
+  const meta: NoteMetadata = {
+    path: note.path,
+    type: note.type ?? undefined,
+    tags: note.tags ?? [],
+    private: note.private,
+  };
+
+  const allowTags = scope.allow_tags ?? [];
+  const denyTags = scope.deny_tags ?? [];
+  const allowTypes = scope.allow_types ?? [];
+  const denyTypes = scope.deny_types ?? [];
+  const allowPaths = scope.allow_paths ?? [];
+  const denyPaths = scope.deny_paths ?? [];
+
+  let reason = "matches scope";
+  let visible = true;
+
+  if (meta.private === true) {
+    visible = false;
+    reason = "note is private (frontmatter private: true)";
+  } else if (allowPaths.length > 0 && !allowPaths.some((p) => meta.path.startsWith(p))) {
+    visible = false;
+    reason = `path not in allow_paths (${allowPaths.join(", ")})`;
+  } else if (denyPaths.length > 0 && denyPaths.some((p) => meta.path.startsWith(p))) {
+    visible = false;
+    reason = `path matches deny_paths (${denyPaths.filter((p) => meta.path.startsWith(p)).join(", ")})`;
+  } else if (allowTypes.length > 0 && (!meta.type || !allowTypes.includes(meta.type))) {
+    visible = false;
+    reason = `type ${meta.type ?? "(none)"} not in allow_types (${allowTypes.join(", ")})`;
+  } else if (denyTypes.length > 0 && meta.type && denyTypes.includes(meta.type)) {
+    visible = false;
+    reason = `type ${meta.type} in deny_types`;
+  } else if (allowTags.length > 0) {
+    const noteTags = meta.tags ?? [];
+    if (!allowTags.some((t) => noteTags.includes(t))) {
+      visible = false;
+      reason = `no tag matches allow_tags (${allowTags.join(", ")})`;
+    }
+  }
+
+  if (visible && denyTags.length > 0) {
+    const noteTags = meta.tags ?? [];
+    const denied = denyTags.filter((t) => noteTags.includes(t));
+    if (denied.length > 0) {
+      visible = false;
+      reason = `tag in deny_tags (${denied.join(", ")})`;
+    }
+  }
+
+  return {
+    path: note.path,
+    visible,
+    reason,
+    note: {
+      type: note.type ?? null,
+      tags: note.tags ?? [],
+      private: note.private === true,
+    },
+  };
+}
+
 /**
  * Search notes via hybrid search. Returns structured results.
  * If a trail is provided, filters results to trail-visible notes.

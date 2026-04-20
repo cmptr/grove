@@ -48,7 +48,9 @@ import { resolveTrail, loadTrails, createTrail, updateTrail, disableTrail, delet
 import {
   handleGetNote, handleSearch, handleListNotes, handleStats, handleWriteNote,
   handleStatusHealth, handleStatusHistory, handleStatusDiagnostics,
-  handleStatusGraph, handleStatusDigest, handleTrailInfo, VALID_STATUS_MODES,
+  handleStatusGraph, handleStatusDigest, handleTrailInfo,
+  handleTrailPreview, handleTrailPreviewTest,
+  VALID_STATUS_MODES,
   type StatusMode,
 } from "./rest.js";
 import { startStatsTimer } from "./vault-stats.js";
@@ -1552,6 +1554,51 @@ const server = createServer(async (req, res) => {
 
       res.writeHead(400, restHeaders);
       res.end(JSON.stringify({ error: "invalid action" }));
+      return;
+    }
+
+    // GET /v1/admin/trails/:id/preview — live preview of notes matching a proposed scope (admin only)
+    // :id is for context only; the scope comes from query params so new trails can be previewed too.
+    const trailPreviewMatch = url.pathname.match(/^\/v1\/admin\/trails\/([^/]+)\/preview$/);
+    if (trailPreviewMatch && req.method === "GET") {
+      if (restTrail || getUserRole(restKey.user_id) !== "owner") {
+        res.writeHead(403, restHeaders);
+        res.end(JSON.stringify({ error: "admin access required" }));
+        return;
+      }
+
+      const parseCsv = (v: string | null): string[] => {
+        if (!v) return [];
+        return v.split(",").map((s) => s.trim()).filter(Boolean);
+      };
+
+      const scope = {
+        allow_tags: parseCsv(url.searchParams.get("allow_tags")),
+        deny_tags: parseCsv(url.searchParams.get("deny_tags")),
+        allow_types: parseCsv(url.searchParams.get("allow_types")),
+        deny_types: parseCsv(url.searchParams.get("deny_types")),
+        allow_paths: parseCsv(url.searchParams.get("allow_paths")),
+        deny_paths: parseCsv(url.searchParams.get("deny_paths")),
+      };
+
+      const testPath = url.searchParams.get("test_path");
+      if (testPath) {
+        const result = handleTrailPreviewTest(testPath, scope);
+        if (!result) {
+          res.writeHead(404, restHeaders);
+          res.end(JSON.stringify({ error: "note not found" }));
+          return;
+        }
+        res.writeHead(200, restHeaders);
+        res.end(JSON.stringify(result));
+        return;
+      }
+
+      const sampleLimitRaw = url.searchParams.get("sample_limit");
+      const sampleLimit = sampleLimitRaw ? Math.max(0, Math.min(100, parseInt(sampleLimitRaw, 10) || 10)) : 10;
+      const result = handleTrailPreview(scope, sampleLimit);
+      res.writeHead(200, restHeaders);
+      res.end(JSON.stringify(result));
       return;
     }
 
