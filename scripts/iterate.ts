@@ -189,32 +189,23 @@ function runTier3(): TierResult {
   if (!existsSync(smokeDir)) {
     return { tier: 3, name: "smoke", passed: true, failures: [], skipped: true, skipReason: "no test/smoke/ yet" };
   }
-  const files = readdirSync(smokeDir).filter((f) => f.endsWith(".bats"));
+  // Plain bash scripts ending with `.smoke.sh` — no bats dependency.
+  const files = readdirSync(smokeDir)
+    .filter((f) => f.endsWith(".smoke.sh"))
+    .sort(); // deterministic order
   if (files.length === 0) {
     return { tier: 3, name: "smoke", passed: true, failures: [], skipped: true, skipReason: "no smoke tests yet" };
   }
 
-  // Check bats available.
-  const hasBats = spawnSync("bats", ["--version"], { encoding: "utf8" }).status === 0;
-  if (!hasBats) {
-    return {
-      tier: 3,
-      name: "smoke",
-      passed: true,
-      failures: [],
-      skipped: true,
-      skipReason: "bats-core not installed (brew install bats-core)",
-    };
-  }
-
   const failures: FailureEntry[] = [];
   for (const f of files) {
-    const res = spawnSync("bats", [join(smokeDir, f)], { cwd: ROOT, encoding: "utf8", timeout: 120_000 });
+    const full = join(smokeDir, f);
+    const res = spawnSync("bash", [full], { cwd: ROOT, encoding: "utf8", timeout: 120_000 });
     if (res.status !== 0) {
       failures.push({
         suite: f,
-        name: f,
-        message: (res.stdout + "\n" + res.stderr).slice(-1500),
+        name: f.replace(".smoke.sh", ""),
+        message: (res.stdout + "\n" + res.stderr).slice(-2000),
       });
     }
   }
