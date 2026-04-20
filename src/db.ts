@@ -177,6 +177,14 @@ CREATE TABLE IF NOT EXISTS discovery_results (
 );
 
 CREATE INDEX IF NOT EXISTS idx_discovery_results_source ON discovery_results(source_path);
+
+CREATE TABLE IF NOT EXISTS vault_keys (
+  vault_id TEXT PRIMARY KEY REFERENCES vaults(id),
+  encrypted_key BLOB NOT NULL,
+  key_salt BLOB NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_unlocked_at TEXT
+);
 `;
 
 export function createSchema(): void {

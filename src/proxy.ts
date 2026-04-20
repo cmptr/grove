@@ -54,6 +54,14 @@ import {
 import { startStatsTimer } from "./vault-stats.js";
 import { inviteUser } from "./invite.js";
 import { createShareLink, resolveShareLink } from "./share.js";
+import {
+  encryptVault,
+  unlockVault,
+  lockVault,
+  changePassphrase,
+  getVaultStatus,
+  isVaultLocked,
+} from "./crypto.js";
 
 installCrashHandlers("grove-proxy");
 
@@ -119,6 +127,22 @@ function isVaultOwner(userId: string): boolean {
   const db = getDb();
   const vault = db.prepare("SELECT owner_id FROM vaults WHERE slug = ?").get("life") as { owner_id: string } | undefined;
   return vault?.owner_id === userId;
+}
+
+/** Pick a vault for admin vault operations — either an explicit override or the admin's sole vault. */
+function resolveAdminVaultId(userId: string, override?: string): string | null {
+  const db = getDb();
+  if (override) {
+    const v = db.prepare("SELECT id FROM vaults WHERE id = ? AND owner_id = ?").get(override, userId) as { id: string } | undefined;
+    return v?.id ?? null;
+  }
+  const v = db.prepare("SELECT id FROM vaults WHERE owner_id = ? ORDER BY created_at ASC LIMIT 1").get(userId) as { id: string } | undefined;
+  return v?.id ?? null;
+}
+
+function sendLocked(res: ServerResponse) {
+  res.writeHead(503, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ error: "vault_locked", message: "Vault is encrypted and locked. Unlock with your passphrase." }));
 }
 
 function log(keyName: string | null, method: string, url: string, status: number, extra?: Record<string, unknown>) {
@@ -1138,6 +1162,135 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // ── Vault encryption lifecycle (admin only) ──
+    // POST /v1/admin/vault/encrypt — enable encryption (generate + store wrapped key)
+    if (url.pathname === "/v1/admin/vault/encrypt" && req.method === "POST") {
+      const admin = adminAuth(req);
+      if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
+
+      let body: string;
+      try { body = await readBody(req); } catch { sendJson(res, 400, { error: "read error" }); return; }
+      let parsed: any;
+      try { parsed = JSON.parse(body); } catch { sendJson(res, 400, { error: "invalid json" }); return; }
+
+      const passphrase = parsed.passphrase;
+      if (typeof passphrase !== "string" || passphrase.length < 8) {
+        sendJson(res, 400, { error: "passphrase must be a string of at least 8 characters" });
+        return;
+      }
+      const vaultId = resolveAdminVaultId(admin.userId, parsed.vault_id);
+      if (!vaultId) { sendJson(res, 404, { error: "vault not found" }); return; }
+
+      try {
+        encryptVault(vaultId, passphrase);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg === "already_encrypted") {
+          sendJson(res, 409, { error: "already_encrypted" });
+          return;
+        }
+        sendJson(res, 500, { error: msg });
+        return;
+      }
+      sendJson(res, 200, { ok: true, vault_id: vaultId, status: getVaultStatus(vaultId) });
+      return;
+    }
+
+    // POST /v1/admin/vault/unlock — provide passphrase, decrypt key into memory
+    if (url.pathname === "/v1/admin/vault/unlock" && req.method === "POST") {
+      const admin = adminAuth(req);
+      if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
+
+      let body: string;
+      try { body = await readBody(req); } catch { sendJson(res, 400, { error: "read error" }); return; }
+      let parsed: any;
+      try { parsed = JSON.parse(body); } catch { sendJson(res, 400, { error: "invalid json" }); return; }
+
+      const passphrase = parsed.passphrase;
+      if (typeof passphrase !== "string") { sendJson(res, 400, { error: "passphrase required" }); return; }
+      const vaultId = resolveAdminVaultId(admin.userId, parsed.vault_id);
+      if (!vaultId) { sendJson(res, 404, { error: "vault not found" }); return; }
+
+      try {
+        const ok = unlockVault(vaultId, passphrase);
+        if (!ok) { sendJson(res, 401, { error: "invalid_passphrase" }); return; }
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg === "not_encrypted") { sendJson(res, 409, { error: "not_encrypted" }); return; }
+        sendJson(res, 500, { error: msg });
+        return;
+      }
+      sendJson(res, 200, { ok: true, vault_id: vaultId, status: getVaultStatus(vaultId) });
+      return;
+    }
+
+    // POST /v1/admin/vault/lock — purge the in-memory vault key
+    if (url.pathname === "/v1/admin/vault/lock" && req.method === "POST") {
+      const admin = adminAuth(req);
+      if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
+
+      let parsed: any = {};
+      if (req.method === "POST") {
+        try {
+          const body = await readBody(req);
+          if (body) parsed = JSON.parse(body);
+        } catch {
+          // Empty body is fine for lock
+        }
+      }
+      const vaultId = resolveAdminVaultId(admin.userId, parsed.vault_id);
+      if (!vaultId) { sendJson(res, 404, { error: "vault not found" }); return; }
+
+      const wasCached = lockVault(vaultId);
+      sendJson(res, 200, { ok: true, vault_id: vaultId, was_unlocked: wasCached, status: getVaultStatus(vaultId) });
+      return;
+    }
+
+    // GET /v1/admin/vault/status — encryption + unlock state
+    if (url.pathname === "/v1/admin/vault/status" && req.method === "GET") {
+      const admin = adminAuth(req);
+      if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
+
+      const overrideVault = url.searchParams.get("vault_id") ?? undefined;
+      const vaultId = resolveAdminVaultId(admin.userId, overrideVault);
+      if (!vaultId) { sendJson(res, 404, { error: "vault not found" }); return; }
+
+      sendJson(res, 200, { vault_id: vaultId, ...getVaultStatus(vaultId) });
+      return;
+    }
+
+    // POST /v1/admin/vault/change-passphrase — rewrap vault key under new passphrase
+    if (url.pathname === "/v1/admin/vault/change-passphrase" && req.method === "POST") {
+      const admin = adminAuth(req);
+      if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
+
+      let body: string;
+      try { body = await readBody(req); } catch { sendJson(res, 400, { error: "read error" }); return; }
+      let parsed: any;
+      try { parsed = JSON.parse(body); } catch { sendJson(res, 400, { error: "invalid json" }); return; }
+
+      const oldPass = parsed.old_passphrase;
+      const newPass = parsed.new_passphrase;
+      if (typeof oldPass !== "string" || typeof newPass !== "string" || newPass.length < 8) {
+        sendJson(res, 400, { error: "old_passphrase and new_passphrase (>= 8 chars) required" });
+        return;
+      }
+      const vaultId = resolveAdminVaultId(admin.userId, parsed.vault_id);
+      if (!vaultId) { sendJson(res, 404, { error: "vault not found" }); return; }
+
+      try {
+        const ok = changePassphrase(vaultId, oldPass, newPass);
+        if (!ok) { sendJson(res, 401, { error: "invalid_passphrase" }); return; }
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg === "not_encrypted") { sendJson(res, 409, { error: "not_encrypted" }); return; }
+        sendJson(res, 500, { error: msg });
+        return;
+      }
+      sendJson(res, 200, { ok: true, vault_id: vaultId, status: getVaultStatus(vaultId) });
+      return;
+    }
+
     // POST /v1/admin/share — create a share-a-note link (admin only)
     if (url.pathname === "/v1/admin/share" && req.method === "POST") {
       const admin = adminAuth(req);
@@ -1260,6 +1413,12 @@ const server = createServer(async (req, res) => {
         vault_id: restKey.vault_id,
         trail: restTrail ? { id: restTrail.id, name: restTrail.name } : null,
       }));
+      return;
+    }
+
+    // Vault lock gate — data endpoints return 503 when vault is encrypted + locked
+    if (isVaultLocked(restKey.vault_id)) {
+      sendLocked(res);
       return;
     }
 
@@ -1668,6 +1827,12 @@ const server = createServer(async (req, res) => {
       } else {
         auditRead(rid, key.id, key.name, toolName, toolArgs);
       }
+    }
+
+    // Vault lock gate — reject data tool calls when vault is encrypted + locked
+    if (mcpMethod === "tools/call" && isVaultLocked(key.vault_id)) {
+      sendLocked(res);
+      return;
     }
 
     // Scope enforcement — reject write tools if key lacks 'write' scope
