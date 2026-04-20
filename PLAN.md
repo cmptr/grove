@@ -3056,7 +3056,7 @@ Replace the raw text inputs for trail allow/deny configuration with a visual edi
 
 ---
 
-#### P15-3: Non-owner dashboard (grove-www)
+#### P15-3: Non-owner dashboard (grove-www) ✅ COMPLETE 2026-04-20
 
 When a member or viewer signs in, they see a simplified dashboard scoped to their access.
 
