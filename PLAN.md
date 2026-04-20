@@ -915,7 +915,7 @@ All dashboard pages live under `src/app/dashboard/`. Each is a server component 
   - MCP config block is copy-pasteable
   - Non-existent trail ID → 404 page
 
-- [ ] **P4-9: Trail usage view**
+- [x] **P4-9: Trail usage view**
 
   Deferred until P4-5 trail management is working. Will be a detail view within the trail management page showing per-trail request metrics. Requires per-trail metric tracking (not yet implemented — metrics are per-tool, not per-trail).
 
@@ -923,10 +923,10 @@ All dashboard pages live under `src/app/dashboard/`. Each is a server component 
 
 These are the views that make the portal more than an admin panel. They surface what's in the vault visually — things that are hard to do in a CLI or chat interface.
 
-- [ ] **P4-10: Graph explorer**
+- [x] **P4-10: Graph explorer**
   Interactive visualization of the vault's wikilink graph. Powered by `GET /v1/stats?sections=graph` data. Click a node to see the note's connections, type, lifecycle stage. Filter by type, tag, or cluster. Likely needs a graph visualization library (d3-force or similar). This is the "see the shape of your knowledge" view.
 
-- [ ] **P4-11: Lifecycle dashboard**
+- [x] **P4-11: Lifecycle dashboard**
   Visual representation of `GET /v1/stats?sections=lifecycle` — seeds, sprouts, growing, mature, dormant, withering. Click a lifecycle stage to see the notes in it. The daily `/garden` practice, but visual.
 
 - ~~**P4-12: Search playground**~~ — deprioritized, not needed for v1.
