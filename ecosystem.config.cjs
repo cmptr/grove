@@ -29,9 +29,9 @@ module.exports = {
   apps: [
     {
       name: "grove-server",
-      script: "src/server.ts",
-      interpreter: "npx",
-      interpreter_args: "tsx",
+      script: "/bin/bash",
+      args: "-c 'npx tsx src/server.ts'",
+      cwd: __dirname,
       kill_timeout: 15000,
       env: {
         ...dotenv,
@@ -41,9 +41,9 @@ module.exports = {
     },
     {
       name: "grove-proxy",
-      script: "src/proxy.ts",
-      interpreter: "npx",
-      interpreter_args: "tsx",
+      script: "/bin/bash",
+      args: "-c 'npx tsx src/proxy.ts'",
+      cwd: __dirname,
       kill_timeout: 15000,
       env: {
         ...dotenv,
