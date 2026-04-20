@@ -30,7 +30,7 @@ function noteUrl(vaultPath: string): string {
 
 import { gitLog, startupRecovery, listNotes } from "./vault-ops.js";
 import { parseNote, contentHash, inferTags } from "./notes-validate.js";
-import { handleWriteNote, flushWriteQueue } from "./rest.js";
+import { handleWriteNote, handleDeleteNote, handleMoveNote, flushWriteQueue } from "./rest.js";
 import { analyzeGraph, computeDigest } from "./vault-graph.js";
 import { getStats, startStatsTimer } from "./vault-stats.js";
 import { RateLimiter, IdempotencyCache } from "./rate-limit.js";
@@ -71,6 +71,82 @@ const PORT = Number(process.env.GROVE_SERVER_PORT ?? 8190);
 
 const rateLimiter = new RateLimiter({ reads: 120, writes: 20, windowMs: 60_000 });
 const idempotencyCache = new IdempotencyCache(1000, 3_600_000);
+
+// ── write_note dispatch (tested in server.test.ts) ─────────────────
+// Routes the action parameter to the right rest.ts handler. Exported
+// separately so tests can exercise the routing without spinning up
+// an MCP server + transport.
+
+type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
+
+export interface WriteNoteInput {
+  action?: "write" | "delete" | "hard_delete" | "move";
+  path: string;
+  frontmatter?: string;
+  content?: string;
+  if_hash?: string;
+  move_to?: string;
+}
+
+export interface WriteNoteDeps {
+  handleWriteNote: typeof handleWriteNote;
+  handleDeleteNote: typeof handleDeleteNote;
+  handleMoveNote: typeof handleMoveNote;
+  trail?: TrailConfig | null;
+}
+
+export async function dispatchWriteNote(input: WriteNoteInput, deps: WriteNoteDeps): Promise<ToolResult> {
+  const act = input.action ?? "write";
+  const trail = deps.trail ?? null;
+
+  if (act === "delete" || act === "hard_delete") {
+    try {
+      const result = await deps.handleDeleteNote(input.path, {
+        hard: act === "hard_delete",
+        ifHash: input.if_hash,
+        trail,
+      });
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    } catch (err: any) {
+      return { content: [{ type: "text", text: err.message }], isError: true };
+    }
+  }
+
+  if (act === "move") {
+    if (!input.move_to) {
+      return { content: [{ type: "text", text: "move_to is required when action is 'move'" }], isError: true };
+    }
+    try {
+      const result = await deps.handleMoveNote(input.path, input.move_to, {
+        ifHash: input.if_hash,
+        trail,
+      });
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    } catch (err: any) {
+      return { content: [{ type: "text", text: err.message }], isError: true };
+    }
+  }
+
+  if (input.frontmatter === undefined || input.content === undefined) {
+    return { content: [{ type: "text", text: "frontmatter and content are required for write" }], isError: true };
+  }
+  let frontmatter: Record<string, unknown>;
+  try {
+    frontmatter = JSON.parse(input.frontmatter);
+  } catch {
+    return { content: [{ type: "text", text: "Invalid frontmatter JSON" }], isError: true };
+  }
+
+  try {
+    const result = await deps.handleWriteNote(input.path, frontmatter, input.content, {
+      ifHash: input.if_hash,
+      trail,
+    });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  } catch (err: any) {
+    return { content: [{ type: "text", text: err.message }], isError: true };
+  }
+}
 
 // ── Server instructions (what Claude.ai sees) ─────────────────────
 
@@ -353,8 +429,14 @@ Examples: "Resources/People/*.md", "Journal/2026/*.md", "path1.md,path2.md"`,
   server.registerTool(
     "write_note",
     {
-      title: "Create or update a note",
-      description: `Create or update a note with validated frontmatter.
+      title: "Create, update, delete, or move a note",
+      description: `Create, update, delete, or move notes in the vault.
+
+ACTIONS:
+  write (default) — create or update a note (requires frontmatter + content)
+  delete          — soft delete: archive the note (sets archived_from/archived_at)
+  hard_delete     — permanently remove the note from disk
+  move            — rename/relocate a note and rewrite wikilinks pointing to it
 
 STRUCTURE — common paths (but any path works):
   Resources/Concepts/Name.md   Resources/People/Name.md
@@ -389,32 +471,25 @@ RESOURCE NOTES should include a dataview backlink query:
 
 SAFE UPDATES — pass if_hash (from a prior get) to prevent overwriting concurrent changes. Omit for new notes.
 
+DELETE — prefer soft delete (action: "delete") so notes are recoverable from the archive folder. Use hard_delete only when the note must be gone permanently.
+
+MOVE — action: "move" with move_to. Updates all exact wikilink matches across the vault in the same commit.
+
 After writing, present the url field from the response to the user.`,
       inputSchema: {
+        action: z.enum(["write", "delete", "hard_delete", "move"]).optional().default("write").describe("What to do: write (default), delete (soft/archive), hard_delete, or move"),
         path: z.string().describe("File path relative to vault root, kebab-case (e.g., 'Resources/Concepts/context-engineering.md')"),
-        frontmatter: z.string().describe("YAML frontmatter as JSON string (e.g., '{\"type\":\"concept\",\"tags\":[\"concept\"]}')"),
-        content: z.string().describe("Note body (markdown)"),
+        frontmatter: z.string().optional().describe("YAML frontmatter as JSON string (required for write; ignored otherwise)"),
+        content: z.string().optional().describe("Note body (markdown) (required for write; ignored otherwise)"),
         if_hash: z.string().optional().describe("Content hash from prior read — rejects if file changed since"),
+        move_to: z.string().optional().describe("Destination path (required when action is 'move')"),
       },
     },
-    async ({ path: notePath, frontmatter: fmInput, content, if_hash }) => {
-      // Parse frontmatter from JSON string
-      let frontmatter: Record<string, unknown>;
-      try {
-        frontmatter = typeof fmInput === "string" ? JSON.parse(fmInput) : fmInput;
-      } catch {
-        return { content: [{ type: "text" as const, text: "Invalid frontmatter JSON" }], isError: true };
-      }
-
-      try {
-        const result = await handleWriteNote(notePath, frontmatter, content, {
-          ifHash: if_hash,
-          trail: activeTrail,
-        });
-        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
-      } catch (err: any) {
-        return { content: [{ type: "text" as const, text: err.message }], isError: true };
-      }
+    async ({ action, path: notePath, frontmatter: fmInput, content, if_hash, move_to }) => {
+      return await dispatchWriteNote(
+        { action, path: notePath, frontmatter: fmInput, content, if_hash, move_to },
+        { handleWriteNote, handleDeleteNote, handleMoveNote, trail: activeTrail },
+      );
     },
   );
 
