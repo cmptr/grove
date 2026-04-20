@@ -39,6 +39,16 @@ import {
 import { resolveIdempotencyKey } from "./cli/lib/idempotency.js";
 import { confirmTyped } from "./cli/lib/confirm.js";
 import { warnDeprecated } from "./cli/lib/deprecation.js";
+import {
+  validatePatchArgs,
+  obsidianUrl,
+  openInObsidian,
+  doLogout,
+  runDoctor,
+  completionBash,
+  completionZsh,
+  completionFish,
+} from "./cli/phase3.js";
 
 // ── Vault path (local git operations) ────────────────────────────
 const VAULT_PATH = process.env.GROVE_VAULT ?? join(homedir(), "life");
@@ -1655,6 +1665,59 @@ async function main() {
       result = cmdRollback(positional); emitResult(result, flags); return;
     }
     if (command === "lint") { result = cmdLint(positional, flags); emitResult(result, flags); return; }
+
+    // Phase 3: grove completion <shell> — emit shell completion script to stdout.
+    if (command === "completion") {
+      const shell = positional || "bash";
+      let body: string;
+      switch (shell) {
+        case "bash": body = completionBash(); break;
+        case "zsh":  body = completionZsh(); break;
+        case "fish": body = completionFish(); break;
+        default:
+          throw new CliError("bad_request", `Unknown shell: ${shell}\nUsage: grove completion {bash|zsh|fish}`, 1);
+      }
+      // Always emit to stdout regardless of --format (the whole point is a
+      // source-able script, not JSON).
+      process.stdout.write(body);
+      return;
+    }
+
+    // Phase 3: grove logout — wipe local config, best-effort revoke.
+    if (command === "logout") {
+      const out = await doLogout();
+      result = { ok: true, ...out, _fmt: () => out.removed_config ? `removed ${out.removed_config}` : "already logged out" } as CmdResult;
+      emitResult(result, flags);
+      return;
+    }
+
+    // Phase 3: grove doctor — self-diagnostics (run BEFORE loadConfig so it
+    // can still run when config is broken).
+    if (command === "doctor") {
+      // Try to load config but do not throw — doctor needs to work pre-init.
+      let cfg: Config | null = null;
+      try { cfg = loadConfig(); } catch {}
+      const report = await runDoctor(cfg);
+      result = {
+        ok: true,
+        overall: report.overall,
+        checks: report.checks,
+        _fmt: () => {
+          const lines: string[] = [];
+          for (const c of report.checks) {
+            const icon = c.status === "ok" ? "✓" : c.status === "warn" ? "!" : "✗";
+            lines.push(`${icon} ${c.name}: ${c.message}`);
+            if (c.suggestion && c.status !== "ok") lines.push(`   suggestion: ${c.suggestion}`);
+          }
+          lines.push(`\noverall: ${report.overall.toUpperCase()}`);
+          return lines.join("\n");
+        },
+      } as CmdResult;
+      emitResult(result, flags);
+      // Exit non-zero if any check failed, per POSIX `pg_isready` / `flyctl doctor` convention.
+      if (report.overall === "fail") process.exit(3);
+      return;
+    }
     if (command === "tag-backfill") {
       warnDeprecated("tag-backfill", "grove backfill tags");
       result = cmdTagBackfill(flags);
@@ -1785,10 +1848,47 @@ async function main() {
       }
     }
 
+    // Phase 3: grove patch — update-only write, if-hash required. Agent-safe.
+    if (command === "patch") {
+      // Read content from stdin if not provided via --content.
+      let content = typeof flags.content === "string" ? flags.content : "";
+      if (!content && !process.stdin.isTTY) {
+        const chunks: Buffer[] = [];
+        process.stdin.on("data", (c) => chunks.push(c));
+        await new Promise<void>((resolve) => process.stdin.on("end", resolve));
+        content = Buffer.concat(chunks).toString();
+      }
+      const ifHashFlag = flags["if-hash"];
+      validatePatchArgs({ path: positional, ifHash: ifHashFlag, content });
+      // Delegate to the existing PUT /v1/notes/:path path with If-Match header.
+      // We reuse cmdWrite's flow but force --if-hash presence (validated above).
+      flags.content = content;
+      flags["if-hash"] = ifHashFlag;
+      result = await cmdWrite(config, positional, flags);
+      emitResult(result, flags);
+      return;
+    }
+
+    // Phase 3: grove open — Obsidian URL scheme handoff (local only).
+    if (command === "open") {
+      if (!positional) throw new CliError("bad_request", "Usage: grove open <note-path>", 1);
+      const vaultName = process.env.GROVE_OBSIDIAN_VAULT_NAME || (config as any).vault_id || "life";
+      const url = obsidianUrl(vaultName, positional);
+      try {
+        await openInObsidian(vaultName, positional);
+      } catch (err) {
+        throw new CliError("server_error", `Could not open ${url}: ${err instanceof Error ? err.message : String(err)}`, 3);
+      }
+      result = { ok: true, url, _fmt: () => `opening ${positional} in Obsidian (${url})` } as CmdResult;
+      emitResult(result, flags);
+      return;
+    }
+
     // Server commands (REST or MCP)
     switch (command) {
       case "search":      result = await cmdSearch(config, positional, flags); break;
       case "read":        result = await cmdRead(config, positional); break;
+      case "get":         result = await cmdRead(config, positional); break; // alias
       case "list":        result = await cmdList(config, positional, flags); break;
       case "write":       result = await cmdWrite(config, positional, flags); break;
       case "sync":
