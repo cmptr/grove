@@ -130,7 +130,14 @@ if (command === "create") {
 }
 
 // -- Programmatic API (used by proxy /keys endpoint) --
-export function createKey(name: string, scopes: string[] = ["read", "write"], vaultId = "life", ttlDays?: number, userId?: string) {
+export function createKey(
+  name: string,
+  scopes: string[] = ["read", "write"],
+  vaultId = "life",
+  ttlDays?: number,
+  userId?: string,
+  sessionId?: string | null,
+) {
   const raw = randomBytes(32).toString("hex");
   const token = PREFIX + raw;
   const db = getDb();
@@ -142,7 +149,7 @@ export function createKey(name: string, scopes: string[] = ["read", "write"], va
 
   const id = generateId();
   db.prepare(
-    "INSERT INTO api_keys (id, user_id, vault_id, name, hashed_token, scopes, created_at, last_used_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    "INSERT INTO api_keys (id, user_id, vault_id, name, hashed_token, scopes, created_at, last_used_at, expires_at, session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
   ).run(
     id,
     resolvedUserId,
@@ -153,6 +160,7 @@ export function createKey(name: string, scopes: string[] = ["read", "write"], va
     new Date().toISOString(),
     null,
     ttlDays ? new Date(Date.now() + ttlDays * 86400_000).toISOString() : null,
+    sessionId ?? null,
   );
 
   return { id, name, token, userId: resolvedUserId };

@@ -37,6 +37,7 @@ import {
   setSessionCookie,
   clearSessionCookie,
   getSessionFromCookie,
+  getSessionIdFromToken,
   cleanupExpiredAuth,
   seedAdminEmail,
 } from "./auth.js";
@@ -899,7 +900,7 @@ const server = createServer(async (req, res) => {
     if (!key) { sendJson(res, 401, { error: "invalid key" }); return; }
     // Find the user who owns this key and create a persistent session
     const keyOwner = getDb().prepare("SELECT id FROM users WHERE id = ?").get(key.user_id) as { id: string } | undefined;
-    const sessionToken = createAuthSession(keyOwner?.id ?? key.user_id);
+    const { token: sessionToken } = createAuthSession(keyOwner?.id ?? key.user_id, req.headers["user-agent"] ?? null);
     setSessionCookie(res, sessionToken);
     sendJson(res, 200, { ok: true, name: key.name });
     return;
@@ -954,7 +955,7 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    const result = verifyMagicLink(token, email);
+    const result = verifyMagicLink(token, email, req.headers["user-agent"] ?? null);
     if (!result) {
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
       res.end("<!DOCTYPE html><html><body><p>This link is invalid or has expired. <a href=\"/\">Request a new one</a></p></body></html>");
@@ -979,7 +980,7 @@ const server = createServer(async (req, res) => {
   if (url.pathname === "/auth/exchange" && req.method === "GET") {
     const code = url.searchParams.get("code") ?? "";
     if (!code) { sendJson(res, 400, { error: "code required" }); return; }
-    const result = exchangeAuthCode(code);
+    const result = exchangeAuthCode(code, req.headers["user-agent"] ?? null);
     if (!result) { sendJson(res, 401, { error: "invalid or expired code" }); return; }
     // Set session cookie so the caller can make authenticated requests (e.g. create keys)
     setSessionCookie(res, result.sessionToken);
@@ -1055,7 +1056,19 @@ const server = createServer(async (req, res) => {
       return;
     }
     if (parsed.action === "create" && parsed.name) {
-      const result = createKey(parsed.name, parsed.scopes ?? ["read", "write"], parsed.vault ?? "life", undefined, admin.userId);
+      // If the caller is session-authenticated, link the new key to that session so
+      // /v1/me can flag it as the current device. Bearer-authenticated key creation
+      // has no session and stores null.
+      const sessionToken = getSessionFromCookie(req);
+      const linkedSessionId = sessionToken ? getSessionIdFromToken(sessionToken) : null;
+      const result = createKey(
+        parsed.name,
+        parsed.scopes ?? ["read", "write"],
+        parsed.vault ?? "life",
+        undefined,
+        admin.userId,
+        linkedSessionId,
+      );
 
       // If trail_id provided, create a trail grant linking this key to the trail
       if (parsed.trail_id) {
@@ -1539,6 +1552,12 @@ const server = createServer(async (req, res) => {
         )
         .all(user.id) as Array<{ id: string; name: string; description: string; enabled: number }>;
 
+      // Flag the session that minted the bearer key as the caller's current device.
+      const currentSessionRow = db
+        .prepare("SELECT session_id FROM api_keys WHERE id = ?")
+        .get(restKey.id) as { session_id: string | null } | undefined;
+      const currentSessionId = currentSessionRow?.session_id ?? null;
+
       res.writeHead(200, restHeaders);
       res.end(JSON.stringify({
         id: user.id,
@@ -1553,7 +1572,10 @@ const server = createServer(async (req, res) => {
           scopes: k.scopes.split(",").filter(Boolean),
         })),
         trails: trailRows.map((t) => ({ id: t.id, name: t.name, description: t.description, enabled: !!t.enabled })),
-        sessions: listUserSessions(user.id),
+        sessions: listUserSessions(user.id).map((s) => ({
+          ...s,
+          is_current: s.id === currentSessionId,
+        })),
       }));
       return;
     }
@@ -1610,7 +1632,16 @@ const server = createServer(async (req, res) => {
 
     // DELETE /v1/me/sessions — revoke all sessions except current (P15-1)
     if (url.pathname === "/v1/me/sessions" && req.method === "DELETE") {
-      const keep = (url.searchParams.get("keep") ?? "").trim();
+      // Resolve the caller's current session via the bearer key's session_id so the
+      // client doesn't have to supply it (and can't accidentally log itself out).
+      const explicitKeep = (url.searchParams.get("keep") ?? "").trim();
+      let keep = explicitKeep;
+      if (!keep) {
+        const row = getDb()
+          .prepare("SELECT session_id FROM api_keys WHERE id = ?")
+          .get(restKey.id) as { session_id: string | null } | undefined;
+        keep = row?.session_id ?? "";
+      }
       const removed = revokeAllOtherSessions(restKey.user_id, keep);
       res.writeHead(200, restHeaders);
       res.end(JSON.stringify({ ok: true, revoked_count: removed }));

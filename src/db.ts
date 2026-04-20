@@ -76,7 +76,8 @@ CREATE TABLE IF NOT EXISTS api_keys (
   scopes TEXT NOT NULL DEFAULT 'read,write',
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   last_used_at TEXT,
-  expires_at TEXT
+  expires_at TEXT,
+  session_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS trails (
@@ -105,7 +106,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   expires_at TEXT NOT NULL,
   absolute_expires_at TEXT NOT NULL,
-  last_used_at TEXT
+  last_used_at TEXT,
+  user_agent TEXT
 );
 
 CREATE TABLE IF NOT EXISTS magic_links (
@@ -220,6 +222,22 @@ export function createSchema(): void {
   migrateUserRoles(database);
   migrateUserDisplayName(database);
   migrateDiscoveryQueue(database);
+  migrateSessionUserAgent(database);
+  migrateApiKeySessionId(database);
+}
+
+/** Add user_agent column to sessions (P15-1 follow-up). */
+function migrateSessionUserAgent(database: Database.Database): void {
+  const cols = database.prepare("PRAGMA table_info(sessions)").all() as { name: string }[];
+  if (cols.some((c) => c.name === "user_agent")) return;
+  database.exec("ALTER TABLE sessions ADD COLUMN user_agent TEXT");
+}
+
+/** Link api_keys to the session that created them so /v1/me can flag is_current (P15-1 follow-up). */
+function migrateApiKeySessionId(database: Database.Database): void {
+  const cols = database.prepare("PRAGMA table_info(api_keys)").all() as { name: string }[];
+  if (cols.some((c) => c.name === "session_id")) return;
+  database.exec("ALTER TABLE api_keys ADD COLUMN session_id TEXT");
 }
 
 /**
