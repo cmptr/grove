@@ -27,7 +27,12 @@
     "proxy": "tsx src/proxy.ts",
     "keys": "tsx src/keys.ts",
     "grove": "tsx src/cli.ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:unit": "vitest run test/unit/",
+    "test:int": "vitest run test/integration/",
+    "test:smoke": "bats test/smoke/*.bats",
+    "test:eval": "tsx scripts/run-evals.ts",
+    "iterate": "tsx scripts/iterate.ts"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

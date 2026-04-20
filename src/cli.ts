@@ -26,32 +26,32 @@ import { loadTrails, createTrail, disableTrail, deleteTrail } from "./trails.js"
 import { parseNote, serializeNote, inferTags, contentHash } from "./notes-validate.js";
 import { enqueueDiscovery, createSchema } from "./db.js";
 import { syncBookmarks } from "./discovery-bookmarks.js";
+import { installSignalHandlers } from "./cli/lib/signals.js";
+import { guardAgainstTokenInArgv } from "./cli/lib/argv.js";
+import { GroveCliError, exitCodeFor as newExitCodeFor } from "./cli/lib/errors.js";
+import {
+  selectFormat,
+  render as renderOutput,
+  parseFields,
+  isNullDelimited,
+  type Format,
+} from "./cli/lib/format.js";
+import { resolveIdempotencyKey } from "./cli/lib/idempotency.js";
+import { confirmTyped } from "./cli/lib/confirm.js";
 
 // ── Vault path (local git operations) ────────────────────────────
 const VAULT_PATH = process.env.GROVE_VAULT ?? join(homedir(), "life");
 
 // ── Config ───────────────────────────────────────────────────────
 
-interface Config {
-  server: string;
-  token: string;
-}
+// Re-export the new config types/loader; keep local Config interface for back-compat.
+import { loadConfig as loadConfigImpl, type Config as NewConfig } from "./cli/lib/config.js";
+
+type Config = NewConfig;
 
 function loadConfig(): Config {
-  const envServer = process.env.GROVE_SERVER;
-  const envToken = process.env.GROVE_TOKEN;
-  if (envServer && envToken) return { server: envServer, token: envToken };
-
-  const path = join(homedir(), ".grove", "cli.json");
-  try {
-    const file = JSON.parse(readFileSync(path, "utf-8"));
-    return {
-      server: envServer ?? file.server,
-      token: envToken ?? file.token,
-    };
-  } catch {
-    throw new CliError("config_missing", `Config not found: ${path}\nCreate it with: { "server": "https://api.grove.md", "token": "grove_live_..." }`, 2);
-  }
+  // Prefer the new GroveCliError-based loader; main() already handles both error classes.
+  return loadConfigImpl();
 }
 
 // ── CliError ────────────────────────────────────────────────────
@@ -204,6 +204,15 @@ const BOOLEAN_FLAGS = new Set([
   "dry-run",
   "v",
   "h",
+  // Phase 1 additions
+  "jsonl",
+  "table",
+  "0",
+  "print0",
+  "stdout",
+  "apply",
+  "plan",
+  "redact",
 ]);
 
 export function parseArgs(argv: string[]): { command: string; positional: string; flags: Record<string, string | boolean> } {
@@ -620,17 +629,15 @@ async function cmdInit(flags: Record<string, string | boolean>): Promise<CmdResu
   }
   if (res.status >= 400) throw new CliError("auth_error", `Server returned ${res.status}. Check your token.`, 2);
 
-  // Write config
-  const configDir = join(homedir(), ".grove");
-  const configPath = join(configDir, "cli.json");
-  mkdirSync(configDir, { recursive: true });
-  writeFileSync(configPath, JSON.stringify({ server, token }, null, 2) + "\n");
+  // Write config with mode 0600 (enforced by writeConfig helper).
+  const { writeConfig } = await import("./cli/lib/config.js");
+  const configPathResult = writeConfig({ server, token });
 
   return {
     ok: true,
     server,
-    config_path: configPath,
-    _fmt: () => `Connected to ${server}\nConfig written to ${configPath}`,
+    config_path: configPathResult,
+    _fmt: () => `Connected to ${server}\nConfig written to ${configPathResult} (mode 0600)`,
   };
 }
 
@@ -1508,44 +1515,122 @@ Setup: grove init --server https://api.grove.md --token grove_live_...`;
 
 // ── Output dispatcher ───────────────────────────────────────────
 
-function emitResult(result: CmdResult, json: boolean, paths?: boolean): void {
-  if (paths) {
-    // --paths mode: one path per line, nothing else
+/**
+ * Resolve output format from flags, honoring new --format + legacy --json/--paths.
+ * Priority: explicit --format > --jsonl/--paths/--table > --json > TTY default.
+ */
+function resolveFormat(flags: Record<string, string | boolean>): Format {
+  const view = {
+    format: flags.format,
+    json: flags.json,
+    jsonl: flags.jsonl,
+    paths: flags.paths,
+    table: flags.table,
+  };
+  return selectFormat(view);
+}
+
+function emitResult(result: CmdResult, flags: Record<string, string | boolean>): void {
+  const format = resolveFormat(flags);
+  const nullDelimited = isNullDelimited(flags as any);
+  const fields = parseFields(flags as any);
+
+  // Legacy --paths behavior maps to --format paths (same rendering, path list only)
+  if (flags.paths && format !== "paths") {
+    // User passed both (unusual); legacy wins.
     const items = (result as any).results ?? (result as any).entries ?? [];
     for (const item of items) {
-      if (item.path) process.stdout.write(item.path + "\n");
+      if (item.path) process.stdout.write(item.path + (nullDelimited ? "\0" : "\n"));
     }
     return;
   }
-  if (json) {
-    // Strip internal _fmt before serializing
-    const { _fmt, ...data } = result;
-    process.stdout.write(JSON.stringify(data) + "\n");
-  } else {
-    const fmt = result._fmt;
-    if (fmt) {
-      process.stdout.write(fmt(result) + "\n");
-    } else {
-      const { _fmt, ...data } = result;
-      process.stdout.write(JSON.stringify(data, null, 2) + "\n");
-    }
+
+  // For the new format system, we render the data payload (not _fmt) for json/jsonl/paths.
+  // Table falls back to the command's bespoke _fmt if present — human-readable preferred.
+  if (format === "table" && result._fmt) {
+    process.stdout.write(result._fmt(result) + "\n");
+    return;
   }
+
+  // Strip internal _fmt before rendering.
+  const { _fmt, ok: _ok, ...data } = result;
+  if (format === "json" || format === "jsonl") {
+    // Wrap in the standard envelope so agents see `ok: true`.
+    const envelope = { ok: true, data };
+    process.stdout.write(renderOutput(envelope, { format, nullDelimited, fields }) + "\n");
+    return;
+  }
+
+  if (format === "paths") {
+    // Try common payload shapes (results, entries, notes, paths) or data itself.
+    const payload = (data as any).results ?? (data as any).entries ?? (data as any).notes ?? (data as any).paths ?? data;
+    process.stdout.write(renderOutput(payload, { format, nullDelimited, fields }));
+    return;
+  }
+
+  // Fallback for table with no _fmt.
+  process.stdout.write(renderOutput(data, { format, nullDelimited, fields }) + "\n");
 }
 
-function emitError(err: CliError, json: boolean): void {
-  const payload = { ok: false, error: err.code, message: err.message };
-  if (json) {
-    process.stderr.write(JSON.stringify(payload) + "\n");
-  } else {
-    process.stderr.write(err.message + "\n");
+function emitError(err: CliError | GroveCliError, flags: Record<string, string | boolean>): void {
+  const format = resolveFormat(flags);
+  // Normalize to new envelope shape.
+  const code = err.code;
+  const message = err.message;
+  const hint = (err as GroveCliError).hint;
+  const suggestions = (err as GroveCliError).suggestions ?? [];
+  const details = (err as GroveCliError).details;
+
+  if (format === "json" || format === "jsonl") {
+    const envelope: { ok: false; error: Record<string, unknown> } = {
+      ok: false,
+      error: { code, message },
+    };
+    if (hint) envelope.error.hint = hint;
+    if (suggestions.length > 0) envelope.error.suggestions = suggestions;
+    if (details) envelope.error.details = details;
+    // Write machine-readable envelope to stdout (agent-consumable).
+    process.stdout.write(JSON.stringify(envelope) + "\n");
+    return;
   }
+  // Human: stderr.
+  const lines: string[] = [`error: ${message} [${code}]`];
+  if (hint) lines.push(`hint: ${hint}`);
+  if (suggestions.length > 0) {
+    lines.push("suggestions:");
+    for (const s of suggestions) lines.push(`  ${s}`);
+  }
+  process.stderr.write(lines.join("\n") + "\n");
+}
+
+/**
+ * Legacy CliError → exit code mapping.
+ * New GroveCliError uses `newExitCodeFor(code)` for the 0/1/2/3/4 scheme.
+ * Legacy CliError keeps its `.exitCode` property (1/2/3).
+ */
+function exitCodeFor(err: CliError | GroveCliError): number {
+  if (err instanceof GroveCliError) return err.exitCode;
+  return (err as CliError).exitCode;
 }
 
 // ── Main ─────────────────────────────────────────────────────────
 
 async function main() {
+  // Install signal handlers FIRST so SIGPIPE never crashes the CLI.
+  installSignalHandlers();
+
+  // Ban tokens in argv (ps-aux leak protection). init is the lone exception.
+  try {
+    guardAgainstTokenInArgv(process.argv.slice(2));
+  } catch (err) {
+    if (err instanceof GroveCliError) {
+      emitError(err, { json: !process.stdout.isTTY });
+      process.exit(err.exitCode);
+    }
+    throw err;
+  }
+
   const { command, positional, flags } = parseArgs(process.argv.slice(2));
-  const json = !!flags.json;
 
   if (command === "help" || command === "--help" || command === "-h") {
     process.stdout.write(printUsage() + "\n");
@@ -1562,11 +1647,15 @@ async function main() {
     let result: CmdResult;
 
     // Local-only commands (no server needed)
-    if (command === "snapshot") { result = cmdSnapshot(process.argv.slice(3)); emitResult(result, json); return; }
-    if (command === "rollback") { result = cmdRollback(positional); emitResult(result, json); return; }
-    if (command === "lint") { result = cmdLint(positional, flags); emitResult(result, json); return; }
-    if (command === "tag-backfill") { result = cmdTagBackfill(flags); emitResult(result, json); return; }
-    if (command === "init") { result = await cmdInit(flags); emitResult(result, json); return; }
+    if (command === "snapshot") { result = cmdSnapshot(process.argv.slice(3)); emitResult(result, flags); return; }
+    if (command === "rollback") {
+      // Destructive: require typed confirmation unless bypass env set.
+      await confirmTyped(positional, `rollback will restore vault to snapshot "${positional}" and commit — existing uncommitted changes in the vault may be lost.`);
+      result = cmdRollback(positional); emitResult(result, flags); return;
+    }
+    if (command === "lint") { result = cmdLint(positional, flags); emitResult(result, flags); return; }
+    if (command === "tag-backfill") { result = cmdTagBackfill(flags); emitResult(result, flags); return; }
+    if (command === "init") { result = await cmdInit(flags); emitResult(result, flags); return; }
 
     const config = loadConfig();
 
@@ -1577,25 +1666,28 @@ async function main() {
       switch (sub) {
         case "list":   result = await cmdKeysList(config); break;
         case "create": result = await cmdKeysCreate(config, subArg); break;
-        case "revoke": result = await cmdKeysRevoke(config, subArg); break;
+        case "revoke":
+          // Destructive: typed confirm with the key id.
+          await confirmTyped(subArg, `revoke API key "${subArg}" — this is immediate and irreversible.`);
+          result = await cmdKeysRevoke(config, subArg); break;
         default:
           throw new CliError("bad_request", `Unknown keys subcommand: ${sub}\nUsage: grove keys [list|create|revoke]`, 1);
       }
-      emitResult(result, json);
+      emitResult(result, flags);
       return;
     }
 
     // Share
     if (command === "share") {
       result = await cmdShare(config, positional, flags);
-      emitResult(result, json);
+      emitResult(result, flags);
       return;
     }
 
     // Invite
     if (command === "invite") {
       result = await cmdInvite(config, positional, flags);
-      emitResult(result, json);
+      emitResult(result, flags);
       return;
     }
 
@@ -1607,18 +1699,21 @@ async function main() {
         case "list":    result = await cmdTrailsList(config); break;
         case "create":  result = await cmdTrailCreate(config, subArg, flags); break;
         case "disable": result = await cmdTrailDisable(config, subArg); break;
-        case "delete":  result = await cmdTrailDelete(config, subArg, flags); break;
+        case "delete":
+          // Destructive: typed confirm with trail id.
+          await confirmTyped(subArg, `delete trail "${subArg}" — this is permanent.`);
+          result = await cmdTrailDelete(config, subArg, flags); break;
         default:
           throw new CliError("bad_request", `Unknown trails subcommand: ${sub}\nUsage: grove trails [list|create|disable|delete]`, 1);
       }
-      emitResult(result, json);
+      emitResult(result, flags);
       return;
     }
 
     // Bookmark sync (local — no server needed)
     if (command === "bookmarks") {
       result = cmdBookmarkSync(flags);
-      emitResult(result, json);
+      emitResult(result, flags);
       return;
     }
 
@@ -1641,18 +1736,20 @@ async function main() {
       default:
         throw new CliError("bad_request", `Unknown command: ${command}\nRun 'grove' for available commands.`, 1);
     }
-    const paths = !!flags.paths && (command === "search" || command === "list");
-    emitResult(result, json, paths);
+    emitResult(result, flags);
   } catch (err) {
-    if (err instanceof CliError) {
-      emitError(err, json);
-      process.exit(err.exitCode);
+    if (err instanceof CliError || err instanceof GroveCliError) {
+      emitError(err, flags);
+      process.exit(exitCodeFor(err));
     }
     // Unexpected error
     const msg = err instanceof Error ? err.message : String(err);
-    emitError(new CliError("server_error", msg, 3), json);
+    emitError(new CliError("server_error", msg, 3), flags);
     process.exit(3);
   }
 }
+
+// Shared flags (in case this runs before parseArgs)
+const flags = {} as Record<string, string | boolean>;
 
 main();
