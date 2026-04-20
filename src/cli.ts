@@ -38,6 +38,7 @@ import {
 } from "./cli/lib/format.js";
 import { resolveIdempotencyKey } from "./cli/lib/idempotency.js";
 import { confirmTyped } from "./cli/lib/confirm.js";
+import { promptPassphrase } from "./cli/lib/passphrase.js";
 import { warnDeprecated } from "./cli/lib/deprecation.js";
 import {
   validatePatchArgs,
@@ -136,6 +137,13 @@ function handleHttpStatus(res: { status: number; body: string }): never | void {
     throw new CliError("not_found", msg, 1);
   }
   if (res.status === 429) throw new CliError("rate_limited", "Rate limited. Try again shortly.", 1);
+  if (res.status === 503) {
+    const parsed = tryParseJson(res.body);
+    if (parsed?.error === "vault_locked") {
+      throw new CliError("vault_locked", parsed.message ?? "Vault is encrypted and locked. Unlock with: grove vault unlock", 3);
+    }
+    throw new CliError("server_error", `Service unavailable (503)`, 3);
+  }
   if (res.status >= 500) throw new CliError("server_error", `Server error (${res.status})`, 3);
 }
 
@@ -157,6 +165,13 @@ async function restGet(config: Config, path: string): Promise<any> {
 async function restPut(config: Config, path: string, body: unknown, extraHeaders?: Record<string, string>): Promise<{ status: number; data: any }> {
   const url = new URL(path, config.server);
   const res = await httpDo("PUT", url, { Authorization: `Bearer ${config.token}`, ...extraHeaders }, JSON.stringify(body));
+  const data = tryParseJson(res.body);
+  return { status: res.status, data: data ?? { raw: res.body.slice(0, 200) } };
+}
+
+async function restPost(config: Config, path: string, body: unknown): Promise<{ status: number; data: any }> {
+  const url = new URL(path, config.server);
+  const res = await httpDo("POST", url, { Authorization: `Bearer ${config.token}` }, JSON.stringify(body));
   const data = tryParseJson(res.body);
   return { status: res.status, data: data ?? { raw: res.body.slice(0, 200) } };
 }
@@ -1272,6 +1287,76 @@ async function cmdInvite(config: Config, email: string, flags: Record<string, st
   };
 }
 
+// ── Vault encryption (remote, via /v1/admin/vault API) ─────────
+
+async function cmdVaultStatus(config: Config): Promise<CmdResult> {
+  const data = await restGet(config, "/v1/admin/vault/status");
+  return {
+    ok: true,
+    encrypted: !!data.encrypted,
+    unlocked: !!data.unlocked,
+    last_unlocked_at: data.last_unlocked_at ?? null,
+    _fmt: () => {
+      if (!data.encrypted) return "encrypted: no\n(Vault is plaintext. Run `grove vault encrypt` to encrypt.)";
+      const state = data.unlocked ? "unlocked" : "locked";
+      const last = data.last_unlocked_at ? new Date(data.last_unlocked_at).toISOString() : "never";
+      return `encrypted:        yes\nstate:            ${state}\nlast unlocked at: ${last}`;
+    },
+  };
+}
+
+async function cmdVaultEncrypt(config: Config): Promise<CmdResult> {
+  const passphrase = await promptPassphrase("Set a passphrase", { confirm: true });
+  const res = await restPost(config, "/v1/admin/vault/encrypt", { passphrase });
+  if (res.status === 409) {
+    throw new CliError("bad_request", res.data?.message ?? "Vault is already encrypted.", 1);
+  }
+  if (res.status < 200 || res.status >= 300) {
+    throw new CliError("server_error", `Encrypt failed (${res.status}): ${JSON.stringify(res.data)}`, 3);
+  }
+  return {
+    ok: true,
+    encrypted: true,
+    ...res.data,
+    _fmt: () => "Vault encrypted. Keep your passphrase safe — there is no recovery.",
+  };
+}
+
+async function cmdVaultUnlock(config: Config): Promise<CmdResult> {
+  const passphrase = await promptPassphrase("Passphrase");
+  const res = await restPost(config, "/v1/admin/vault/unlock", { passphrase });
+  if (res.status === 401) {
+    throw new CliError("auth_error", "Wrong passphrase.", 2);
+  }
+  if (res.status === 409) {
+    throw new CliError("bad_request", res.data?.message ?? "Vault is not encrypted.", 1);
+  }
+  if (res.status < 200 || res.status >= 300) {
+    throw new CliError("server_error", `Unlock failed (${res.status}): ${JSON.stringify(res.data)}`, 3);
+  }
+  return {
+    ok: true,
+    unlocked: true,
+    last_unlocked_at: res.data?.last_unlocked_at,
+    _fmt: () => "Vault unlocked.",
+  };
+}
+
+async function cmdVaultLock(config: Config): Promise<CmdResult> {
+  const res = await restPost(config, "/v1/admin/vault/lock", {});
+  if (res.status === 409) {
+    throw new CliError("bad_request", res.data?.message ?? "Vault is not encrypted.", 1);
+  }
+  if (res.status < 200 || res.status >= 300) {
+    throw new CliError("server_error", `Lock failed (${res.status}): ${JSON.stringify(res.data)}`, 3);
+  }
+  return {
+    ok: true,
+    locked: true,
+    _fmt: () => "Vault locked. Data endpoints will return 503 until unlocked.",
+  };
+}
+
 // ── Snapshot / Rollback (local vault git operations) ─────────
 
 function cmdSnapshot(args: string[]): CmdResult {
@@ -1579,6 +1664,20 @@ export const HELP: Record<string, CmdHelp> = {
     json_schema: "{ok, trails: [{id, name, enabled, allow_tags, allow_paths}]}",
     exit_codes: EXIT_CODES,
   },
+  vault: {
+    usage: "grove vault [status|encrypt|unlock|lock] [--json]",
+    description: "Encryption lifecycle. Passphrase is read from stdin (interactive) or GROVE_VAULT_PASSPHRASE env var.",
+    flags: ["--json    JSON output"],
+    json_schema: "{ok, encrypted, unlocked, last_unlocked_at} | {ok, locked|unlocked|encrypted: true}",
+    exit_codes: EXIT_CODES,
+    examples: [
+      "grove vault status",
+      "grove vault encrypt",
+      "grove vault unlock",
+      "grove vault lock",
+      "GROVE_VAULT_PASSPHRASE=... grove vault unlock --json",
+    ],
+  },
   sync: {
     usage: "grove sync <dir> [--dry-run] [--json]",
     description: "Sync archived Sources directory to Grove.",
@@ -1676,6 +1775,7 @@ Commands:
   init                    Configure CLI connection
   keys                    Manage API keys
   trails                  Manage trails (scoped access)
+  vault                   Encryption lifecycle (status|encrypt|unlock|lock)
   sync <dir>              Sync archived Sources
   ingest <dir>            Import .md or .txt files into vault
   lint <dir>              Normalize frontmatter
@@ -1947,6 +2047,21 @@ async function main() {
     // Invite
     if (command === "invite") {
       result = await cmdInvite(config, positional, flags);
+      emitResult(result, flags);
+      return;
+    }
+
+    // Vault encryption lifecycle.
+    if (command === "vault") {
+      const sub = positional || "status";
+      switch (sub) {
+        case "status":  result = await cmdVaultStatus(config); break;
+        case "encrypt": result = await cmdVaultEncrypt(config); break;
+        case "unlock":  result = await cmdVaultUnlock(config); break;
+        case "lock":    result = await cmdVaultLock(config); break;
+        default:
+          throw new CliError("bad_request", `Unknown vault subcommand: ${sub}\nUsage: grove vault [status|encrypt|unlock|lock]`, 1);
+      }
       emitResult(result, flags);
       return;
     }
