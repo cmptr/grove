@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "A hosted knowledge API that makes Obsidian vaults searchable and writable from any MCP client.",
   "type": "module",
+  "bin": {
+    "grove": "./bin/grove"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/jmilinovich/grove.git"
