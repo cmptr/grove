@@ -26,7 +26,7 @@ import {
 import { validatePath, validateNote, parseNote, serializeNote, contentHash } from "./notes-validate.js";
 import { loadVaultConfig } from "./vault-config.js";
 import { filterByTrail, trailAllowsWrite, getTrailPublicInfo, getTrailConfig, type TrailConfig, type NoteMetadata } from "./trails.js";
-import { getStats, refreshStats } from "./vault-stats.js";
+import { getStats } from "./vault-stats.js";
 import { analyzeGraph, computeDigest } from "./vault-graph.js";
 import { searchMetrics, metrics } from "./metrics.js";
 import { WriteQueue } from "./write-queue.js";
@@ -963,7 +963,7 @@ export async function handleWriteNote(
     qmdReindex(relPath).catch(() => {});
 
     // Refresh stats cache (fire-and-forget; deduped in-flight)
-    refreshStats(VAULT_PATH).catch(() => {});
+    // refreshStats moved to 5-min timer — computing on every write blocks the event loop (CPU-bound graph analysis). See vault-stats.ts startStatsTimer.
 
     return {
       path: relPath,
@@ -1065,7 +1065,7 @@ export async function handleDeleteNote(
       invalidateFrontmatterCache(srcAbs);
       const commitSha = await gitCommitPaths(VAULT_PATH, [srcRel], `${who}: delete ${srcRel}`);
       qmdReindex(srcRel).catch(() => {});
-      refreshStats(VAULT_PATH).catch(() => {});
+    // refreshStats moved to 5-min timer — computing on every write blocks the event loop (CPU-bound graph analysis). See vault-stats.ts startStatsTimer.
       return commitSha;
     });
     return { action: "deleted", original_path: srcRel, commit: sha };
@@ -1120,7 +1120,7 @@ export async function handleDeleteNote(
       `${who}: archive ${srcRel}`,
     );
     qmdReindex(srcRel).catch(() => {});
-    refreshStats(VAULT_PATH).catch(() => {});
+    // refreshStats moved to 5-min timer — computing on every write blocks the event loop (CPU-bound graph analysis). See vault-stats.ts startStatsTimer.
     return commitSha;
   });
 
@@ -1229,7 +1229,7 @@ export async function handleMoveNote(
     );
 
     qmdReindex(dstRel).catch(() => {});
-    refreshStats(VAULT_PATH).catch(() => {});
+    // refreshStats moved to 5-min timer — computing on every write blocks the event loop (CPU-bound graph analysis). See vault-stats.ts startStatsTimer.
 
     const finalRaw = readNoteFile(dstAbs);
     return {
