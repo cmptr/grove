@@ -181,6 +181,20 @@ async function restPost(config: Config, path: string, body: unknown): Promise<{ 
   return { status: res.status, data: data ?? { raw: res.body.slice(0, 200) } };
 }
 
+async function restPatch(config: Config, path: string, body: unknown, extraHeaders?: Record<string, string>): Promise<{ status: number; data: any }> {
+  const url = new URL(path, config.server);
+  const res = await httpDo("PATCH", url, { Authorization: `Bearer ${config.token}`, ...extraHeaders }, JSON.stringify(body));
+  const data = tryParseJson(res.body);
+  return { status: res.status, data: data ?? { raw: res.body.slice(0, 200) } };
+}
+
+async function restDelete(config: Config, path: string, extraHeaders?: Record<string, string>): Promise<{ status: number; data: any }> {
+  const url = new URL(path, config.server);
+  const res = await httpDo("DELETE", url, { Authorization: `Bearer ${config.token}`, ...extraHeaders });
+  const data = tryParseJson(res.body);
+  return { status: res.status, data: data ?? { raw: res.body.slice(0, 200) } };
+}
+
 // ── MCP JSON-RPC (fallback for endpoints without REST routes) ───
 
 let sessionId: string | undefined;
@@ -245,12 +259,14 @@ const BOOLEAN_FLAGS = new Set([
   "apply",
   "plan",
   "redact",
+  // Phase 11: lifecycle
+  "hard",
 ]);
 
-export function parseArgs(argv: string[]): { command: string; positional: string; flags: Record<string, string | boolean> } {
+export function parseArgs(argv: string[]): { command: string; positional: string; positionals: string[]; flags: Record<string, string | boolean> } {
   let command = "help";
   let commandSet = false;
-  let positional = "";
+  const positionals: string[] = [];
   const flags: Record<string, string | boolean> = {};
 
   const looksLikeFlag = (s: string | undefined): boolean =>
@@ -285,15 +301,15 @@ export function parseArgs(argv: string[]): { command: string; positional: string
     } else if (!commandSet) {
       command = arg;
       commandSet = true;
-    } else if (!positional) {
-      positional = arg;
+    } else {
+      positionals.push(arg);
     }
   }
 
   // Auto-detect non-TTY → JSON mode
   if (!process.stdout.isTTY) flags.json = true;
 
-  return { command, positional, flags };
+  return { command, positional: positionals[0] ?? "", positionals, flags };
 }
 
 // ── Human-readable formatters ───────────────────────────────────
@@ -499,6 +515,84 @@ async function cmdWrite(config: Config, path: string, flags: Record<string, stri
   if (status >= 500) throw new CliError("server_error", `Server error (${status})`, 3);
 
   return { ok: true, ...data, _fmt: formatStatus };
+}
+
+export function validateDeleteFlags(flags: Record<string, string | boolean>, path: string): void {
+  if (flags.hard && !flags.yes) {
+    throw new CliError(
+      "bad_request",
+      `Hard delete requires --yes. Would permanently remove: ${path}\nRun again with --yes to confirm — this is irreversible.`,
+      1,
+    );
+  }
+}
+
+async function cmdDelete(config: Config, path: string, flags: Record<string, string | boolean>): Promise<CmdResult> {
+  if (!path) throw new CliError("bad_request", "Usage: grove delete <path> [--hard --yes] [--if-hash hash]", 1);
+  validateDeleteFlags(flags, path);
+  const hard = !!flags.hard;
+
+  const extraHeaders: Record<string, string> = {};
+  if (typeof flags["if-hash"] === "string") {
+    extraHeaders["If-Match"] = `"${flags["if-hash"]}"`;
+  }
+
+  const qs = hard ? "?hard=true" : "";
+  const { status, data } = await restDelete(
+    config,
+    `/v1/notes/${encodeURIComponent(path)}${qs}`,
+    extraHeaders,
+  );
+
+  if (status === 404) throw new CliError("not_found", data?.error ?? `Not found: ${path}`, 1);
+  if (status === 409) throw new CliError("conflict", data?.error ?? "Content changed since last read (hash mismatch)", 1);
+  if (status === 400) throw new CliError("bad_request", data?.error ?? "Bad request", 1);
+  if (status === 401) throw new CliError("auth_error", "Authentication failed. Check your token.", 2);
+  if (status === 403) throw new CliError("auth_error", "Permission denied.", 2);
+  if (status >= 500) throw new CliError("server_error", `Server error (${status})`, 3);
+
+  return {
+    ok: true,
+    ...data,
+    _fmt: () => {
+      const action = data?.action ?? (hard ? "deleted" : "archived");
+      if (action === "archived" && data?.archive_path) return `archived ${path} → ${data.archive_path}`;
+      if (action === "deleted") return `deleted ${path}`;
+      return `${action} ${path}`;
+    },
+  };
+}
+
+async function cmdMove(config: Config, from: string, to: string, flags: Record<string, string | boolean>): Promise<CmdResult> {
+  if (!from || !to) throw new CliError("bad_request", "Usage: grove move <from> <to> [--if-hash hash]", 1);
+
+  const extraHeaders: Record<string, string> = {};
+  if (typeof flags["if-hash"] === "string") {
+    extraHeaders["If-Match"] = `"${flags["if-hash"]}"`;
+  }
+
+  const { status, data } = await restPatch(
+    config,
+    `/v1/notes/${encodeURIComponent(from)}`,
+    { move_to: to },
+    extraHeaders,
+  );
+
+  if (status === 404) throw new CliError("not_found", data?.error ?? `Not found: ${from}`, 1);
+  if (status === 409) throw new CliError("conflict", data?.error ?? `Destination already exists: ${to}`, 1);
+  if (status === 400) throw new CliError("bad_request", data?.error ?? "Bad request", 1);
+  if (status === 401) throw new CliError("auth_error", "Authentication failed. Check your token.", 2);
+  if (status === 403) throw new CliError("auth_error", "Permission denied.", 2);
+  if (status >= 500) throw new CliError("server_error", `Server error (${status})`, 3);
+
+  return {
+    ok: true,
+    ...data,
+    _fmt: () => {
+      const links = Number(data?.links_updated ?? 0);
+      return `moved ${from} → ${to} (${links} link${links === 1 ? "" : "s"} updated)`;
+    },
+  };
 }
 
 async function cmdHistory(config: Config, flags: Record<string, string | boolean>): Promise<CmdResult> {
@@ -1664,6 +1758,29 @@ export const HELP: Record<string, CmdHelp> = {
     exit_codes: EXIT_CODES,
     examples: ["grove write Inbox/idea.md --type concept --content 'My idea'", "cat draft.md | grove write Resources/Concepts/new.md --type concept"],
   },
+  delete: {
+    usage: "grove delete <path> [--hard --yes] [--if-hash hash] [--json]",
+    description: "Archive a note (default) or permanently delete it with --hard. Soft delete moves the note under the vault's archive path and adds archived_from/archived_at frontmatter. --hard removes the file outright and requires --yes.",
+    flags: ["--hard        Permanently delete (file is removed, not archived)", "--yes         Required with --hard to confirm irreversible removal", "--if-hash H   Content hash from prior read (rejects on conflict)", "--json        JSON output"],
+    json_schema: "{ok, action: 'archived'|'deleted', original_path, archive_path?, commit}",
+    exit_codes: EXIT_CODES,
+    examples: [
+      "grove delete Inbox/old-idea.md",
+      "grove delete Inbox/old-idea.md --hard --yes",
+      "grove delete Resources/Concepts/x.md --if-hash abc123",
+    ],
+  },
+  move: {
+    usage: "grove move <from> <to> [--if-hash hash] [--json]",
+    description: "Move or rename a note. Updates all exact wikilinks across the vault in the same commit. Destination must not already exist.",
+    flags: ["--if-hash H   Content hash from prior read (rejects on conflict)", "--json        JSON output"],
+    json_schema: "{ok, action: 'moved', from, to, links_updated, commit}",
+    exit_codes: EXIT_CODES,
+    examples: [
+      "grove move Inbox/idea.md Resources/Concepts/idea.md",
+      "grove move 'Inbox/taste graph.md' 'Resources/Concepts/taste-graph.md'",
+    ],
+  },
   init: {
     usage: "grove init --server <url> --token <token>",
     description: "Configure Grove CLI. Validates connection and writes ~/.grove/cli.json.",
@@ -1842,6 +1959,8 @@ Commands:
   read <path-or-title>    Read a note
   list <glob>             List notes
   write <path>            Create/update a note
+  delete <path>           Archive a note (or --hard --yes to remove)
+  move <from> <to>        Move/rename a note; updates wikilinks
   graph                   Knowledge graph overview
   digest                  Note lifecycle stages
   history                 Recent changes
@@ -1995,7 +2114,7 @@ async function main() {
     throw err;
   }
 
-  const { command, positional, flags } = parseArgs(process.argv.slice(2));
+  const { command, positional, positionals, flags } = parseArgs(process.argv.slice(2));
 
   if (command === "help" || command === "--help" || command === "-h") {
     process.stdout.write(printUsage() + "\n");
@@ -2334,6 +2453,8 @@ async function main() {
       case "get":         result = await cmdRead(config, positional); break; // alias
       case "list":        result = await cmdList(config, positional, flags); break;
       case "write":       result = await cmdWrite(config, positional, flags); break;
+      case "delete":      result = await cmdDelete(config, positional, flags); break;
+      case "move":        result = await cmdMove(config, positional, positionals[1] ?? "", flags); break;
       case "sync":
         warnDeprecated("sync", "grove import <dir> --source=sources --apply");
         result = await cmdSync(config, positional, flags); break;
