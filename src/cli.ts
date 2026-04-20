@@ -38,6 +38,7 @@ import {
 } from "./cli/lib/format.js";
 import { resolveIdempotencyKey } from "./cli/lib/idempotency.js";
 import { confirmTyped } from "./cli/lib/confirm.js";
+import { warnDeprecated } from "./cli/lib/deprecation.js";
 
 // ── Vault path (local git operations) ────────────────────────────
 const VAULT_PATH = process.env.GROVE_VAULT ?? join(homedir(), "life");
@@ -1654,7 +1655,12 @@ async function main() {
       result = cmdRollback(positional); emitResult(result, flags); return;
     }
     if (command === "lint") { result = cmdLint(positional, flags); emitResult(result, flags); return; }
-    if (command === "tag-backfill") { result = cmdTagBackfill(flags); emitResult(result, flags); return; }
+    if (command === "tag-backfill") {
+      warnDeprecated("tag-backfill", "grove backfill tags");
+      result = cmdTagBackfill(flags);
+      emitResult(result, flags);
+      return;
+    }
     if (command === "init") { result = await cmdInit(flags); emitResult(result, flags); return; }
 
     const config = loadConfig();
@@ -1710,11 +1716,73 @@ async function main() {
       return;
     }
 
-    // Bookmark sync (local — no server needed)
+    // Bookmark sync (local — no server needed). Deprecated: use `grove import --source=bookmarks`.
     if (command === "bookmarks") {
+      warnDeprecated("bookmarks", "grove import --source=bookmarks");
       result = cmdBookmarkSync(flags);
       emitResult(result, flags);
       return;
+    }
+
+    // Phase 2: `grove inspect --mode=<diagnostics|graph|digest|discovery>` —
+    // a single entry point for the truly modal inspection commands. Keeps
+    // `health`, `history`, `status` as distinct verbs per CLI-design feedback.
+    if (command === "inspect") {
+      const mode = (flags.mode as string) ?? positional;
+      switch (mode) {
+        case "diagnostics": result = await cmdDiagnostics(config); break;
+        case "graph":       result = await cmdGraph(config); break;
+        case "digest":      result = await cmdDigest(config); break;
+        case "discovery":
+          // Use the MCP vault_status tool directly — no dedicated REST endpoint yet.
+          const raw = await mcpCall(config, "vault_status", { mode: "discovery" });
+          result = { ok: true, ...(tryParseJson(raw) ?? {}), _fmt: formatStatus } as CmdResult;
+          break;
+        default:
+          throw new CliError(
+            "bad_request",
+            `Unknown inspect mode: ${mode || "(none)"}\nUsage: grove inspect --mode=<diagnostics|graph|digest|discovery>`,
+            1,
+          );
+      }
+      emitResult(result, flags);
+      return;
+    }
+
+    // Phase 2: `grove import --source=<fs|sources|bookmarks>` — consolidates
+    // ingest/sync/bookmarks. Default is --plan (dry-run); --apply required to execute.
+    if (command === "import") {
+      const source = (flags.source as string) ?? "fs";
+      const apply = !!flags.apply;
+      const plan = !!flags.plan || !apply; // default to plan if neither set
+      // Route to existing commands, treating --plan as --dry-run.
+      if (plan && !apply) flags["dry-run"] = true;
+      switch (source) {
+        case "fs":        result = await cmdIngest(config, positional, flags); break;
+        case "sources":   result = await cmdSync(config, positional, flags); break;
+        case "bookmarks": result = cmdBookmarkSync(flags); break;
+        default:
+          throw new CliError(
+            "bad_request",
+            `Unknown import source: ${source}\nUsage: grove import <dir> --source=<fs|sources|bookmarks> [--apply]`,
+            1,
+          );
+      }
+      emitResult(result, flags);
+      return;
+    }
+
+    // Phase 2: `grove backfill tags` — renamed from `tag-backfill`.
+    if (command === "backfill") {
+      const sub = positional || "tags";
+      switch (sub) {
+        case "tags":
+          result = cmdTagBackfill(flags);
+          emitResult(result, flags);
+          return;
+        default:
+          throw new CliError("bad_request", `Unknown backfill target: ${sub}\nUsage: grove backfill tags`, 1);
+      }
     }
 
     // Server commands (REST or MCP)
@@ -1723,13 +1791,23 @@ async function main() {
       case "read":        result = await cmdRead(config, positional); break;
       case "list":        result = await cmdList(config, positional, flags); break;
       case "write":       result = await cmdWrite(config, positional, flags); break;
-      case "sync":        result = await cmdSync(config, positional, flags); break;
-      case "ingest":      result = await cmdIngest(config, positional, flags); break;
+      case "sync":
+        warnDeprecated("sync", "grove import <dir> --source=sources --apply");
+        result = await cmdSync(config, positional, flags); break;
+      case "ingest":
+        warnDeprecated("ingest", "grove import <dir> --source=fs --apply");
+        result = await cmdIngest(config, positional, flags); break;
       case "history":     result = await cmdHistory(config, flags); break;
       case "status":      result = await cmdStatus(config); break;
-      case "diagnostics": result = await cmdDiagnostics(config); break;
-      case "graph":       result = await cmdGraph(config); break;
-      case "digest":      result = await cmdDigest(config); break;
+      case "diagnostics":
+        warnDeprecated("diagnostics", "grove inspect --mode=diagnostics");
+        result = await cmdDiagnostics(config); break;
+      case "graph":
+        warnDeprecated("graph", "grove inspect --mode=graph");
+        result = await cmdGraph(config); break;
+      case "digest":
+        warnDeprecated("digest", "grove inspect --mode=digest");
+        result = await cmdDigest(config); break;
       case "health":      result = await cmdHealth(config); break;
       case "metrics":     result = await cmdMetrics(config); break;
       case "whoami":      result = await cmdWhoami(config); break;
