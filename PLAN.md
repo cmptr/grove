@@ -1459,6 +1459,7 @@ This is a refactor, not a feature. Do it when adding Phase D commands makes the 
 | `grove ingest <dir>` | P7-7 (ingest command) | Phase 7b |
 | `grove discovery` | P7-5 (discovery digest) | Phase 7a |
 | `grove write --batch` | Needs server batch write API (not yet spec'd) | Phase 7+ |
+| ~~`grove watch <resource>` (NDJSON event stream)~~ | Needs server SSE endpoint + event bus | **DEFERRED** — YAGNI for single-owner vault; `grove history --since "5 minutes ago"` on a cron covers ~99% of reactive use cases without the server work. Revisit only if a concrete "must react within seconds to a write" workflow appears. |
 
 `grove write --batch` reads JSONL from stdin, each line is `{"path", "type", "tags", "content"}`. Requires a server-side batch write endpoint (one git commit for N notes). Spec the server endpoint when the need materializes (harvesting or ingestion workflows that write 10+ notes).
 
