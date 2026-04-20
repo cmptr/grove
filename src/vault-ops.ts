@@ -193,6 +193,95 @@ export async function gitCommit(
   return sha.trim();
 }
 
+/** Commit a set of already-staged-or-to-be-added paths in a single commit. */
+export async function gitCommitPaths(
+  vaultPath: string,
+  paths: string[],
+  message: string,
+): Promise<string> {
+  if (paths.length > 0) {
+    // `git add` handles both new/modified files and deletions (via -A on the path).
+    await exec("git", ["add", "-A", "--", ...paths], vaultPath);
+  }
+  await exec("git", ["commit", "-m", message], vaultPath);
+  const sha = await exec("git", ["rev-parse", "HEAD"], vaultPath);
+  return sha.trim();
+}
+
+/** Remove a file from the working tree and the index. Does not commit. */
+export async function gitRm(vaultPath: string, filePath: string): Promise<void> {
+  await exec("git", ["rm", "-f", "--", filePath], vaultPath);
+}
+
+/** Move/rename a tracked file via git. Does not commit. */
+export async function gitMv(
+  vaultPath: string,
+  from: string,
+  to: string,
+): Promise<void> {
+  await exec("git", ["mv", "--", from, to], vaultPath);
+}
+
+// ── Wikilink rewrite ─────────────────────────────────────────────────
+
+const WIKILINK_RE = /\[\[([^\]|\n]+)(\|[^\]\n]+)?\]\]/g;
+
+/**
+ * Rewrite wikilinks across the vault that point to `oldPath` or its aliases,
+ * replacing them with links to `newPath`. Modifies files in place (decrypting
+ * and re-encrypting as needed) and returns the relative paths of modified
+ * files. Does not stage or commit.
+ *
+ * Matches these link shapes (case-insensitive on the target):
+ *   [[old-base]]           [[old-base|display]]
+ *   [[old/path]]           [[old/path|display]]
+ *   [[alias]]              [[alias|display]]   (if `aliases` is provided)
+ * Basename/alias links rewrite to the new basename; path links rewrite to the new path.
+ */
+export function updateWikilinks(
+  vaultPath: string,
+  oldPath: string,
+  newPath: string,
+  aliases: string[] = [],
+): string[] {
+  const oldNoExt = oldPath.replace(/\.md$/, "");
+  const newNoExt = newPath.replace(/\.md$/, "");
+  const oldBase = oldNoExt.split("/").pop() ?? oldNoExt;
+  const newBase = newNoExt.split("/").pop() ?? newNoExt;
+
+  // Map lowercased match target → replacement (preserves its own casing)
+  const rewrites = new Map<string, string>();
+  rewrites.set(oldNoExt.toLowerCase(), newNoExt);
+  rewrites.set(oldBase.toLowerCase(), newBase);
+  for (const alias of aliases) {
+    if (alias && typeof alias === "string") rewrites.set(alias.toLowerCase(), newBase);
+  }
+
+  const modified: string[] = [];
+  const files = walkMd(vaultPath);
+  for (const abs of files) {
+    let raw: string;
+    try { raw = readNoteFile(abs); } catch { continue; }
+
+    let changed = false;
+    const updated = raw.replace(WIKILINK_RE, (match, target: string, pipe = "") => {
+      const key = target.trim().toLowerCase();
+      const replacement = rewrites.get(key);
+      if (!replacement || replacement === target) return match;
+      changed = true;
+      return `[[${replacement}${pipe}]]`;
+    });
+
+    if (changed) {
+      writeNoteFile(abs, updated);
+      invalidateFrontmatterCache(abs);
+      modified.push(relative(vaultPath, abs));
+    }
+  }
+
+  return modified;
+}
+
 export async function gitPush(vaultPath: string): Promise<void> {
   const { remote, branch } = await getRemoteAndBranch(vaultPath);
   await exec("git", ["fetch", remote], vaultPath);

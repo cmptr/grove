@@ -14,11 +14,15 @@ import {
   gitLog,
   listNotes,
   gitCommit,
+  gitCommitPaths,
+  gitRm,
+  gitMv,
   qmdReindex,
   gitPush,
   readNoteFile,
   writeNoteFile,
   invalidateFrontmatterCache,
+  updateWikilinks,
 } from "./vault-ops.js";
 import { validatePath, validateNote, parseNote, serializeNote, contentHash } from "./notes-validate.js";
 import { loadVaultConfig } from "./vault-config.js";
@@ -979,6 +983,256 @@ export async function handleWriteNote(
   );
 
   return result;
+}
+
+// ── Delete ─────────────────────────────────────────────────────────
+
+export interface DeleteNoteResult {
+  action: "archived" | "deleted";
+  original_path: string;
+  archive_path?: string;
+  commit: string;
+}
+
+/**
+ * Delete a note. Soft delete (archive) by default — moves the file to the
+ * configured archive_path with `archived_from` / `archived_at` frontmatter
+ * and removes it from the search index. Hard delete (`hard: true`) removes
+ * the file from disk entirely.
+ *
+ * Both variants go through the write queue and produce a single git commit
+ * attributed to the caller. Returns { action, original_path, archive_path?, commit }.
+ */
+export async function handleDeleteNote(
+  notePath: string,
+  options: { hard?: boolean; ifHash?: string; trail?: TrailConfig | null; keyName?: string } = {},
+): Promise<DeleteNoteResult> {
+  // Validate source path
+  let srcAbs: string;
+  try {
+    srcAbs = validatePath(VAULT_PATH, notePath);
+  } catch (err: any) {
+    throw Object.assign(new Error(`Path error: ${err.message}`), { code: "VALIDATION", errors: [err.message] });
+  }
+  const srcRel = relative(VAULT_PATH, srcAbs);
+
+  if (!existsSync(srcAbs)) {
+    throw Object.assign(new Error("Note not found"), { code: "NOT_FOUND" });
+  }
+
+  // Trail scope check — source must be allowed, and for soft delete the
+  // archive destination must also be allowed (otherwise the trail could
+  // write outside its scope by deleting).
+  if (options.trail) {
+    if (!trailAllowsWrite(options.trail, srcRel)) {
+      throw Object.assign(new Error("Delete not allowed: path outside trail scope"), { code: "TRAIL_DENIED" });
+    }
+  }
+
+  // Optimistic concurrency check
+  if (options.ifHash) {
+    const currentRaw = readNoteFile(srcAbs);
+    const currentHash = contentHash(currentRaw);
+    if (currentHash !== options.ifHash) {
+      throw Object.assign(new Error("Conflict: note was modified"), { code: "CONFLICT", currentHash });
+    }
+  }
+
+  const who = options.keyName ? `grove (${options.keyName})` : "grove (api)";
+
+  if (options.hard) {
+    const sha = await writeQueue.enqueue(async () => {
+      await gitRm(VAULT_PATH, srcRel);
+      invalidateFrontmatterCache(srcAbs);
+      const commitSha = await gitCommitPaths(VAULT_PATH, [srcRel], `${who}: delete ${srcRel}`);
+      await qmdReindex(srcRel);
+      refreshStats(VAULT_PATH).catch(() => {});
+      return commitSha;
+    });
+    return { action: "deleted", original_path: srcRel, commit: sha };
+  }
+
+  // Soft delete — compute archive destination and enforce trail scope on it too.
+  const config = loadVaultConfig(VAULT_PATH);
+  const archiveRoot = config.structure.archive_path; // e.g. "Archives/"
+  const archiveRel = `${archiveRoot}${srcRel}`;
+
+  let archiveAbs: string;
+  try {
+    archiveAbs = validatePath(VAULT_PATH, archiveRel);
+  } catch (err: any) {
+    throw Object.assign(new Error(`Archive path error: ${err.message}`), { code: "VALIDATION", errors: [err.message] });
+  }
+
+  if (options.trail && !trailAllowsWrite(options.trail, archiveRel)) {
+    throw Object.assign(
+      new Error(`Archive destination ${archiveRel} outside trail scope — use ?hard=true to delete instead`),
+      { code: "TRAIL_DENIED" },
+    );
+  }
+
+  if (existsSync(archiveAbs)) {
+    throw Object.assign(new Error(`Archive destination already exists: ${archiveRel}`), { code: "CONFLICT" });
+  }
+
+  const sha = await writeQueue.enqueue(async () => {
+    const raw = readNoteFile(srcAbs);
+    const { frontmatter, content } = parseNote(raw);
+    const archivedFm: Record<string, unknown> = {
+      ...frontmatter,
+      archived_from: srcRel,
+      archived_at: new Date().toISOString(),
+    };
+    const serialized = serializeNote(archivedFm, content);
+
+    const archiveDir = dirname(archiveAbs);
+    if (!existsSync(archiveDir)) mkdirSync(archiveDir, { recursive: true });
+    writeNoteFile(archiveAbs, serialized);
+    invalidateFrontmatterCache(archiveAbs);
+
+    // Remove the source via git (stages the deletion)
+    await gitRm(VAULT_PATH, srcRel);
+    invalidateFrontmatterCache(srcAbs);
+
+    const commitSha = await gitCommitPaths(
+      VAULT_PATH,
+      [srcRel, archiveRel],
+      `${who}: archive ${srcRel}`,
+    );
+    await qmdReindex(srcRel);
+    refreshStats(VAULT_PATH).catch(() => {});
+    return commitSha;
+  });
+
+  return { action: "archived", original_path: srcRel, archive_path: archiveRel, commit: sha };
+}
+
+// ── Move ───────────────────────────────────────────────────────────
+
+export interface MoveNoteResult {
+  action: "moved";
+  from: string;
+  to: string;
+  links_updated: number;
+  commit: string;
+  content_hash: string;
+  url: string;
+}
+
+/**
+ * Move or rename a note. Validates both source and destination paths,
+ * refuses to overwrite an existing destination, moves the file via `git mv`,
+ * scans the vault for wikilinks pointing to the old path/basename/aliases
+ * and rewrites them in place. All changes land in a single commit.
+ */
+export async function handleMoveNote(
+  notePath: string,
+  newPath: string,
+  options: { ifHash?: string; trail?: TrailConfig | null; keyName?: string } = {},
+): Promise<MoveNoteResult> {
+  // Validate both paths
+  let srcAbs: string;
+  try {
+    srcAbs = validatePath(VAULT_PATH, notePath);
+  } catch (err: any) {
+    throw Object.assign(new Error(`Source path error: ${err.message}`), { code: "VALIDATION", errors: [err.message] });
+  }
+  let dstAbs: string;
+  try {
+    dstAbs = validatePath(VAULT_PATH, newPath);
+  } catch (err: any) {
+    throw Object.assign(new Error(`Destination path error: ${err.message}`), { code: "VALIDATION", errors: [err.message] });
+  }
+
+  const srcRel = relative(VAULT_PATH, srcAbs);
+  const dstRel = relative(VAULT_PATH, dstAbs);
+
+  if (srcRel === dstRel) {
+    throw Object.assign(new Error("Destination is the same as source"), { code: "VALIDATION", errors: ["source and destination must differ"] });
+  }
+
+  if (!existsSync(srcAbs)) {
+    throw Object.assign(new Error("Source note not found"), { code: "NOT_FOUND" });
+  }
+  if (existsSync(dstAbs)) {
+    throw Object.assign(new Error(`Destination already exists: ${dstRel}`), { code: "CONFLICT" });
+  }
+
+  // Trail scope: must allow both source and destination
+  if (options.trail) {
+    if (!trailAllowsWrite(options.trail, srcRel)) {
+      throw Object.assign(new Error("Move not allowed: source outside trail scope"), { code: "TRAIL_DENIED" });
+    }
+    if (!trailAllowsWrite(options.trail, dstRel)) {
+      throw Object.assign(new Error("Move not allowed: destination outside trail scope"), { code: "TRAIL_DENIED" });
+    }
+  }
+
+  // Optimistic concurrency check (against source)
+  if (options.ifHash) {
+    const currentRaw = readNoteFile(srcAbs);
+    const currentHash = contentHash(currentRaw);
+    if (currentHash !== options.ifHash) {
+      throw Object.assign(new Error("Conflict: note was modified"), { code: "CONFLICT", currentHash });
+    }
+  }
+
+  // Read aliases for wikilink rewriting
+  let aliases: string[] = [];
+  try {
+    const { frontmatter } = parseNote(readNoteFile(srcAbs));
+    if (Array.isArray(frontmatter.aliases)) {
+      aliases = (frontmatter.aliases as unknown[]).filter((a): a is string => typeof a === "string");
+    }
+  } catch {
+    // If we can't read, skip alias rewriting
+  }
+
+  const who = options.keyName ? `grove (${options.keyName})` : "grove (api)";
+
+  const result = await writeQueue.enqueue(async () => {
+    // Ensure destination directory exists (git mv requires it)
+    const dstDir = dirname(dstAbs);
+    if (!existsSync(dstDir)) mkdirSync(dstDir, { recursive: true });
+
+    await gitMv(VAULT_PATH, srcRel, dstRel);
+    invalidateFrontmatterCache(srcAbs);
+    invalidateFrontmatterCache(dstAbs);
+
+    const modified = updateWikilinks(VAULT_PATH, srcRel, dstRel, aliases);
+
+    const paths = [srcRel, dstRel, ...modified];
+    const commitSha = await gitCommitPaths(
+      VAULT_PATH,
+      paths,
+      `${who}: move ${srcRel} → ${dstRel}`,
+    );
+
+    await qmdReindex(dstRel);
+    refreshStats(VAULT_PATH).catch(() => {});
+
+    const finalRaw = readNoteFile(dstAbs);
+    return {
+      commit: commitSha,
+      links_updated: modified.length,
+      content_hash: contentHash(finalRaw),
+    };
+  });
+
+  // Fire-and-forget: re-embed the moved note
+  embedFile(VAULT_PATH, dstRel).catch((err) =>
+    console.error(`[grove] embed-single failed for ${dstRel}:`, err.message),
+  );
+
+  return {
+    action: "moved",
+    from: srcRel,
+    to: dstRel,
+    links_updated: result.links_updated,
+    commit: result.commit,
+    content_hash: result.content_hash,
+    url: noteUrl(dstRel),
+  };
 }
 
 // ── Image upload ───────────────────────────────────────────────────

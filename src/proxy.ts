@@ -47,6 +47,7 @@ import { metrics, searchMetrics } from "./metrics.js";
 import { resolveTrail, loadTrails, createTrail, updateTrail, disableTrail, deleteTrail, type TrailConfig } from "./trails.js";
 import {
   handleGetNote, handleSearch, handleListNotes, handleStats, handleWriteNote,
+  handleDeleteNote, handleMoveNote,
   handleStatusHealth, handleStatusHistory, handleStatusDiagnostics,
   handleStatusGraph, handleStatusDigest, handleTrailInfo,
   handleTrailPreview, handleTrailPreviewTest,
@@ -1412,8 +1413,8 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // Rate limit (REST bucket — write bucket for PUT/POST/DELETE, read bucket otherwise)
-    const restRateBucket = (req.method === "PUT" || req.method === "POST" || req.method === "DELETE")
+    // Rate limit (REST bucket — write bucket for PUT/POST/DELETE/PATCH, read bucket otherwise)
+    const restRateBucket = (req.method === "PUT" || req.method === "POST" || req.method === "DELETE" || req.method === "PATCH")
       ? "write" as const
       : "read" as const;
     const restRateResult = rateLimiter.check(restKey.id, restRateBucket);
@@ -1534,6 +1535,117 @@ const server = createServer(async (req, res) => {
           res.end(JSON.stringify({ error: err.message, errors: err.errors }));
         } else {
           console.error("[rest] put_note error:", err);
+          res.writeHead(500, restHeaders);
+          res.end(JSON.stringify({ error: "internal error" }));
+        }
+      }
+      return;
+    }
+
+    // DELETE /v1/notes/* — soft delete (archive) by default, hard delete with ?hard=true
+    if (url.pathname.startsWith("/v1/notes/") && req.method === "DELETE") {
+      const notePath = decodeURIComponent(url.pathname.slice("/v1/notes/".length));
+      if (!notePath || notePath.includes("..")) {
+        res.writeHead(400, restHeaders);
+        res.end(JSON.stringify({ error: "invalid path" }));
+        return;
+      }
+
+      const hard = url.searchParams.get("hard") === "true";
+      const ifMatchRaw = req.headers["if-match"];
+      const ifMatch = typeof ifMatchRaw === "string" ? ifMatchRaw.replace(/^"|"$/g, "") : undefined;
+
+      structuredLog("info", "rest.delete_note", rid, { key_id: restKey.id, key_name: restKey.name, path: notePath, hard });
+      try {
+        const result = await handleDeleteNote(notePath, {
+          hard,
+          ifHash: ifMatch,
+          trail: restTrail,
+          keyName: restKey.name,
+        });
+        res.writeHead(200, restHeaders);
+        res.end(JSON.stringify(result));
+      } catch (err: any) {
+        if (err.code === "NOT_FOUND") {
+          res.writeHead(404, restHeaders);
+          res.end(JSON.stringify({ error: err.message }));
+        } else if (err.code === "TRAIL_DENIED") {
+          res.writeHead(403, restHeaders);
+          res.end(JSON.stringify({ error: err.message }));
+        } else if (err.code === "CONFLICT") {
+          res.writeHead(409, restHeaders);
+          res.end(JSON.stringify({ error: err.message, current_hash: err.currentHash }));
+        } else if (err.code === "VALIDATION") {
+          res.writeHead(400, restHeaders);
+          res.end(JSON.stringify({ error: err.message, errors: err.errors }));
+        } else {
+          console.error("[rest] delete_note error:", err);
+          res.writeHead(500, restHeaders);
+          res.end(JSON.stringify({ error: "internal error" }));
+        }
+      }
+      return;
+    }
+
+    // PATCH /v1/notes/* — currently only supports { move_to: <new-path> }
+    if (url.pathname.startsWith("/v1/notes/") && req.method === "PATCH") {
+      const notePath = decodeURIComponent(url.pathname.slice("/v1/notes/".length));
+      if (!notePath || notePath.includes("..")) {
+        res.writeHead(400, restHeaders);
+        res.end(JSON.stringify({ error: "invalid path" }));
+        return;
+      }
+
+      let body: string;
+      try { body = await readBody(req); } catch (err: unknown) {
+        if ((err as Error).message === "payload too large") {
+          res.writeHead(413, restHeaders);
+          res.end(JSON.stringify({ error: "payload too large" }));
+          return;
+        }
+        res.writeHead(400, restHeaders);
+        res.end(JSON.stringify({ error: "read error" }));
+        return;
+      }
+      let parsed: { move_to?: string };
+      try { parsed = JSON.parse(body); } catch {
+        res.writeHead(400, restHeaders);
+        res.end(JSON.stringify({ error: "invalid json" }));
+        return;
+      }
+      if (typeof parsed.move_to !== "string" || !parsed.move_to) {
+        res.writeHead(400, restHeaders);
+        res.end(JSON.stringify({ error: "body must have move_to (string)" }));
+        return;
+      }
+
+      const ifMatchRaw = req.headers["if-match"];
+      const ifMatch = typeof ifMatchRaw === "string" ? ifMatchRaw.replace(/^"|"$/g, "") : undefined;
+
+      structuredLog("info", "rest.move_note", rid, { key_id: restKey.id, key_name: restKey.name, from: notePath, to: parsed.move_to });
+      try {
+        const result = await handleMoveNote(notePath, parsed.move_to, {
+          ifHash: ifMatch,
+          trail: restTrail,
+          keyName: restKey.name,
+        });
+        res.writeHead(200, { ...restHeaders, "ETag": `"${result.content_hash}"` });
+        res.end(JSON.stringify(result));
+      } catch (err: any) {
+        if (err.code === "NOT_FOUND") {
+          res.writeHead(404, restHeaders);
+          res.end(JSON.stringify({ error: err.message }));
+        } else if (err.code === "TRAIL_DENIED") {
+          res.writeHead(403, restHeaders);
+          res.end(JSON.stringify({ error: err.message }));
+        } else if (err.code === "CONFLICT") {
+          res.writeHead(409, restHeaders);
+          res.end(JSON.stringify({ error: err.message, current_hash: err.currentHash }));
+        } else if (err.code === "VALIDATION") {
+          res.writeHead(400, restHeaders);
+          res.end(JSON.stringify({ error: err.message, errors: err.errors }));
+        } else {
+          console.error("[rest] move_note error:", err);
           res.writeHead(500, restHeaders);
           res.end(JSON.stringify({ error: "internal error" }));
         }
