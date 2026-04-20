@@ -90,15 +90,53 @@ export function decryptVaultKey(
   }
 }
 
-export function encryptContent(plaintext: string, vaultKey: Buffer): Buffer {
+export function encryptContentBinary(plaintext: string, vaultKey: Buffer): Buffer {
   return sealWithKey(Buffer.from(plaintext, "utf-8"), vaultKey);
 }
 
-export function decryptContent(ciphertext: Buffer, vaultKey: Buffer): string {
+export function decryptContentBinary(ciphertext: Buffer, vaultKey: Buffer): string {
   try {
     return openWithKey(ciphertext, vaultKey).toString("utf-8");
   } catch {
     throw new Error("decryption_failed");
+  }
+}
+
+/** Encrypt plaintext to Grove text-ciphertext format (header + base64). */
+export function encryptContent(plaintext: string, vaultKey: Buffer): string {
+  const iv = randomBytes(IV_LEN);
+  const cipher = createCipheriv("aes-256-gcm", vaultKey, iv);
+  const body = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  const blob = Buffer.concat([iv, tag, body]).toString("base64");
+  return `${ENCRYPTION_HEADER}\n${blob}\n`;
+}
+
+/** Decrypt a Grove-encrypted file back to plaintext. Throws on wrong key. */
+export function decryptContent(ciphertext: string, vaultKey: Buffer): string {
+  if (!isEncrypted(ciphertext)) {
+    throw new DecryptError("content is not Grove-encrypted");
+  }
+  const blob = ciphertext.slice(ENCRYPTION_HEADER.length).trim();
+  let packed: Buffer;
+  try {
+    packed = Buffer.from(blob, "base64");
+  } catch {
+    throw new DecryptError("malformed ciphertext");
+  }
+  if (packed.length < IV_LEN + TAG_LEN) {
+    throw new DecryptError("ciphertext too short");
+  }
+  const iv = packed.subarray(0, IV_LEN);
+  const tag = packed.subarray(IV_LEN, IV_LEN + TAG_LEN);
+  const body = packed.subarray(IV_LEN + TAG_LEN);
+  const decipher = createDecipheriv("aes-256-gcm", vaultKey, iv);
+  decipher.setAuthTag(tag);
+  try {
+    const out = Buffer.concat([decipher.update(body), decipher.final()]);
+    return out.toString("utf8");
+  } catch {
+    throw new DecryptError();
   }
 }
 
@@ -282,4 +320,58 @@ export function changePassphrase(
   updateVaultKey(vaultId, encrypted, salt);
   cacheVaultKey(vaultId, vaultKey);
   return true;
+}
+
+// ── Transparent encryption layer (P12-3) ────────────────────────────
+// Text-based format for vault files — git diffs stay readable as
+// "blob of ciphertext changed" rather than opaque binary.
+
+/** Text header that identifies a Grove-encrypted file. */
+export const ENCRYPTION_HEADER = "-----GROVE-ENCRYPTED-v1-----";
+
+export class VaultLockedError extends Error {
+  code = "VAULT_LOCKED";
+  constructor(message = "Vault is encrypted and locked") {
+    super(message);
+    this.name = "VaultLockedError";
+  }
+}
+
+export class DecryptError extends Error {
+  code = "DECRYPT_FAILED";
+  constructor(message = "Decryption failed (wrong key or corrupted data)") {
+    super(message);
+    this.name = "DecryptError";
+  }
+}
+
+/** Quick check: does this string look like a Grove-encrypted file? */
+export function isEncrypted(content: string): boolean {
+  return content.startsWith(ENCRYPTION_HEADER);
+}
+
+// ── Vault key registry (by path) ────────────────────────────────────
+// Holds decrypted per-vault keys in memory, keyed by vault path.
+// Supplements the ID-based cache above — vault-ops uses paths.
+
+const keyRegistry = new Map<string, Buffer>();
+
+export function setVaultKey(vaultPath: string, key: Buffer): void {
+  if (key.length !== KEY_LEN) throw new Error(`vault key must be ${KEY_LEN} bytes`);
+  keyRegistry.set(vaultPath, Buffer.from(key));
+}
+
+export function getVaultKey(vaultPath: string): Buffer | null {
+  return keyRegistry.get(vaultPath) ?? null;
+}
+
+export function clearVaultKey(vaultPath: string): void {
+  const existing = keyRegistry.get(vaultPath);
+  if (existing) existing.fill(0);
+  keyRegistry.delete(vaultPath);
+}
+
+export function clearAllVaultKeys(): void {
+  for (const key of keyRegistry.values()) key.fill(0);
+  keyRegistry.clear();
 }
