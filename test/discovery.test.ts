@@ -94,11 +94,11 @@ describe("discovery queue (db helpers)", () => {
     expect(discoveryQueueDepth()).toBe(2);
   });
 
-  it("trigger constraint rejects invalid values", () => {
-    const db = getDb();
-    expect(() => {
-      db.prepare("INSERT INTO discovery_queue (path, trigger) VALUES (?, ?)").run("x.md", "bogus");
-    }).toThrow();
+  it("accepts the embed_retry trigger for re-embed workflow", () => {
+    enqueueDiscovery("x.md", "embed_retry");
+    const entry = dequeueDiscovery();
+    expect(entry?.trigger).toBe("embed_retry");
+    expect(entry?.attempts).toBe(1);
   });
 });
 

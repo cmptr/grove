@@ -976,10 +976,21 @@ export async function handleWriteNote(
     console.error(`[grove] discovery enqueue failed for ${result.path}:`, (err as Error).message);
   }
 
-  // Fire-and-forget: re-embed the changed file
-  embedFile(VAULT_PATH, result.path).catch((err) =>
-    console.error(`[grove] embed-single failed for ${result.path}:`, err.message),
-  );
+  // Fire-and-forget: re-embed the changed file. If it fails (network,
+  // Voyage API down, rate limit, etc.) enqueue an embed_retry so the
+  // discovery worker picks it up and retries with the ordinary poll
+  // cadence. Stays silent on success; logs + retries on failure.
+  embedFile(VAULT_PATH, result.path).catch((err) => {
+    console.error(`[grove] embed-single failed for ${result.path}:`, err.message);
+    try {
+      enqueueDiscovery(result.path, "embed_retry");
+    } catch (enqueueErr) {
+      console.error(
+        `[grove] embed_retry enqueue failed for ${result.path}:`,
+        (enqueueErr as Error).message,
+      );
+    }
+  });
 
   return result;
 }
@@ -1223,10 +1234,18 @@ export async function handleMoveNote(
     };
   });
 
-  // Fire-and-forget: re-embed the moved note
-  embedFile(VAULT_PATH, dstRel).catch((err) =>
-    console.error(`[grove] embed-single failed for ${dstRel}:`, err.message),
-  );
+  // Fire-and-forget: re-embed the moved note. Retry via discovery queue on failure.
+  embedFile(VAULT_PATH, dstRel).catch((err) => {
+    console.error(`[grove] embed-single failed for ${dstRel}:`, err.message);
+    try {
+      enqueueDiscovery(dstRel, "embed_retry");
+    } catch (enqueueErr) {
+      console.error(
+        `[grove] embed_retry enqueue failed for ${dstRel}:`,
+        (enqueueErr as Error).message,
+      );
+    }
+  });
 
   return {
     action: "moved",

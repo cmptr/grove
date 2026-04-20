@@ -158,10 +158,11 @@ CREATE TABLE IF NOT EXISTS shared_links (
 CREATE TABLE IF NOT EXISTS discovery_queue (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   path TEXT NOT NULL,
-  trigger TEXT NOT NULL CHECK(trigger IN ('commit', 'write', 'ingest')),
+  trigger TEXT NOT NULL,
   queued_at TEXT NOT NULL DEFAULT (datetime('now')),
   processed_at TEXT,
   status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'processing', 'done', 'error')),
+  attempts INTEGER NOT NULL DEFAULT 0,
   error_message TEXT
 );
 
@@ -218,6 +219,48 @@ export function createSchema(): void {
   database.exec(SCHEMA);
   migrateUserRoles(database);
   migrateUserDisplayName(database);
+  migrateDiscoveryQueue(database);
+}
+
+/**
+ * Drop the trigger CHECK constraint and add an `attempts` column on the
+ * discovery_queue. SQLite can't modify a CHECK constraint in place — we
+ * detect either condition via PRAGMA + sql inspection and rebuild the
+ * table when needed. Idempotent.
+ */
+function migrateDiscoveryQueue(database: Database.Database): void {
+  const cols = database
+    .prepare("PRAGMA table_info(discovery_queue)")
+    .all() as { name: string }[];
+  const hasAttempts = cols.some((c) => c.name === "attempts");
+
+  const tableSql = database
+    .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='discovery_queue'")
+    .get() as { sql: string } | undefined;
+  const hasTriggerCheck = tableSql?.sql.includes("CHECK(trigger IN") ?? false;
+
+  if (hasAttempts && !hasTriggerCheck) return;
+
+  const tx = database.transaction(() => {
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS discovery_queue_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        path TEXT NOT NULL,
+        trigger TEXT NOT NULL,
+        queued_at TEXT NOT NULL DEFAULT (datetime('now')),
+        processed_at TEXT,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'processing', 'done', 'error')),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        error_message TEXT
+      );
+      INSERT INTO discovery_queue_new (id, path, trigger, queued_at, processed_at, status, error_message)
+        SELECT id, path, trigger, queued_at, processed_at, status, error_message FROM discovery_queue;
+      DROP TABLE discovery_queue;
+      ALTER TABLE discovery_queue_new RENAME TO discovery_queue;
+      CREATE INDEX IF NOT EXISTS idx_discovery_queue_status ON discovery_queue(status, queued_at);
+    `);
+  });
+  tx();
 }
 
 /** Add role column to existing users tables that lack it. */
@@ -386,20 +429,23 @@ export function runMigration(): void {
 
 // ── Discovery queue helpers ───────────────────────────────────────
 
+export type DiscoveryTrigger = "commit" | "write" | "ingest" | "embed_retry";
+
 export interface DiscoveryQueueEntry {
   id: number;
   path: string;
-  trigger: "commit" | "write" | "ingest";
+  trigger: DiscoveryTrigger;
   queued_at: string;
   processed_at: string | null;
   status: "pending" | "processing" | "done" | "error";
+  attempts: number;
   error_message: string | null;
 }
 
 /** Enqueue a path for discovery processing. */
 export function enqueueDiscovery(
   path: string,
-  trigger: "commit" | "write" | "ingest",
+  trigger: DiscoveryTrigger,
 ): void {
   const database = getDb();
   database
@@ -415,7 +461,7 @@ export function dequeueDiscovery(): DiscoveryQueueEntry | null {
   const row = database
     .prepare(
       `UPDATE discovery_queue
-         SET status = 'processing'
+         SET status = 'processing', attempts = attempts + 1
        WHERE id = (
          SELECT id FROM discovery_queue
          WHERE status = 'pending'
@@ -446,6 +492,21 @@ export function markDiscoveryError(id: number, message: string): void {
       "UPDATE discovery_queue SET status = 'error', processed_at = datetime('now'), error_message = ? WHERE id = ?",
     )
     .run(message, id);
+}
+
+/**
+ * Requeue an errored entry as pending again for a retry. Used by the
+ * embed-retry path when a transient failure (network, Voyage API down)
+ * merits another attempt. Returns true if the row was found.
+ */
+export function requeueDiscovery(id: number): boolean {
+  const database = getDb();
+  const result = database
+    .prepare(
+      "UPDATE discovery_queue SET status = 'pending', processed_at = NULL, error_message = NULL WHERE id = ?",
+    )
+    .run(id);
+  return result.changes > 0;
 }
 
 /** Count pending entries in the queue. */

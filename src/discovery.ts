@@ -20,8 +20,11 @@ import {
 } from "./db.js";
 import { extractFromNote } from "./discovery-extract.js";
 import { wireLinks } from "./discovery-link.js";
+import { embedFile } from "./embed-single.js";
 
 const DEFAULT_POLL_MS = 2_000;
+/** Max attempts before an embed_retry entry is abandoned as errored. */
+const MAX_EMBED_RETRY_ATTEMPTS = 5;
 
 export type Processor = (entry: DiscoveryQueueEntry) => Promise<void>;
 
@@ -32,6 +35,21 @@ function getVaultPath(): string {
 /** Default processor — extracts entities and wires wikilinks. */
 const defaultProcessor: Processor = async (entry) => {
   const vaultPath = getVaultPath();
+
+  // Embed-retry entries skip entity extraction; they just re-run the
+  // embed step for a note whose fire-and-forget embed failed earlier.
+  if (entry.trigger === "embed_retry") {
+    if (entry.attempts > MAX_EMBED_RETRY_ATTEMPTS) {
+      throw new Error(
+        `embed retry abandoned after ${entry.attempts} attempts for ${entry.path}`,
+      );
+    }
+    console.log(`[discovery] embed retry (attempt ${entry.attempts}) for ${entry.path}`);
+    await embedFile(vaultPath, entry.path);
+    console.log(`[discovery] embed retry succeeded for ${entry.path}`);
+    return;
+  }
+
   console.log(`[discovery] processing ${entry.path}`);
 
   // Extract entities via Claude API
