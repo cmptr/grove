@@ -1379,20 +1379,21 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // GET /v1/list?prefix=... — list notes under a path prefix
+    // GET /v1/list?prefix=&type=... — list notes under a path prefix, optionally filtered by frontmatter type
     if (url.pathname === "/v1/list" && req.method === "GET") {
       const prefix = url.searchParams.get("prefix") ?? "";
+      const type = url.searchParams.get("type");
       if (prefix.includes("..")) {
         res.writeHead(400, restHeaders);
         res.end(JSON.stringify({ error: "invalid prefix" }));
         return;
       }
 
-      structuredLog("info", "rest.list", rid, { key_id: restKey.id, key_name: restKey.name, prefix });
+      structuredLog("info", "rest.list", rid, { key_id: restKey.id, key_name: restKey.name, prefix, type: type ?? undefined });
       try {
-        const entries = handleListNotes(prefix, restTrail);
+        const entries = handleListNotes(prefix, restTrail, type);
         res.writeHead(200, restHeaders);
-        res.end(JSON.stringify({ prefix, entries }));
+        res.end(JSON.stringify({ prefix, type: type ?? null, entries }));
       } catch (err) {
         console.error("[rest] list error:", err);
         res.writeHead(500, restHeaders);
