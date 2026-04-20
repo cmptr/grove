@@ -539,7 +539,7 @@ Claude.ai → proxy.ts (auth/OAuth/CORS/logging) → Grove MCP server (all 6 too
 
 **Goal:** Automated test feedback on PRs and safe process restarts. Two tasks, one agent.
 
-- [ ] **P4-PREREQ-1: GitHub Actions CI** (`.github/workflows/ci.yml`)
+- [x] **P4-PREREQ-1: GitHub Actions CI** (`.github/workflows/ci.yml`)
 
   Agents need automated feedback on PRs. Deploy stays manual — the VPS runs the owner's live knowledge API, so deploys should be a human decision.
 
@@ -595,7 +595,7 @@ Claude.ai → proxy.ts (auth/OAuth/CORS/logging) → Grove MCP server (all 6 too
   - Deploy is manual: click "Run workflow" in GitHub Actions, or SSH as before
   - Failed tests block PR merge (branch protection recommended but not required)
 
-- [ ] **P4-PREREQ-2: Graceful shutdown + operational hardening** (`src/proxy.ts`, `src/server.ts`)
+- [x] **P4-PREREQ-2: Graceful shutdown + operational hardening** (`src/proxy.ts`, `src/server.ts`)
 
   Currently neither process handles SIGTERM. PM2 restart kills in-flight writes.
 
@@ -652,7 +652,7 @@ Implementation splits into two batches: backend API additions (grove repo), then
 
 All new admin endpoints go behind `adminAuth()` in `src/proxy.ts`. They use cookie (session) or Bearer auth, same as `/keys`. Agents use worktrees to avoid merge conflicts in proxy.ts.
 
-- [ ] **P4-API-1: Trail CRUD HTTP endpoints**
+- [x] **P4-API-1: Trail CRUD HTTP endpoints**
 
   Add to `src/proxy.ts`, after the `/keys` handler. Import `loadTrails`, `createTrail`, `disableTrail`, `deleteTrail` from `./trails.js`.
 
@@ -678,7 +678,7 @@ All new admin endpoints go behind `adminAuth()` in `src/proxy.ts`. They use cook
   **Files:** `src/proxy.ts` (new route), `src/trails.ts` (add `updateTrail`)
   **Tests:** `test/trails.test.ts` — add updateTrail unit test
 
-- [ ] **P4-API-2: User list endpoint + fix last_login_at**
+- [x] **P4-API-2: User list endpoint + fix last_login_at**
 
   **`GET /v1/admin/users`** — returns all users. Requires `adminAuth()`.
   ```
@@ -689,7 +689,7 @@ All new admin endpoints go behind `adminAuth()` in `src/proxy.ts`. They use cook
 
   **Files:** `src/proxy.ts` (new route), `src/auth.ts` (fix createSession)
 
-- [ ] **P4-API-3: Fix /keys list + /metrics improvements**
+- [x] **P4-API-3: Fix /keys list + /metrics improvements**
 
   1. Add `expires_at` to the `/keys` list response. In `src/proxy.ts`, the list action's SELECT already fetches `*` but the response mapping omits `expires_at`. Add it.
 
@@ -703,7 +703,7 @@ All new admin endpoints go behind `adminAuth()` in `src/proxy.ts`. They use cook
 
   **Files:** `src/proxy.ts` (3 small changes), possibly `src/metrics.ts` (export searchMetrics)
 
-- [ ] **P4-API-4: Add git status to vault stats**
+- [x] **P4-API-4: Add git status to vault stats**
 
   Add a `git` section to `VaultStats` in `src/vault-stats.ts`. Compute during `computeVaultStats()`:
   ```ts
@@ -742,7 +742,7 @@ All dashboard pages live under `src/app/dashboard/`. Each is a server component 
 - Auth: `const cookieStore = await cookies(); const apiKey = getApiKey(cookieStore);` then redirect if null.
 - Data fetching: server components call functions in `src/lib/grove-api.ts` which hit `api.grove.md` with Bearer auth. Client-side data goes through `/api/` proxy routes.
 
-- [ ] **P4-FE-0: Dashboard layout + API proxy routes**
+- [x] **P4-FE-0: Dashboard layout + API proxy routes**
 
   **`src/app/dashboard/layout.tsx`** — server component. Auth check (redirect to `/login` if no cookie). Renders a sub-navigation bar below the main header with tabs: Overview, Keys, Trails, Usage.
 
@@ -779,7 +779,7 @@ All dashboard pages live under `src/app/dashboard/`. Each is a server component 
   - Unauthenticated users redirect to `/login?redirect=/dashboard`
   - Dashboard link visible in header on all app pages
 
-- [ ] **P4-7: Vault health panel (dashboard overview)**
+- [x] **P4-7: Vault health panel (dashboard overview)**
 
   **Route:** `src/app/dashboard/page.tsx` (the default dashboard page)
 
@@ -801,7 +801,7 @@ All dashboard pages live under `src/app/dashboard/`. Each is a server component 
   - Lifecycle bar renders proportionally
   - Git section shows last commit info
 
-- [ ] **P4-4: Key management page**
+- [x] **P4-4: Key management page**
 
   **Route:** `src/app/dashboard/keys/page.tsx`
 
@@ -824,7 +824,7 @@ All dashboard pages live under `src/app/dashboard/`. Each is a server component 
   - Revoke key → confirm → key disappears from table
   - Empty state: "No API keys. Create one to get started."
 
-- [ ] **P4-5: Trail management page**
+- [x] **P4-5: Trail management page**
 
   **Route:** `src/app/dashboard/trails/page.tsx`
 
@@ -851,7 +851,7 @@ All dashboard pages live under `src/app/dashboard/`. Each is a server component 
   - Delete trail → confirm → trail removed
   - Empty state: "No trails. Create one to share your knowledge."
 
-- [ ] **P4-6: Usage dashboard**
+- [x] **P4-6: Usage dashboard**
 
   **Route:** `src/app/dashboard/usage/page.tsx`
 
@@ -975,15 +975,15 @@ Each creates separate pages/components — no file overlap. Merge all, deploy to
 
 #### Phase 4 Acceptance Criteria
 
-- [ ] `/dashboard` loads with sub-nav (Overview, Keys, Trails, Usage)
-- [ ] Overview page shows vault stats, lifecycle bar, git status, system health
-- [ ] Keys page lists all keys, create shows token once, revoke confirms and removes
-- [ ] Trails page lists all trails with config, create shows consumer token, enable/disable works
-- [ ] Usage page shows request counts, error rate, latency percentiles per tool
-- [ ] `/trails/<id>` loads without auth, shows trail info and MCP config
-- [ ] All pages follow the design system (cream/ink/moss, Lora headings, opacity grammar)
-- [ ] Unauthenticated dashboard access redirects to `/login?redirect=/dashboard`
-- [ ] All data refreshes on page load (no stale cache issues)
+- [x] `/dashboard` loads with sub-nav (Overview, Keys, Trails, Usage)
+- [x] Overview page shows vault stats, lifecycle bar, git status, system health
+- [x] Keys page lists all keys, create shows token once, revoke confirms and removes
+- [x] Trails page lists all trails with config, create shows consumer token, enable/disable works
+- [x] Usage page shows request counts, error rate, latency percentiles per tool
+- [x] `/trails/<id>` loads without auth, shows trail info and MCP config
+- [x] All pages follow the design system (cream/ink/moss, Lora headings, opacity grammar)
+- [x] Unauthenticated dashboard access redirects to `/login?redirect=/dashboard`
+- [x] All data refreshes on page load (no stale cache issues)
 
 ---
 
@@ -1084,7 +1084,7 @@ On MCP `initialize`, if the session is trail-scoped, return trail metadata (name
 
 The trail filtering system works, but only 15% of notes have tags. Rather than adding an LLM judge layer, invest in better classification coverage so the existing deterministic filter catches everything.
 
-- [ ] **P5-TAG-1: Auto-tagging on write** (`src/notes-validate.ts`, `src/server.ts`)
+- [x] **P5-TAG-1: Auto-tagging on write** (`src/notes-validate.ts`, `src/server.ts`)
 
   When `write_note` creates or updates a note, infer tags from the note's path and type if none are provided. Rules:
   - `Journal/*` → add `#journal`
@@ -1104,7 +1104,7 @@ The trail filtering system works, but only 15% of notes have tags. Rather than a
   - A note written with explicit tags keeps them; inferred tags are added, not replaced
   - Trail filtering accuracy improves (re-run P5-8 eval suite)
 
-- [ ] **P5-TAG-2: Backfill existing notes** (`src/cli.ts`)
+- [x] **P5-TAG-2: Backfill existing notes** (`src/cli.ts`)
 
   `grove tag-backfill` — reads all notes, applies `inferTags()` to notes with zero tags, writes back via `write_note`. Creates a snapshot before starting.
 
@@ -1175,7 +1175,7 @@ REST (stateless HTTP)  ←── CLI, grove-www, scripts, curl, webhooks
 MCP (stateful session) ←── Claude.ai, Claude Code, MCP clients
 ```
 
-- [ ] **REST-1: Extract `handleWriteNote` service function** (`src/rest.ts` or `src/vault-write.ts`)
+- [x] **REST-1: Extract `handleWriteNote` service function** (`src/rest.ts` or `src/vault-write.ts`)
 
   Move the write logic from server.ts's `write_note` tool handler into a shared function:
   ```typescript
@@ -1195,7 +1195,7 @@ MCP (stateful session) ←── Claude.ai, Claude Code, MCP clients
   - MCP `write_note` behavior unchanged
   - `handleWriteNote` is independently callable with the same validation, write queue, git commit, and reindex behavior
 
-- [ ] **REST-2: `PUT /v1/notes/:path` write endpoint** (`src/proxy.ts`)
+- [x] **REST-2: `PUT /v1/notes/:path` write endpoint** (`src/proxy.ts`)
 
   ```
   PUT /v1/notes/Resources/Concepts/context-engineering.md
@@ -1234,7 +1234,7 @@ MCP (stateful session) ←── Claude.ai, Claude Code, MCP clients
   - Write queue serialization preserved (concurrent PUTs don't corrupt)
   - If-Match with wrong hash returns 409 with current hash in response
 
-- [ ] **REST-3: `GET /v1/status/:mode` endpoints** (`src/proxy.ts`)
+- [x] **REST-3: `GET /v1/status/:mode` endpoints** (`src/proxy.ts`)
 
   Expose all vault_status modes via REST:
   ```
@@ -1249,7 +1249,7 @@ MCP (stateful session) ←── Claude.ai, Claude Code, MCP clients
 
   **Files:** `src/proxy.ts` (new routes), `src/rest.ts` (reuse existing vault-status functions)
 
-- [ ] **REST-4: Migrate CLI from MCP to REST** (`src/cli.ts`)
+- [x] **REST-4: Migrate CLI from MCP to REST** (`src/cli.ts`)
 
   Replace the MCP handshake (`initialize` → session → `callTool`) with direct HTTP calls:
   - `grove search "X"` → `GET /v1/search?q=X&limit=10`
@@ -1293,7 +1293,7 @@ claude --worktree "Read PLAN.md task REST-3. Add GET /v1/status/:mode endpoints 
 
 These make the CLI agent-usable. Do first. REST-1 through REST-3 should land before or alongside CLI-A (CLI-A4's migration depends on REST endpoints existing).
 
-- [ ] **CLI-A1: `--json` global flag** (`src/cli.ts`)
+- [x] **CLI-A1: `--json` global flag** (`src/cli.ts`)
 
   Add `--json` to `parseArgs` as a top-level boolean. Each command function returns a result object instead of calling `console.log`. The dispatcher handles formatting: if `--json`, emit the result as JSON to stdout; otherwise, call the existing human formatter.
 
@@ -1309,7 +1309,7 @@ These make the CLI agent-usable. Do first. REST-1 through REST-3 should land bef
   - `grove search "test" | cat` emits JSON (non-TTY auto-detection)
   - Human-formatted output unchanged when no `--json` and stdout is TTY
 
-- [ ] **CLI-A2: Exit codes + structured errors**
+- [x] **CLI-A2: Exit codes + structured errors**
 
   Replace all `process.exit(1)` calls with thrown `CliError`:
   ```typescript
@@ -1329,7 +1329,7 @@ These make the CLI agent-usable. Do first. REST-1 through REST-3 should land bef
   - `grove search "test"` with invalid token exits 2
   - Connection refused exits 3
 
-- [ ] **CLI-A3: `--content` flag on write**
+- [x] **CLI-A3: `--content` flag on write**
 
   `grove write path.md --type concept --content "The actual content"` — alternative to stdin. If neither stdin nor `--content` is provided and stdin is a TTY, error immediately with usage hint instead of hanging.
 
@@ -1338,7 +1338,7 @@ These make the CLI agent-usable. Do first. REST-1 through REST-3 should land bef
   - `grove write path.md --content "text" --type concept` creates the note
   - `grove write path.md --type concept` with no pipe and TTY stdin exits 1 with "Provide content via --content flag or pipe to stdin"
 
-- [ ] **CLI-A4: `grove init`**
+- [x] **CLI-A4: `grove init`**
 
   Guided non-interactive config setup:
   `grove init --server https://api.grove.md --token grove_live_xxx`
@@ -1350,7 +1350,7 @@ These make the CLI agent-usable. Do first. REST-1 through REST-3 should land bef
   - `grove init --server X --token Y` creates config file and prints "Connected to X as <key-name>"
   - `GROVE_TOKEN=xxx grove search "test"` works without a config file
 
-- [ ] **CLI-A5: Promote `graph` and `digest` to top-level commands**
+- [x] **CLI-A5: Promote `graph` and `digest` to top-level commands**
 
   `grove graph` → calls `vault_status(mode: "graph")`. Shows clusters, hubs, centrality.
   `grove digest` → calls `vault_status(mode: "digest")`. Shows lifecycle stages.
@@ -1362,7 +1362,7 @@ These make the CLI agent-usable. Do first. REST-1 through REST-3 should land bef
   - `grove graph --json` returns `{ nodes, edges, clusters, top_hubs }`
   - `grove digest --json` returns `{ lifecycle: { seeds, sprouts, ... }, velocity_7d }`
 
-- [ ] **CLI-A6: `grove health` + `grove metrics`**
+- [x] **CLI-A6: `grove health` + `grove metrics`**
 
   `grove health` — HTTP GET `/health`, formats component status.
   `grove metrics` — HTTP GET `/metrics`, formats request counts and latency.
@@ -1372,7 +1372,7 @@ These make the CLI agent-usable. Do first. REST-1 through REST-3 should land bef
   - `grove health --json` returns `{ ok: true, components: { proxy, server, qmd, embeddings } }`
   - `grove metrics --json` returns request counts, p50/p95/p99, error rates
 
-- [ ] **CLI-A7: Help text with output schemas**
+- [x] **CLI-A7: Help text with output schemas**
 
   Each command's `--help` shows: usage, examples, flags, JSON output schema, exit codes. Top-level `grove` (no args) shows grouped command listing with one-line descriptions.
 
@@ -1387,7 +1387,7 @@ These make the CLI agent-usable. Do first. REST-1 through REST-3 should land bef
 
 #### CLI-B: Consistency + Composability (after P4-API-1)
 
-- [ ] **CLI-B1: Move trails to HTTP**
+- [x] **CLI-B1: Move trails to HTTP**
 
   Replace direct SQLite imports (`loadTrails`, `createTrail`, etc.) with HTTP calls to `POST /v1/admin/trails` (matching the `/keys` pattern). Enables running `grove trails` from any machine, not just the server.
 
@@ -1397,7 +1397,7 @@ These make the CLI agent-usable. Do first. REST-1 through REST-3 should land bef
   - All trail subcommands (list, create, disable, delete) use HTTP
   - `grove trails delete <id>` requires `--yes` flag
 
-- [ ] **CLI-B2: `--paths` flag on search/list**
+- [x] **CLI-B2: `--paths` flag on search/list**
 
   Emit one path per line, nothing else. For `xargs` composability.
 
@@ -1407,7 +1407,7 @@ These make the CLI agent-usable. Do first. REST-1 through REST-3 should land bef
 
   **Files:** `src/cli.ts`
 
-- [ ] **CLI-B3: `--if-hash` on write**
+- [x] **CLI-B3: `--if-hash` on write**
 
   Expose the server's content hash checking for safe read-modify-write loops:
 
@@ -1420,7 +1420,7 @@ These make the CLI agent-usable. Do first. REST-1 through REST-3 should land bef
 
   **Files:** `src/cli.ts` (pass If-Match header on PUT /v1/notes/)
 
-- [ ] **CLI-B4: `grove whoami`**
+- [x] **CLI-B4: `grove whoami`**
 
   Call server, print key name, scopes, vault. Quick identity check.
 
@@ -1551,7 +1551,7 @@ Tag/type/path prefilter handles trail filtering. The right investment is better 
 
 #### Phase 7a: Background Discovery
 
-- [ ] **P7-1: Discovery loop skeleton** (`src/discovery.ts`, `src/discovery-worker.ts`)
+- [x] **P7-1: Discovery loop skeleton** (`src/discovery.ts`, `src/discovery-worker.ts`)
 
   Background process managed by PM2. Watches for vault changes via two triggers:
   1. **Git hook:** `post-commit` hook in the vault repo calls `curl http://localhost:8190/internal/discovery-trigger?path=<changed-file>`
@@ -1568,7 +1568,7 @@ Tag/type/path prefilter handles trail filtering. The right investment is better 
   - Processed entries are marked `status = 'done'` with timestamp
   - The loop handles errors gracefully — a failed note doesn't block the queue
 
-- [ ] **P7-2: Concept extraction via Claude API** (`src/discovery-extract.ts`)
+- [x] **P7-2: Concept extraction via Claude API** (`src/discovery-extract.ts`)
 
   For each changed note, call Claude API (claude-haiku-4-5 for cost efficiency) with:
   - The note's full content
@@ -1595,7 +1595,7 @@ Tag/type/path prefilter handles trail filtering. The right investment is better 
   - Given a note about "reinforcement learning" with no existing concept note, extraction suggests creating `Resources/Concepts/Reinforcement Learning.md`
   - Extraction result includes confidence scores; low-confidence entities are logged but not acted on
 
-- [ ] **P7-3: Wikilink wiring** (`src/discovery-link.ts`)
+- [x] **P7-3: Wikilink wiring** (`src/discovery-link.ts`)
 
   After extraction, wire wikilinks into the source note. For each `suggested_links` entry: find the `from_text` in the note content, wrap it in `[[to_path|from_text]]`. Write the updated note via `write_note` (through the write queue, not direct filesystem).
 
@@ -1609,7 +1609,7 @@ Tag/type/path prefilter handles trail filtering. The right investment is better 
   - Link insertion doesn't corrupt frontmatter
   - New concept notes are created with proper frontmatter (type, tags, aliases)
 
-- [ ] **P7-4: Semantic neighbor surfacing** (`src/discovery-neighbors.ts`)
+- [x] **P7-4: Semantic neighbor surfacing** (`src/discovery-neighbors.ts`)
 
   After processing a note, find embedding-similar notes not already linked. Use `query` tool with `vec` sub-query type, filter out notes that are already wikilinked from/to the source note. Store surprising connections in a `discovery_results` table.
 
@@ -1631,7 +1631,7 @@ Tag/type/path prefilter handles trail filtering. The right investment is better 
   - Already-linked notes are excluded from results
   - Results are stored with similarity scores for later review
 
-- [ ] **P7-5: Discovery digest** (extend `vault_status` in `src/server.ts`)
+- [x] **P7-5: Discovery digest** (extend `vault_status` in `src/server.ts`)
 
   New `vault_status` mode: `discovery`. Returns:
   ```typescript
@@ -1651,7 +1651,7 @@ Tag/type/path prefilter handles trail filtering. The right investment is better 
   - `vault_status(mode: "discovery")` returns the digest
   - Empty state (no discovery results yet) returns zeroed fields, not errors
 
-- [ ] **P7-6: Bookmark integration** (`src/discovery-bookmarks.ts`)
+- [x] **P7-6: Bookmark integration** (`src/discovery-bookmarks.ts`)
 
   Cron job (every 30 min) checks for new X bookmarks via `bird` CLI. For each new bookmark:
   1. Fetch the URL content (or use `bird` metadata)
@@ -1666,7 +1666,7 @@ Tag/type/path prefilter handles trail filtering. The right investment is better 
 
 #### Phase 7b: Bulk Onboarding
 
-- [ ] **P7-7: Ingest command** (extend `src/cli.ts`)
+- [x] **P7-7: Ingest command** (extend `src/cli.ts`)
 
   `grove ingest <dir>` — reads a directory of .md files, parses frontmatter/content, deduplicates against existing vault (by title + content hash), writes new notes via `write_note` MCP tool call. Creates a snapshot before starting (`grove snapshot`).
 
@@ -1677,7 +1677,7 @@ Tag/type/path prefilter handles trail filtering. The right investment is better 
   - Progress output: "Imported 42/50 notes (8 skipped as duplicates)"
   - Snapshot created before ingest starts
 
-- [ ] **P7-8: Post-ingest concept bootstrap**
+- [x] **P7-8: Post-ingest concept bootstrap**
 
   After `grove ingest`, enqueue all newly created notes in `discovery_queue` with `trigger = 'ingest'`. The discovery loop processes them, extracting concepts and wiring links. This is the cold start path for new users or content dumps.
 
@@ -1814,7 +1814,7 @@ This was originally Phase 2 but deferred — trails and discovery are higher imp
 
 #### Phase 9a: User Management
 
-- [ ] **P9-1: User roles** (`src/db.ts`, `src/users.ts`, `src/proxy.ts`)
+- [x] **P9-1: User roles** (`src/db.ts`, `src/users.ts`, `src/proxy.ts`)
 
   Add `role` column to users table: `owner` (full access), `member` (trail-scoped read+write), `viewer` (trail-scoped read-only).
 
@@ -1836,7 +1836,7 @@ This was originally Phase 2 but deferred — trails and discovery are higher imp
   - Non-owner hitting `/keys` or `/v1/admin/*` gets 403
   - Owner access unchanged
 
-- [ ] **P9-2: Invite flow** (`src/invite.ts`, `src/proxy.ts`, `src/cli.ts`)
+- [x] **P9-2: Invite flow** (`src/invite.ts`, `src/proxy.ts`, `src/cli.ts`)
 
   **CLI:** `grove invite <email> --trail <trail-id> --role viewer`
   **API:** `POST /v1/admin/invite` with `{ email, trail_id, role }`
@@ -1855,7 +1855,7 @@ This was originally Phase 2 but deferred — trails and discovery are higher imp
   - After clicking the link, Alice has a trail-scoped API key
   - Re-inviting the same email is idempotent (no duplicate user)
 
-- [ ] **P9-3: User-scoped keys** (`src/keys.ts`, `src/proxy.ts`)
+- [x] **P9-3: User-scoped keys** (`src/keys.ts`, `src/proxy.ts`)
 
   Today all keys are owned by `user_00000000`. After this task, keys are scoped to their creating user.
 
@@ -1872,7 +1872,7 @@ This was originally Phase 2 but deferred — trails and discovery are higher imp
   - Viewer can only see their own auto-provisioned key
   - Creating a key records the user who created it
 
-- [ ] **P9-4: User management UI** (grove-www repo: `src/app/dashboard/users/page.tsx`)
+- [x] **P9-4: User management UI** (grove-www repo: `src/app/dashboard/users/page.tsx`)
 
   Owner-only page in the dashboard. Requires Phase 4b dashboard layout (P4-FE-0) to be merged.
 
@@ -1891,7 +1891,7 @@ This was originally Phase 2 but deferred — trails and discovery are higher imp
 
 #### Phase 9b: Trail Sharing UX
 
-- [ ] **P9-5: Shareable trail links** (grove-www repo: `src/app/trails/[slug]/page.tsx`)
+- [x] **P9-5: Shareable trail links** (grove-www repo: `src/app/trails/[slug]/page.tsx`)
 
   Public onboarding page per trail: `grove.md/trails/<trail-slug>`. Shows trail name, description, note count, and a "Sign in to access" button. No login required to see the page — but reading notes requires auth.
 
@@ -1908,7 +1908,7 @@ This was originally Phase 2 but deferred — trails and discovery are higher imp
   - MCP config block is copy-pasteable
   - Non-existent trail ID → 404 page
 
-- [ ] **P9-6: Trail-scoped grove.md experience** (grove-www repo)
+- [x] **P9-6: Trail-scoped grove.md experience** (grove-www repo)
 
   When a viewer/member signs in via a trail link, their `grove.md` session is scoped to that trail. They see the trail name in the header, search only returns trail-visible notes, and navigation is limited to trail-allowed paths.
 
@@ -1921,7 +1921,7 @@ This was originally Phase 2 but deferred — trails and discovery are higher imp
   - Navigation shows only trail-allowed paths
   - Owner view is unchanged
 
-- [ ] **P9-7: Share-a-note links** (`src/proxy.ts`, grove-www: `src/app/s/[id]/page.tsx`)
+- [x] **P9-7: Share-a-note links** (`src/proxy.ts`, grove-www: `src/app/s/[id]/page.tsx`)
 
   Owner generates a shareable link to a specific note: `grove.md/s/<short-id>`. The link creates a temporary trail scoped to that single note and its depth-1 inbound backlinks (notes that wikilink TO the shared note — outbound links excluded to prevent leaking sensitive content). Expires after configurable TTL (default 7 days).
 
