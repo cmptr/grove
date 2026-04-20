@@ -6,7 +6,7 @@
  * designed for Next.js SSR fetching from grove-www.
  */
 
-import { existsSync, readFileSync, readdirSync, statSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync, mkdirSync, unlinkSync } from "node:fs";
 import { join, relative, resolve, basename, dirname } from "node:path";
 import { homedir } from "node:os";
 import { hybridSearch, bm25Search } from "./hybrid-search.js";
@@ -15,7 +15,6 @@ import {
   listNotes,
   gitCommit,
   gitCommitPaths,
-  gitRm,
   gitMv,
   qmdReindex,
   gitPush,
@@ -1042,7 +1041,11 @@ export async function handleDeleteNote(
 
   if (options.hard) {
     const sha = await writeQueue.enqueue(async () => {
-      await gitRm(VAULT_PATH, srcRel);
+      // Unlink from working tree only; `git add -A -- <path>` in
+      // gitCommitPaths stages the deletion for tracked-but-missing files.
+      // (Using `git rm` removes the index entry too, which makes a later
+      // `git add -A -- <path>` fail with "pathspec did not match any files".)
+      unlinkSync(srcAbs);
       invalidateFrontmatterCache(srcAbs);
       const commitSha = await gitCommitPaths(VAULT_PATH, [srcRel], `${who}: delete ${srcRel}`);
       await qmdReindex(srcRel);
@@ -1090,8 +1093,9 @@ export async function handleDeleteNote(
     writeNoteFile(archiveAbs, serialized);
     invalidateFrontmatterCache(archiveAbs);
 
-    // Remove the source via git (stages the deletion)
-    await gitRm(VAULT_PATH, srcRel);
+    // Unlink source from working tree; gitCommitPaths's `git add -A -- ...`
+    // stages the deletion (tracked-but-missing file) alongside the new archive.
+    unlinkSync(srcAbs);
     invalidateFrontmatterCache(srcAbs);
 
     const commitSha = await gitCommitPaths(

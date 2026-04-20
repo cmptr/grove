@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS users (
   username TEXT UNIQUE,
   email TEXT UNIQUE,
   role TEXT NOT NULL DEFAULT 'viewer',
+  display_name TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   last_login_at TEXT
 );
@@ -216,6 +217,7 @@ export function createSchema(): void {
   const database = getDb();
   database.exec(SCHEMA);
   migrateUserRoles(database);
+  migrateUserDisplayName(database);
 }
 
 /** Add role column to existing users tables that lack it. */
@@ -224,6 +226,13 @@ function migrateUserRoles(database: Database.Database): void {
   if (cols.some((c) => c.name === "role")) return;
   database.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'viewer'");
   database.exec("UPDATE users SET role = 'owner' WHERE id = 'user_00000000'");
+}
+
+/** Add display_name column to existing users tables that lack it (P15-1). */
+function migrateUserDisplayName(database: Database.Database): void {
+  const cols = database.prepare("PRAGMA table_info(users)").all() as { name: string }[];
+  if (cols.some((c) => c.name === "display_name")) return;
+  database.exec("ALTER TABLE users ADD COLUMN display_name TEXT");
 }
 
 /**

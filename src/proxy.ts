@@ -40,7 +40,16 @@ import {
   cleanupExpiredAuth,
   seedAdminEmail,
 } from "./auth.js";
-import { getUserRole, deleteUser, listUsersWithMeta } from "./users.js";
+import {
+  getUserRole,
+  deleteUser,
+  listUsersWithMeta,
+  updateUserDisplayName,
+  listUserSessions,
+  revokeUserSession,
+  revokeAllOtherSessions,
+  getUserById,
+} from "./users.js";
 import { generateRequestId, log as structuredLog, auditRead, auditWrite } from "./logger.js";
 import { installCrashHandlers } from "./crash-handlers.js";
 import { metrics, searchMetrics } from "./metrics.js";
@@ -1496,6 +1505,115 @@ const server = createServer(async (req, res) => {
         vault_id: restKey.vault_id,
         trail: restTrail ? { id: restTrail.id, name: restTrail.name } : null,
       }));
+      return;
+    }
+
+    // GET /v1/me — current user profile (P15-1)
+    if (url.pathname === "/v1/me" && req.method === "GET") {
+      const user = getUserById(restKey.user_id);
+      if (!user) {
+        res.writeHead(404, restHeaders);
+        res.end(JSON.stringify({ error: "user not found" }));
+        return;
+      }
+
+      // Keys owned by this user
+      const db = getDb();
+      const keys = db
+        .prepare(
+          "SELECT id, name, scopes, vault_id, created_at, last_used_at, expires_at FROM api_keys WHERE user_id = ? ORDER BY created_at DESC",
+        )
+        .all(user.id) as Array<{
+          id: string; name: string; scopes: string; vault_id: string;
+          created_at: string; last_used_at: string | null; expires_at: string | null;
+        }>;
+
+      // Trails accessible to this user (via trail_grants → api_keys)
+      const trailRows = db
+        .prepare(
+          `SELECT DISTINCT t.id, t.name, t.description, t.enabled
+             FROM trails t
+             JOIN trail_grants tg ON t.id = tg.trail_id
+             JOIN api_keys ak ON tg.grantee_id = ak.id AND tg.grantee_type = 'token'
+            WHERE ak.user_id = ?`,
+        )
+        .all(user.id) as Array<{ id: string; name: string; description: string; enabled: number }>;
+
+      res.writeHead(200, restHeaders);
+      res.end(JSON.stringify({
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        role: user.role,
+        display_name: user.display_name,
+        created_at: user.created_at,
+        last_login_at: user.last_login_at,
+        keys: keys.map((k) => ({
+          ...k,
+          scopes: k.scopes.split(",").filter(Boolean),
+        })),
+        trails: trailRows.map((t) => ({ id: t.id, name: t.name, description: t.description, enabled: !!t.enabled })),
+        sessions: listUserSessions(user.id),
+      }));
+      return;
+    }
+
+    // PATCH /v1/me — update display name (P15-1)
+    if (url.pathname === "/v1/me" && req.method === "PATCH") {
+      let body: string;
+      try { body = await readBody(req); } catch {
+        res.writeHead(400, restHeaders);
+        res.end(JSON.stringify({ error: "read error" }));
+        return;
+      }
+      let parsed: { display_name?: string };
+      try { parsed = JSON.parse(body); } catch {
+        res.writeHead(400, restHeaders);
+        res.end(JSON.stringify({ error: "invalid json" }));
+        return;
+      }
+      if (typeof parsed.display_name !== "string") {
+        res.writeHead(400, restHeaders);
+        res.end(JSON.stringify({ error: "display_name (string) required" }));
+        return;
+      }
+      if (parsed.display_name.length > 100) {
+        res.writeHead(400, restHeaders);
+        res.end(JSON.stringify({ error: "display_name too long (max 100 chars)" }));
+        return;
+      }
+      const updated = updateUserDisplayName(restKey.user_id, parsed.display_name);
+      if (!updated) {
+        res.writeHead(404, restHeaders);
+        res.end(JSON.stringify({ error: "user not found" }));
+        return;
+      }
+      res.writeHead(200, restHeaders);
+      res.end(JSON.stringify({ ok: true, display_name: parsed.display_name }));
+      return;
+    }
+
+    // DELETE /v1/me/sessions/:id — revoke a single session (P15-1)
+    const sessionMatch = url.pathname.match(/^\/v1\/me\/sessions\/([^/]+)$/);
+    if (sessionMatch && req.method === "DELETE") {
+      const sessionId = decodeURIComponent(sessionMatch[1]);
+      const revoked = revokeUserSession(restKey.user_id, sessionId);
+      if (!revoked) {
+        res.writeHead(404, restHeaders);
+        res.end(JSON.stringify({ error: "session not found" }));
+        return;
+      }
+      res.writeHead(200, restHeaders);
+      res.end(JSON.stringify({ ok: true, revoked: sessionId }));
+      return;
+    }
+
+    // DELETE /v1/me/sessions — revoke all sessions except current (P15-1)
+    if (url.pathname === "/v1/me/sessions" && req.method === "DELETE") {
+      const keep = (url.searchParams.get("keep") ?? "").trim();
+      const removed = revokeAllOtherSessions(restKey.user_id, keep);
+      res.writeHead(200, restHeaders);
+      res.end(JSON.stringify({ ok: true, revoked_count: removed }));
       return;
     }
 

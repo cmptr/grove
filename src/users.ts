@@ -12,8 +12,55 @@ export interface User {
   username: string;
   email: string;
   role: UserRole;
+  display_name: string | null;
   created_at: string;
   last_login_at: string | null;
+}
+
+/** Update a user's display name. Returns true if the row was updated. */
+export function updateUserDisplayName(userId: string, displayName: string): boolean {
+  const db = getDb();
+  const result = db
+    .prepare("UPDATE users SET display_name = ? WHERE id = ?")
+    .run(displayName.trim() || null, userId);
+  return result.changes > 0;
+}
+
+/** List active sessions for a user (for profile page). */
+export interface SessionRow {
+  id: string;
+  created_at: string;
+  last_used_at: string | null;
+  expires_at: string;
+}
+export function listUserSessions(userId: string): SessionRow[] {
+  const db = getDb();
+  return db
+    .prepare(
+      `SELECT id, created_at, last_used_at, expires_at
+         FROM sessions
+        WHERE user_id = ? AND expires_at > datetime('now')
+        ORDER BY last_used_at DESC NULLS LAST, created_at DESC`,
+    )
+    .all(userId) as SessionRow[];
+}
+
+/** Revoke a single session by id (user-scoped — can only revoke own). */
+export function revokeUserSession(userId: string, sessionId: string): boolean {
+  const db = getDb();
+  const result = db
+    .prepare("DELETE FROM sessions WHERE id = ? AND user_id = ?")
+    .run(sessionId, userId);
+  return result.changes > 0;
+}
+
+/** Revoke all sessions for a user except the current one. */
+export function revokeAllOtherSessions(userId: string, keepSessionId: string): number {
+  const db = getDb();
+  const result = db
+    .prepare("DELETE FROM sessions WHERE user_id = ? AND id != ?")
+    .run(userId, keepSessionId);
+  return result.changes;
 }
 
 const RESERVED_USERNAMES = new Set([
@@ -44,7 +91,7 @@ export function createUser(email: string, username: string, role: UserRole = "vi
     "INSERT INTO users (id, username, email, role) VALUES (?, ?, ?, ?)"
   ).run(id, username, email, role);
 
-  return { id, username, email, role, created_at: new Date().toISOString(), last_login_at: null };
+  return { id, username, email, role, display_name: null, created_at: new Date().toISOString(), last_login_at: null };
 }
 
 export function getUserById(id: string): User | null {
