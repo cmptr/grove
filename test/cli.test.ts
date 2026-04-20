@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { parseArgs, CliError, HELP, printCommandHelp } from "../src/cli.js";
+import { parseArgs, CliError, HELP, printCommandHelp, validateDeleteFlags } from "../src/cli.js";
 
 // ── parseArgs ───────────────────────────────────────────────────────
 
@@ -132,7 +132,7 @@ describe("CliError", () => {
 
 describe("HELP", () => {
   const expectedCommands = [
-    "search", "read", "list", "write", "init",
+    "search", "read", "list", "write", "delete", "move", "init",
     "graph", "digest", "health", "metrics",
     "status", "history", "diagnostics",
     "keys", "trails", "vault", "sync", "ingest", "lint", "snapshot", "rollback",
@@ -363,5 +363,133 @@ describe("promptPassphrase", () => {
       delete process.env.GROVE_TEST_PASSPHRASE;
       Object.defineProperty(process.stdin, "isTTY", { value: prevTTY, configurable: true });
     }
+  });
+});
+
+// ── parseArgs: delete / move ────────────────────────────────────
+
+describe("parseArgs delete", () => {
+  beforeEach(() => {
+    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+  });
+
+  it("parses `grove delete <path>`", () => {
+    const result = parseArgs(["delete", "Inbox/old-idea.md"]);
+    expect(result.command).toBe("delete");
+    expect(result.positional).toBe("Inbox/old-idea.md");
+    expect(result.flags.hard).toBeUndefined();
+  });
+
+  it("parses --hard as a boolean flag (no positional consumed)", () => {
+    const result = parseArgs(["delete", "Inbox/x.md", "--hard", "--yes"]);
+    expect(result.positional).toBe("Inbox/x.md");
+    expect(result.flags.hard).toBe(true);
+    expect(result.flags.yes).toBe(true);
+  });
+
+  it("parses delete with --json", () => {
+    const result = parseArgs(["delete", "Inbox/x.md", "--json"]);
+    expect(result.flags.json).toBe(true);
+  });
+
+  it("parses --if-hash on delete", () => {
+    const result = parseArgs(["delete", "Inbox/x.md", "--if-hash", "abc123"]);
+    expect(result.flags["if-hash"]).toBe("abc123");
+  });
+});
+
+describe("parseArgs move", () => {
+  beforeEach(() => {
+    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+  });
+
+  it("captures both positionals for `grove move <from> <to>`", () => {
+    const result = parseArgs(["move", "Inbox/idea.md", "Resources/Concepts/idea.md"]);
+    expect(result.command).toBe("move");
+    expect(result.positional).toBe("Inbox/idea.md");
+    expect(result.positionals).toEqual(["Inbox/idea.md", "Resources/Concepts/idea.md"]);
+  });
+
+  it("preserves positionals alongside flags", () => {
+    const result = parseArgs(["move", "a.md", "b.md", "--json"]);
+    expect(result.positionals).toEqual(["a.md", "b.md"]);
+    expect(result.flags.json).toBe(true);
+  });
+
+  it("accepts flags interleaved with positionals", () => {
+    const result = parseArgs(["move", "a.md", "--if-hash", "abc", "b.md"]);
+    expect(result.positionals).toEqual(["a.md", "b.md"]);
+    expect(result.flags["if-hash"]).toBe("abc");
+  });
+});
+
+// ── validateDeleteFlags ──────────────────────────────────────────
+
+describe("validateDeleteFlags", () => {
+  it("allows soft delete with no flags", () => {
+    expect(() => validateDeleteFlags({}, "Inbox/x.md")).not.toThrow();
+  });
+
+  it("allows --hard when --yes is set", () => {
+    expect(() => validateDeleteFlags({ hard: true, yes: true }, "Inbox/x.md")).not.toThrow();
+  });
+
+  it("rejects --hard without --yes with exit code 1", () => {
+    try {
+      validateDeleteFlags({ hard: true }, "Inbox/x.md");
+      throw new Error("expected validateDeleteFlags to throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(CliError);
+      expect((err as CliError).exitCode).toBe(1);
+      expect((err as CliError).message).toMatch(/--yes/);
+      expect((err as CliError).message).toContain("Inbox/x.md");
+    }
+  });
+});
+
+// ── HELP: delete / move entries ──────────────────────────────────
+
+describe("HELP delete", () => {
+  it("has a delete help entry with required fields", () => {
+    expect(HELP.delete).toBeDefined();
+    expect(HELP.delete.usage).toContain("grove delete");
+    expect(HELP.delete.description).toBeTruthy();
+    expect(HELP.delete.json_schema).toMatch(/action/);
+    expect(HELP.delete.exit_codes).toContain("0=success");
+  });
+
+  it("documents --hard and --yes flags", () => {
+    const flags = HELP.delete.flags?.join("\n") ?? "";
+    expect(flags).toMatch(/--hard/);
+    expect(flags).toMatch(/--yes/);
+  });
+
+  it("json_schema covers both archived and deleted actions", () => {
+    expect(HELP.delete.json_schema).toMatch(/archived/);
+    expect(HELP.delete.json_schema).toMatch(/deleted/);
+  });
+
+  it("printCommandHelp renders delete", () => {
+    const out = printCommandHelp("delete");
+    expect(out).toContain("grove delete");
+    expect(out).toContain("--hard");
+    expect(out).toContain("Examples:");
+  });
+});
+
+describe("HELP move", () => {
+  it("has a move help entry with required fields", () => {
+    expect(HELP.move).toBeDefined();
+    expect(HELP.move.usage).toContain("grove move");
+    expect(HELP.move.usage).toMatch(/<from>/);
+    expect(HELP.move.usage).toMatch(/<to>/);
+    expect(HELP.move.json_schema).toMatch(/links_updated/);
+    expect(HELP.move.exit_codes).toContain("0=success");
+  });
+
+  it("printCommandHelp renders move", () => {
+    const out = printCommandHelp("move");
+    expect(out).toContain("grove move");
+    expect(out).toContain("Examples:");
   });
 });
