@@ -114,6 +114,59 @@ function stem(link: string): string {
   return parts[parts.length - 1];
 }
 
+/**
+ * Normalize a wikilink target for resolution:
+ * - strip `#section` and `^block` anchors
+ * - strip optional `.md` suffix
+ * - take the last path segment (stem)
+ * - lowercase for case-insensitive matching
+ */
+function normalizeLinkTarget(raw: string): string {
+  let target = raw.trim();
+  // Strip header anchor `#...` and block anchor `^...`
+  const hash = target.indexOf("#");
+  if (hash !== -1) target = target.slice(0, hash);
+  const caret = target.indexOf("^");
+  if (caret !== -1) target = target.slice(0, caret);
+  target = target.trim();
+  // Strip .md suffix if present
+  if (target.toLowerCase().endsWith(".md")) target = target.slice(0, -3);
+  // Take last path segment (Obsidian wikilinks use either name or relative path)
+  target = stem(target);
+  return target.toLowerCase();
+}
+
+interface Frontmatter2 {
+  type: string | null;
+  tags: string[];
+  aliases: string[];
+  present: boolean;
+}
+
+function parseFrontmatterWithAliases(head: string): Frontmatter2 {
+  if (!head.startsWith("---")) return { type: null, tags: [], aliases: [], present: false };
+  const end = head.indexOf("\n---", 3);
+  if (end === -1) return { type: null, tags: [], aliases: [], present: false };
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = yamlParse(head.slice(4, end)) ?? {};
+  } catch {
+    return { type: null, tags: [], aliases: [], present: false };
+  }
+  const type = typeof parsed.type === "string" ? parsed.type : null;
+  const tags = Array.isArray(parsed.tags)
+    ? parsed.tags.filter((t): t is string => typeof t === "string")
+    : typeof parsed.tags === "string"
+      ? [parsed.tags]
+      : [];
+  const aliases = Array.isArray(parsed.aliases)
+    ? parsed.aliases.filter((a): a is string => typeof a === "string")
+    : typeof parsed.aliases === "string"
+      ? [parsed.aliases]
+      : [];
+  return { type, tags, aliases, present: true };
+}
+
 interface Frontmatter {
   type: string | null;
   tags: string[];
@@ -156,8 +209,25 @@ function buildGraph(
   files: string[],
   fileTexts: Map<string, string>,
 ): GraphView {
+  // Canonical name per file = basename without .md (original case preserved).
   const realNames = new Set<string>();
-  for (const abs of files) realNames.add(basename(abs, ".md"));
+  // Alias resolution map: lowercased lookup → canonical name.
+  // Includes both filenames and frontmatter aliases.
+  const aliasMap = new Map<string, string>();
+  for (const abs of files) {
+    const name = basename(abs, ".md");
+    realNames.add(name);
+    aliasMap.set(name.toLowerCase(), name);
+    const text = fileTexts.get(abs);
+    if (text !== undefined) {
+      const fm = parseFrontmatterWithAliases(text.slice(0, 2000));
+      for (const alias of fm.aliases) {
+        const key = alias.trim().toLowerCase();
+        // First-come-first-served on alias collisions (rare; fine for stats)
+        if (key && !aliasMap.has(key)) aliasMap.set(key, name);
+      }
+    }
+  }
 
   const outgoing = new Map<string, Set<string>>();
   const incoming = new Map<string, Set<string>>();
@@ -176,18 +246,20 @@ function buildGraph(
     const srcOut = outgoing.get(srcName)!;
 
     for (const raw of extractWikilinks(text)) {
-      const target = stem(raw);
+      const key = normalizeLinkTarget(raw);
+      if (!key) continue;
+      const target = aliasMap.get(key);
+      if (target === undefined) {
+        brokenLinkCount++;
+        continue;
+      }
       if (target === srcName) continue;
       if (srcOut.has(target)) continue;
 
-      if (realNames.has(target)) {
-        srcOut.add(target);
-        edgeCount++;
-        if (!incoming.has(target)) incoming.set(target, new Set());
-        incoming.get(target)!.add(srcName);
-      } else {
-        brokenLinkCount++;
-      }
+      srcOut.add(target);
+      edgeCount++;
+      if (!incoming.has(target)) incoming.set(target, new Set());
+      incoming.get(target)!.add(srcName);
     }
   }
 
@@ -286,16 +358,25 @@ function computeIndexHealth(
       .get() as { cnt: number } | undefined;
     const indexedDocs = docRow?.cnt ?? 0;
 
+    // Count embedded documents via the regular `content_vectors` table
+    // (hash-keyed; each row is a chunk). Join against active documents so
+    // we only count vectors that still correspond to live notes.
+    // The `vectors_vec` virtual table (sqlite-vec vec0 module) is NOT
+    // queryable from a plain Node sqlite connection — use content_vectors
+    // which is the canonical source of truth for which docs are embedded.
     let embeddedDocs = 0;
     try {
       const vecRow = db
         .prepare(
-          "SELECT COUNT(DISTINCT substr(hash_seq, 1, instr(hash_seq, '_') - 1)) AS cnt FROM vectors_vec",
+          `SELECT COUNT(DISTINCT d.id) AS cnt
+             FROM documents d
+             JOIN content_vectors cv ON cv.hash = d.hash
+            WHERE d.active = 1`,
         )
         .get() as { cnt: number } | undefined;
       embeddedDocs = vecRow?.cnt ?? 0;
     } catch {
-      // vec0 not loaded — leave embeddedDocs at 0
+      // content_vectors missing (unlikely) — leave at 0
     }
 
     const coverage =
