@@ -447,7 +447,12 @@ export function runMigration(): void {
 
 // ── Discovery queue helpers ───────────────────────────────────────
 
-export type DiscoveryTrigger = "commit" | "write" | "ingest" | "embed_retry";
+export type DiscoveryTrigger =
+  | "commit"
+  | "write"
+  | "ingest"
+  | "embed_retry"
+  | "image_enrich";
 
 export interface DiscoveryQueueEntry {
   id: number;

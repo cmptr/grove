@@ -103,16 +103,19 @@ describe("handleImageUpload", () => {
     expect(data).toBe(png);
     expect(ct).toBe("image/png");
 
-    // Response shape matches the spec
+    // Response shape matches the fast-path spec: Vision-derived fields
+    // (auto_tags, description, ocr_text) are populated asynchronously
+    // via the discovery queue, so the immediate response is a stub.
     expect(result.image_url).toBe(`https://assets.grove.md/${key}`);
     expect(result.thumbnail_url).toBe(`https://assets.grove.md/${key}`);
     expect(result.content_hash).toMatch(/^[a-f0-9]{64}$/);
-    expect(result.auto_tags).toEqual(expect.arrayContaining(["diagram", "test"]));
-    expect(result.description).toBe("A simple test diagram.");
-    expect(result.ocr_text).toBe("HELLO WORLD");
+    expect(result.auto_tags).toEqual([]);
+    expect(result.enrichment_pending).toBe(true);
+    expect(result.description).toMatch(/awaiting enrichment/i);
+    expect(result.ocr_text).toBe("");
     expect(result.dimensions).toEqual({ width: 1920, height: 1080 });
 
-    // Note was written to disk with the expected frontmatter + content
+    // Note was written to disk with the stub frontmatter + placeholder body
     const notePath = join(tempVault, result.note_path);
     expect(existsSync(notePath)).toBe(true);
     const { frontmatter, content } = parseNote(readFileSync(notePath, "utf-8"));
@@ -120,25 +123,20 @@ describe("handleImageUpload", () => {
     expect(frontmatter.image_url).toBe(result.image_url);
     expect(frontmatter.thumbnail_url).toBe(result.thumbnail_url);
     expect(frontmatter.dimensions).toEqual({ width: 1920, height: 1080 });
-    expect(frontmatter.ocr_text).toBe("HELLO WORLD");
+    expect(frontmatter.enrichment_pending).toBe(true);
     expect(Array.isArray(frontmatter.tags)).toBe(true);
-    expect(content).toContain("A simple test diagram.");
+    expect(frontmatter.tags as string[]).toContain("image");
+    expect(content).toContain("awaiting enrichment");
     expect(content).toContain(`](${result.image_url})`);
     expect(content).toMatch(/^# .+/m);
   });
 
-  it("merges user-supplied tags with auto-detected tags", async () => {
+  it("keeps user-supplied tags on the stub note (Vision tags arrive later via enrichment)", async () => {
     const rest = await loadRest();
     rest.setImageStoreResolver(() => ({
       upload: async (key, data) => ({ url: `https://assets.grove.md/${key}`, size: data.length }),
       delete: async () => {},
       getUrl: (key) => `https://assets.grove.md/${key}`,
-    }));
-    rest.setAutoTagFn(async () => ({
-      description: "Landscape photo",
-      tags: ["landscape", "nature"],
-      concepts: [],
-      ocr_text: "",
     }));
 
     const png = makePngHeader(100, 200);
@@ -148,8 +146,14 @@ describe("handleImageUpload", () => {
       tags: ["travel", "nature"],
     });
 
-    // Deduped union
-    expect(result.auto_tags.sort()).toEqual(["landscape", "nature", "travel"].sort());
+    // Immediate response has only user tags + 'image' baseline
+    expect(result.auto_tags).toEqual([]);
+    expect(result.enrichment_pending).toBe(true);
+
+    // Stub note on disk carries user tags (plus 'image')
+    const { frontmatter } = parseNote(readFileSync(join(tempVault, result.note_path), "utf-8"));
+    const tags = frontmatter.tags as string[];
+    expect(tags).toEqual(expect.arrayContaining(["image", "travel", "nature"]));
   });
 
   it("rejects unsupported content types", async () => {

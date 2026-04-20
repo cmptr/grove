@@ -1281,6 +1281,7 @@ export interface ImageUploadResult {
   ocr_text: string;
   dimensions: { width: number; height: number };
   url: string;
+  enrichment_pending: boolean;
 }
 
 /** Read image dimensions from header bytes. Returns {0,0} if unrecognized. */
@@ -1369,10 +1370,27 @@ export function setImageStoreResolver(fn: ImageStoreResolver): void {
   imageStoreResolver = fn;
 }
 
+/** Slugify a raw filename stem for use as an image note path. */
+function slugFromFilename(filename: string | undefined, hash: string): string {
+  if (!filename) return `image-${hash.slice(0, 12)}`;
+  const stem = filename.replace(/\.[^.]+$/, "");
+  const slug = stem
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+  return slug.length >= 3 ? slug : `image-${hash.slice(0, 12)}`;
+}
+
 /**
- * Upload an image: stores bytes in R2, auto-tags via Claude Vision, and
- * creates a companion vault note. Throws on validation failures, trail denies,
- * or store errors.
+ * Upload an image (fast path): stores bytes in R2, creates a stub companion
+ * note, returns immediately. Vision auto-tagging runs asynchronously via the
+ * discovery queue — the client gets a URL + path in ~2s instead of 10s+.
+ *
+ * Failure semantics:
+ *   - R2 upload failure → throw (nothing to recover; retry is the client's job)
+ *   - Note write failure → throw (R2 blob is harmless leftover; dedup by hash)
+ *   - Vision tagging failure → image + stub note persist; enrichment retries
  */
 export async function handleImageUpload(
   input: ImageUploadInput,
@@ -1397,24 +1415,20 @@ export async function handleImageUpload(
   const key = contentKey(vaultId, input.file, ext);
   const hash = key.split("/").pop()!.replace(/\.[^.]+$/, "");
 
-  // Upload to R2
+  // Upload to R2 (unavoidable — must succeed before the note can reference it)
   const store = imageStoreResolver();
   const uploaded = await store.upload(key, input.file, input.contentType);
 
   // Thumbnail: TODO integrate sharp for real resize — for now reuse the original URL.
-  // The thumbnail_url key is still distinct so we can swap in a resized upload later.
   const thumbnailUrl = store.getUrl(key);
 
-  // Auto-tag via Claude Vision
-  const tagResult = await autoTagFn(input.file, input.contentType);
+  // Dimensions from header bytes — cheap, synchronous
+  const dimensions = readImageDimensions(input.file, input.contentType);
 
-  // Merge user-supplied tags with auto-detected
-  const autoTags = Array.from(
-    new Set([...tagResult.tags, ...(input.tags ?? [])].map((t) => t.trim()).filter(Boolean)),
-  );
-
-  // Determine note path
-  const slug = slugFromDescription(tagResult.description || input.filename || "", hash);
+  // Derive an initial path from the filename (enrichment can rename later
+  // via a separate move op if the user wants a description-based slug).
+  const userTags = (input.tags ?? []).map((t) => t.trim()).filter(Boolean);
+  const slug = slugFromFilename(input.filename, hash);
   const notePath = input.path ?? `${IMAGE_NOTE_PREFIX}${slug}.md`;
 
   // Enforce trail-scoped writes
@@ -1422,38 +1436,50 @@ export async function handleImageUpload(
     throw Object.assign(new Error("Write not allowed: path outside trail scope"), { code: "TRAIL_DENIED" });
   }
 
-  // Build companion note
-  const dimensions = readImageDimensions(input.file, input.contentType);
   const title = slug.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
   const frontmatter: Record<string, unknown> = {
     type: "image",
-    tags: autoTags.length > 0 ? autoTags : ["image"],
+    // Always include 'image' + any user-supplied tags. Vision tags are
+    // merged in later during enrichment.
+    tags: Array.from(new Set(["image", ...userTags])),
     image_url: uploaded.url,
     thumbnail_url: thumbnailUrl,
     content_hash: hash,
     dimensions,
     uploaded_at: new Date().toISOString(),
+    enrichment_pending: true,
   };
-  if (tagResult.ocr_text) frontmatter.ocr_text = tagResult.ocr_text;
 
-  const description = tagResult.description || `Image uploaded ${new Date().toISOString().slice(0, 10)}.`;
-  const content = `# ${title}\n\n${description}\n\n![${title}](${uploaded.url})\n`;
+  const placeholderDescription =
+    `Image uploaded ${new Date().toISOString().slice(0, 10)} — awaiting enrichment.`;
+  const content = `# ${title}\n\n${placeholderDescription}\n\n![${title}](${uploaded.url})\n`;
 
-  // Create the note via the existing write pipeline (validates + commits + reindexes + embeds)
+  // Write the stub note (validates + commits + reindexes + fires embed)
   const noteResult = await handleWriteNote(notePath, frontmatter, content, {
     trail: options.trail,
     keyName: options.keyName,
   });
+
+  // Queue async enrichment (Vision description + tags + OCR → rewrite note)
+  try {
+    enqueueDiscovery(noteResult.path, "image_enrich");
+  } catch (err) {
+    console.error(
+      `[grove] image_enrich enqueue failed for ${noteResult.path}:`,
+      (err as Error).message,
+    );
+  }
 
   return {
     image_url: uploaded.url,
     thumbnail_url: thumbnailUrl,
     note_path: noteResult.path,
     content_hash: hash,
-    auto_tags: autoTags,
-    description,
-    ocr_text: tagResult.ocr_text,
+    auto_tags: [],
+    description: placeholderDescription,
+    ocr_text: "",
     dimensions,
     url: noteResult.url,
+    enrichment_pending: true,
   };
 }

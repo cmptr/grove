@@ -21,10 +21,13 @@ import {
 import { extractFromNote } from "./discovery-extract.js";
 import { wireLinks } from "./discovery-link.js";
 import { embedFile } from "./embed-single.js";
+import { enrichImageNote } from "./image-enrich.js";
 
 const DEFAULT_POLL_MS = 2_000;
 /** Max attempts before an embed_retry entry is abandoned as errored. */
 const MAX_EMBED_RETRY_ATTEMPTS = 5;
+/** Max attempts before an image_enrich entry is abandoned. */
+const MAX_ENRICH_ATTEMPTS = 5;
 
 export type Processor = (entry: DiscoveryQueueEntry) => Promise<void>;
 
@@ -47,6 +50,29 @@ const defaultProcessor: Processor = async (entry) => {
     console.log(`[discovery] embed retry (attempt ${entry.attempts}) for ${entry.path}`);
     await embedFile(vaultPath, entry.path);
     console.log(`[discovery] embed retry succeeded for ${entry.path}`);
+    return;
+  }
+
+  // Image enrichment: fetch the uploaded image from R2, run Claude Vision
+  // for description + tags + OCR, rewrite the stub note. Skips entity
+  // extraction since that runs again on the subsequent write's own
+  // 'write' queue entry.
+  if (entry.trigger === "image_enrich") {
+    if (entry.attempts > MAX_ENRICH_ATTEMPTS) {
+      throw new Error(
+        `image enrich abandoned after ${entry.attempts} attempts for ${entry.path}`,
+      );
+    }
+    console.log(`[discovery] image enrich (attempt ${entry.attempts}) for ${entry.path}`);
+    const result = await enrichImageNote(vaultPath, entry.path);
+    if (result.skipped) {
+      console.log(`[discovery] image enrich skipped (already enriched): ${entry.path}`);
+    } else {
+      console.log(
+        `[discovery] image enrich succeeded: +${result.tags_added} tags, ` +
+        `${result.description_length}ch description — ${entry.path}`,
+      );
+    }
     return;
   }
 

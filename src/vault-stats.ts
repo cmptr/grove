@@ -419,14 +419,29 @@ export async function computeVaultStats(
 let cachedStats: VaultStats | null = null;
 let timer: ReturnType<typeof setInterval> | null = null;
 
+// Dedup in-flight refreshes. Under write-heavy load (e.g. bulk image
+// import) many callers kick off refreshStats concurrently, and
+// computeVaultStats is expensive — graph + lifecycle can each take 120s
+// on a large vault. Stacking these exhausts memory and OOMs the process.
+// Callers during an in-flight refresh now get the existing promise.
+let inFlight: Promise<VaultStats> | null = null;
+
 export function getStats(_vaultPath: string): VaultStats | null {
   return cachedStats;
 }
 
 export async function refreshStats(vaultPath: string): Promise<VaultStats> {
-  cachedStats = await computeVaultStats(vaultPath);
-  pingHeartbeat(cachedStats);
-  return cachedStats;
+  if (inFlight) return inFlight;
+  inFlight = (async () => {
+    try {
+      cachedStats = await computeVaultStats(vaultPath);
+      pingHeartbeat(cachedStats);
+      return cachedStats;
+    } finally {
+      inFlight = null;
+    }
+  })();
+  return inFlight;
 }
 
 // ── Better Stack Heartbeat ──────────────────────────────────────────
