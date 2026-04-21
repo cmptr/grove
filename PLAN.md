@@ -3112,7 +3112,7 @@ When a member or viewer signs in, they see a simplified dashboard scoped to thei
 
 **Scope decision:** API surface (`/v1/*`) does NOT change — session/API key resolve the user. Public profile is added (`/@<handle>` bare URL renders a profile card). Note-level public/private toggling is OUT OF SCOPE for this phase (everything stays auth-gated; frontmatter `public: true` is future work).
 
-#### P16-1: Handle model & migration (`src/db.ts`, `src/users.ts`, `src/rest.ts`)
+#### P16-1: Handle model & migration (`src/db.ts`, `src/users.ts`, `src/rest.ts`) ✅ COMPLETE 2026-04-21 (7ab1c12)
 
 Add canonical handle support and history table.
 
