@@ -30,21 +30,21 @@ Tell me an idea — a sentence, a half-thought, a "what if." I'll capture it as 
 
 **Sketch:**
 - Daily pass scans graph state for **mechanical signals**: orphan notes, thin concepts (<100 words, no outbound links), islands (2+ disconnected components), stale notes with unresolved TODOs. Signals ranked by impact.
-- Separately, a **random-walk pass** samples N short walks through the wikilink graph; an LLM reads each walk and looks for latent patterns — implicit questions, unstated super-categories, unnamed tensions between concepts. Produces "thoughtful" prompts beyond mechanical gap-filling.
-- Top 3 prompts/day emitted into the **Grove Heartbeat Digest's Prompts section** (see separate shaping): 1–2 mechanical + 1 thoughtful.
+- **Random-walk pass**: 8 short walks/day (~10 nodes each) through the wikilink graph; Claude Haiku synthesizes each walk and looks for latent patterns — implicit questions, unstated super-categories, unnamed tensions between concepts. Budget: ~$0.03/day.
+- Top 3 prompts/day emitted into the **Grove Heartbeat Digest's Prompts section**: 1–2 mechanical + 1 thoughtful.
 - Answer routing: narrow prompts (e.g., "Alice has no backlinks") edit the triggering note directly. Broad prompts (essay-shaped, reflective) append to today's journal entry. User chooses mode per reply.
+- **Unified queue with `/garden` skill**: both the digest cron and the interactive `/garden` daily practice read from the same `heartbeat_items` table. Answering in either channel resolves the item — no duplication between email push and interactive pull.
 
 **Dependencies:**
-- Grove Heartbeat Digest (shared delivery surface — see its own entry)
+- Grove Heartbeat Digest (shared delivery surface + `heartbeat_items` table)
 - Graph health metrics (exists: Phase 13)
-- LLM access for walk synthesis + prompt polishing (likely Claude Haiku, same as Phase 7 discovery)
+- Claude Haiku API (existing Phase 7 discovery pattern)
+- `/garden` skill refactor (cross-repo: `~/.claude/skills/garden/`) — point it at `heartbeat_items`
 
 **Success signal:** After 30 days, graph health metrics (orphans, islands, thin concepts) trend down. Daily prompt email produces 1–2 vault edits or journal entries per week on average. Silent-day rate feels correct (neither every day nor never). Random-walk prompts surface at least one "I hadn't thought of that" insight per week.
 
-**Open questions:**
-- Random-walk cost: N walks/day, which model, what's the budget?
-- "Reject this prompt" feedback loop so heartbeat learns what's signal vs. noise — built in from the start, or add when needed?
-- How does this interact with `/garden` (daily practice skill that already surfaces similar prompts pulled interactively)? Unify the prompt source so both channels draw from the same ranked queue?
+**Open questions:** resolved for v1.
+- Deferred post-v1: explicit reject/thumbs-down feedback loop (v1 uses dismiss-rate in `heartbeat_items` as the quality signal — revisit ranking if dismiss rate exceeds 40%).
 
 ---
 
@@ -54,25 +54,25 @@ Tell me an idea — a sentence, a half-thought, a "what if." I'll capture it as 
 
 **Sketch:**
 - `LEARNINGS.md` at repo root, append-only, checked into git.
-- Each cron run appends a terse section `## <ISO-date> <run-name>` with:
-  - `Observed:` anomalies, drift, repairs made
-  - `Acted:` auto-resolutions taken
-  - `Asks:` questions for the human — items promoted into the Grove Heartbeat Digest's Asks section
+- Each cron run appends a section `## <ISO-date> <run-name>` using a **rigid template**:
+  - `**Observed:**` anomalies, drift, repairs made
+  - `**Acted:**` auto-resolutions taken
+  - `**Asks:**` questions for the human — items promoted into the Grove Heartbeat Digest's Asks section (or `none`)
+- Rigid template is easy for agents to parse at startup and greppable. Producers write `none` rather than pad when there's nothing to say.
+- **Dedup via idempotency_key**: each observation carries a key (e.g., `broken-link:<src>:<dst>`). Same key within 30 days → increment `seen_count` on the existing entry (displayed as `(seen 3x, last <date>)`) instead of appending a duplicate.
+- **Rotation**: daily check moves entries dated >30 days ago into `LEARNINGS/YYYY-QQ.md` quarter archives. Active `LEARNINGS.md` stays agent-loadable; history stays grep-able.
 - CLAUDE.md references `LEARNINGS.md` so agent sessions load recent findings at startup — no re-diagnosing problems an earlier run already solved.
 - Weekly pulse (`/garden:pulse` or a new `/garden:learnings`) summarizes the week's entries; patterns worth keeping graduate to vault concept notes or PLAN.md tasks.
+- Ask lifecycle (timeout, resolution, resurrection) is handled by the Grove Heartbeat Digest contract — see its entry.
 
 **Dependencies:**
 - Existing cron surfaces: `post-sync-discover.sh`, Phase 13 auto-healer, Phase 13 graph-health
 - Grove Heartbeat Digest (delivery surface for "Asks" — see its own entry)
 - CLAUDE.md reference pattern (standard, works today)
 
-**Success signal:** After 2 weeks, a fresh Claude Code session in `grove/` cites prior learnings without prompting (e.g., "per last week's LEARNINGS, the auto-healer already normalized broken wikilinks after move X"). Human answers the daily "Asks" section occasionally — indicating the filter surfaces genuinely ambiguous signals, not noise. File stays under a size cap (30-day inline window, older archived).
+**Success signal:** After 2 weeks, a fresh Claude Code session in `grove/` cites prior learnings without prompting (e.g., "per last week's LEARNINGS, the auto-healer already normalized broken wikilinks after move X"). Human answers the daily "Asks" section occasionally — indicating the filter surfaces genuinely ambiguous signals, not noise. File stays under ~30 days inline, older archived cleanly.
 
-**Open questions:**
-- Rigid template (easier to parse, drifts to boilerplate) vs. free-form bullets (higher quality, harder to summarize)?
-- Size cap: when to rotate `LEARNINGS.md` into `LEARNINGS/2026-Q2.md` archives? 30 days? 200 lines?
-- Dedup: if two crons observe the same anomaly, does it write twice, or increment a `seen: N` counter on the existing entry?
-- When does an "Ask" time out? If I never answer, does it re-surface forever, or age out after N days?
+**Open questions:** resolved for v1.
 
 ---
 
@@ -81,26 +81,44 @@ Tell me an idea — a sentence, a half-thought, a "what if." I'll capture it as 
 **Problem:** Multiple Grove subsystems want user attention on a daily cadence — growth prompts (graph-derived questions), cron "Asks" (anomalies needing a decision), future additions (weekly pulse, harvest results). Delivering each in its own email creates inbox noise and inconsistent conventions. One shared daily email + mirrored dashboard card is the single attention surface.
 
 **Sketch:**
-- Daily cron (~7am local) collects items from all producers: Growth Prompting Heartbeat (Prompts), Extract Learnings from Autonomous Runs (Asks), later additions (weekly Pulse).
-- Email structure: fixed section order (Prompts → Asks → Pulse). A section with zero items is omitted entirely. When all sections are empty → **no email is sent** (silent-day rule). After N silent days in a row, the next email includes a small "(quiet streak: Nd)" note.
-- `grove.md/dashboard` shows a "Today" card at the top that mirrors the email state exactly — same items, same structure, same silent-day behavior ("Garden is quiet today" when no items).
-- Email → dashboard link at the bottom: `[Open in Grove]`. The dashboard card holds the answer UI (inline note edit, decision buttons for Asks). Email is the notification; dashboard is the workbench.
-- One email per user per day, max. One cron job, one sender address, one template.
+- **Storage:** new `heartbeat_items` SQLite table:
+  ```sql
+  CREATE TABLE heartbeat_items (
+    id TEXT PRIMARY KEY,
+    producer TEXT NOT NULL,           -- 'growth-prompt', 'auto-healer', etc.
+    kind TEXT NOT NULL,               -- 'prompt' | 'ask'
+    idempotency_key TEXT,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    resolved_at TEXT,
+    dismissed_at TEXT,
+    seen_count INTEGER DEFAULT 1,
+    status TEXT DEFAULT 'active'      -- 'active' | 'resolved' | 'dismissed' | 'aged'
+  );
+  ```
+  Producers INSERT; the digest cron SELECTs `status='active'`; answer paths UPDATE `resolved_at`/`dismissed_at`/`status`.
+- **Send time:** fixed `0 7 * * * America/Los_Angeles` (7am PT). Per-user configurability deferred until multi-resident users exist.
+- **Email structure:** fixed section order (Prompts → Asks → optional Pulse). Section with zero items is omitted. All sections empty → **no email sent** (silent-day rule). After N silent days, next email includes `(quiet streak: Nd)` note. **Any non-silent day resets streak** to 0.
+- **Aging:** items exceed 7 days unresolved → `status='aged'`, excluded from digest + dashboard. History queryable via `grove heartbeat history`. **Producer re-emits a new item** (new id) if underlying condition persists; old aged one stays archived.
+- **Dashboard mirror:** `grove.md/dashboard` shows a read-only "Today" card mirroring the email state. Same items, same silent-day copy. No answer UI on dashboard (dashboard is read-only app-wide today).
+- **Answer surfaces (v1):** MCP + email-reply only, no dashboard UI:
+  - MCP: extend `write_note` with actions (Phase 11 precedent):
+    - `write_note(action='resolve', item_id, answer)` — answers the item; routes per payload spec (edit source note for narrow prompts, append journal for broad, mark ask resolved)
+    - `write_note(action='dismiss', item_id, reason)` — permanent dismiss; same idempotency_key blocked from re-emit for 30 days
+  - Email reply-to: parse reply body for `resolve: <answer>` or `dismiss: <reason>` per item in the original digest. Implementation choice in spec (IMAP poll or Mailgun inbound webhook).
+- No snooze action in v1 — aging handles the "not now" case implicitly.
 
 **Dependencies:**
-- Email infra (exists: `src/email.ts`, Phase B)
+- Email send infra (exists: `src/email.ts`, Phase B)
+- Email receive infra (new — IMAP or inbound webhook)
 - Grove cron system (exists — 5-min sync, auto-healer, graph-health)
-- `grove.md/dashboard` (exists — Phase 4)
-- Producers publish items into a shared queue/table (new schema — see open questions)
+- `grove.md/dashboard` (exists — Phase 4) — new read-only Today card component
+- `write_note` MCP tool action extension (Phase 11 precedent)
+- Database migration for `heartbeat_items` (standard Grove pattern)
 
-**Success signal:** User receives one email/day max, often fewer. Dashboard "Today" card and email always match. When answered (via dashboard UI), items disappear from both surfaces. Silent-day rate stabilizes around 20–40% after a few weeks (enough signal without daily obligation).
+**Success signal:** User receives one email/day max, often fewer (silent-day rate 20–40% after a few weeks). Dashboard "Today" card and email always match. Items answered via MCP or email-reply disappear from both surfaces next send. Aging keeps the active queue clean without losing history.
 
-**Open questions:**
-- Item storage: new `heartbeat_items` table with `{id, producer, kind: prompt|ask, payload, created_at, resolved_at}`, or leave producers as files and aggregate at send-time? (Leaning: table — resolves dedup, resolution tracking, dashboard state cleanly.)
-- Reply-to-email → answer plumbing: is email purely notification (click through to dashboard to answer), or does reply-to-address support inline answers? (Leaning: click-through only for v1; inline-reply via IMAP later if email answering becomes desired.)
-- Send time: fixed 7am local, or user-configurable? (Leaning: fixed for v1; configurable when there's a second user.)
-- Quiet-streak counter rule: reset on any non-silent day, or only after a "real" item (not Pulse-only)?
-- When does an unanswered Ask escalate or age out? (Shared with Extract Learnings open question.)
+**Open questions:** resolved for v1.
 
 ---
 
@@ -109,36 +127,38 @@ Tell me an idea — a sentence, a half-thought, a "what if." I'll capture it as 
 **Problem:** Grove's actual capabilities, its marketing copy, its docs, and its PLAN.md drift apart. The landing page advertises things that exist but aren't discoverable; features ship without updating docs; agents connecting via MCP have no canonical answer to "what can Grove do?". Three audiences — humans (marketing), agents (introspection), internal (roadmap) — need the same data from one source.
 
 **Sketch:**
-- `capacities.yml` at repo root, source of truth. Example entry:
+- `capacities.yml` at repo root, **source of truth**, hand-edited (YAML for comments + ergonomics). Example entry:
   ```yaml
   - id: semantic-search
     name: Semantic search across your vault
     description: Hybrid BM25 + vector search; returns notes ranked by relevance
-    status: shipped       # shipped | beta | planned
+    status: shipped           # shipped | beta | planned
     implemented_by: [Phase 0, Phase 5]
     primitives: [mcp:query, rest:/v1/search]
     docs: docs/search.md
     marketing_anchor: /features#search
   ```
-- Scope is **product-level capabilities** (user outcomes), not API primitives. Primitives are listed per-capability for agents that want to drill down.
-- Build step generates:
+- **Scope is product-level capabilities** — one bullet of marketing copy = one capability. Expected count: 8–15 today. Primitives listed per-capability for agents that want to drill down.
+- **Build step** (`scripts/build-capacities.ts`) generates on every change to `capacities.yml`:
   - `docs/capabilities.md` — human-readable Markdown (rendered in docs + pulled into grove-www)
-  - `grove-www/public/.well-known/grove-capacities.json` — machine-readable manifest for agents
+  - `grove-www/public/.well-known/grove-capacities.json` — machine-readable manifest
   - Landing page section at `grove.md/features` hydrates from the generated Markdown
-- CI check: every `status: shipped` capability must reference a ✅ phase in PLAN.md; every ✅ phase should map to at least one capability. Drift fails the build.
+- **Agent introspection**: `/.well-known/grove-capacities.json` only. No new MCP tool (respects CLAUDE.md 6-tool rule). Any agent (MCP or otherwise) can `curl` it.
+- **CI gating**:
+  - `status: shipped` → all `implemented_by` phases must be ✅ in PLAN.md
+  - `status: beta` → at least one `implemented_by` phase must be in-progress (⏳)
+  - `status: planned` → any or no phase reference
+  - Every ✅ phase in PLAN.md should map to at least one capability (warning, not error — infra-only phases without user-facing capability are allowed but flagged)
 
 **Dependencies:**
 - PLAN.md (unchanged — phases stay authoritative; capabilities link outward via `implemented_by`)
-- grove-www build pipeline (small generator step — YAML → Markdown + JSON)
-- Possible `vault_status?mode=capabilities` MCP response (stays under the 6-tool limit)
+- `scripts/build-capacities.ts` (new — small YAML → Markdown + JSON generator)
+- grove-www build pipeline (include the generator step; serve `/.well-known/grove-capacities.json` statically)
+- CI workflow for drift gating (when Phase 4 CI/CD lands; until then, manual check on PR)
 
 **Success signal:** A new user hitting `grove.md/features` and an agent fetching `/.well-known/grove-capacities.json` get the same 8–15 capabilities, accurate to what's shipped. Every phase-graduating PR includes a capacities.yml update; CI rejects PRs that ship a new capability without updating the manifest. Marketing copy on the landing page is grep-able back to YAML IDs.
 
-**Open questions:**
-- YAML vs. JSON as source (YAML easier to hand-edit; generate JSON). Confirming YAML is the right choice.
-- Agent introspection: extend `vault_status` with a `mode: capabilities` parameter, or expose a separate `/.well-known/` endpoint only? (Architecture rule in CLAUDE.md: keep MCP tools at 6. Strong lean toward the /.well-known/ endpoint unless there's a reason agents can't fetch HTTP.)
-- Granularity rule: one line of marketing copy = one capability? Or finer?
-- `beta` status: can a capability be listed as beta without any fully-shipped phase reference? (Probably yes — beta = partial shipment; CI rule is "shipped requires shipped phase", looser for beta.)
+**Open questions:** resolved for v1.
 
 ---
 
