@@ -152,28 +152,34 @@ export function updateUserBio(userId: string, bio: string | null): boolean {
  * Change a user's handle. Validates the new value, moves the old handle
  * into `handle_history` (so it can't be reclaimed), and atomically updates
  * `users.username`. Throws with a descriptive message on validation failure.
+ *
+ * Returns the old handle when the change was applied, or `null` when the
+ * new value matched the current handle (no-op). Callers use the return
+ * value to emit an audit entry without a second lookup.
  */
-export function changeUserHandle(userId: string, newHandle: string): void {
+export function changeUserHandle(userId: string, newHandle: string): string | null {
   const db = getDb();
   const user = db
     .prepare("SELECT id, username FROM users WHERE id = ?")
     .get(userId) as { id: string; username: string | null } | undefined;
   if (!user) throw new Error("user not found");
 
-  if (user.username === newHandle) return;
+  if (user.username === newHandle) return null;
 
   const validation = isValidHandle(newHandle, { excludeUserId: userId });
   if (!validation.valid) throw new Error(validation.reason ?? "invalid handle");
 
+  const oldHandle = user.username;
   const tx = db.transaction(() => {
-    if (user.username) {
+    if (oldHandle) {
       db.prepare(
         "INSERT OR REPLACE INTO handle_history (handle, user_id, released_at) VALUES (?, ?, datetime('now'))",
-      ).run(user.username, userId);
+      ).run(oldHandle, userId);
     }
     db.prepare("UPDATE users SET username = ? WHERE id = ?").run(newHandle, userId);
   });
   tx();
+  return oldHandle;
 }
 
 /**
