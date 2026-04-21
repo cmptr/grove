@@ -62,7 +62,8 @@ describe("handleWriteNote", () => {
     expect(result.action).toBe("create");
     expect(result.content_hash).toMatch(/^[a-f0-9]{64}$/);
     expect(result.commit).toBe("abc123");
-    expect(result.url).toContain("grove.md");
+    // P16-4: URLs are canonical /@<handle>/... form.
+    expect(result.url).toMatch(/^https:\/\/grove\.md\/@[a-z0-9][a-z0-9_-]*\/Inbox\/test-note$/);
 
     // Verify the file was actually written
     const written = readFileSync(join(tempVault, "Inbox/test-note.md"), "utf-8");

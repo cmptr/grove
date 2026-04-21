@@ -46,7 +46,7 @@ describe("share-a-note links", () => {
   it("creates a share link with defaults", () => {
     const result = createShareLink("Resources/Concepts/taste-graph.md", "user_00000000", "https://api.grove.md");
     expect(result.id).toMatch(/^sh_/);
-    expect(result.url).toContain("/s/");
+    expect(result.url).toContain("/@admin/s/");
     expect(result.url).toContain("grove.md");
     expect(result.expires_at).toBeTruthy();
 
@@ -129,8 +129,8 @@ describe("share-a-note links", () => {
     expect(deleteShareLink("sh_ghost")).toBe(false);
   });
 
-  it("URL uses grove.md domain, not api.grove.md", () => {
+  it("URL uses grove.md domain with canonical /@<handle>/s/<id> shape", () => {
     const result = createShareLink("test.md", "user_00000000", "https://api.grove.md");
-    expect(result.url).toMatch(/^https:\/\/grove\.md\/s\/sh_/);
+    expect(result.url).toMatch(/^https:\/\/grove\.md\/@admin\/s\/sh_/);
   });
 });

@@ -1,10 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 const SCHEMA = `
-  CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT UNIQUE, email TEXT UNIQUE, role TEXT NOT NULL DEFAULT 'member', created_at TEXT NOT NULL DEFAULT (datetime('now')), last_login_at TEXT);
+  CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT UNIQUE, email TEXT UNIQUE, role TEXT NOT NULL DEFAULT 'member', display_name TEXT, bio TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')), last_login_at TEXT);
   CREATE TABLE IF NOT EXISTS vaults (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id), slug TEXT NOT NULL, display_name TEXT NOT NULL, git_repo_path TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')), storage_bytes INTEGER NOT NULL DEFAULT 0, storage_quota_bytes INTEGER NOT NULL DEFAULT 104857600, UNIQUE(owner_id, slug));
   CREATE TABLE IF NOT EXISTS api_keys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), vault_id TEXT NOT NULL, name TEXT NOT NULL, hashed_token TEXT NOT NULL UNIQUE, scopes TEXT NOT NULL DEFAULT 'read,write', created_at TEXT NOT NULL DEFAULT (datetime('now')), last_used_at TEXT, expires_at TEXT, session_id TEXT);
   CREATE TABLE IF NOT EXISTS trails (id TEXT PRIMARY KEY, vault_id TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, config_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')));
@@ -61,6 +61,7 @@ describe("invite", () => {
 
   afterEach(() => {
     stopCleanup();
+    vi.restoreAllMocks();
   });
 
   it("creates a new user, trail grant, and magic link", async () => {
@@ -139,5 +140,23 @@ describe("invite", () => {
     expect(user).toBeDefined();
     // Username should be derived from local part, cleaned up
     expect(user.username).toMatch(/^[a-z0-9][a-z0-9-]{2,30}$/);
+  });
+
+  it("embeds the owning resident handle in the magic-link redirect (P16-4)", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    await inviteUser("dana@example.com", "trail_abc123", "viewer", "https://api.grove.md");
+
+    // Dev-mode email logs the verify URL. Decode the embedded redirect
+    // and confirm it carries resident=admin + the existing trail param.
+    const logged = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    const verifyMatch = logged.match(/https:\/\/[^\s]+/);
+    expect(verifyMatch).not.toBeNull();
+    const verifyUrl = new URL(verifyMatch![0]);
+    const redirectParam = verifyUrl.searchParams.get("redirect");
+    expect(redirectParam).not.toBeNull();
+    const redirectUrl = new URL(redirectParam!);
+    expect(redirectUrl.pathname).toBe("/api/auth/callback");
+    expect(redirectUrl.searchParams.get("trail")).toBe("trail_abc123");
+    expect(redirectUrl.searchParams.get("resident")).toBe("admin");
   });
 });

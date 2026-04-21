@@ -47,11 +47,39 @@ export async function flushWriteQueue(): Promise<void> {
   await writeQueue.flush();
 }
 
-/** Encode a vault path as a valid URL (encode each segment, preserve slashes) */
-function noteUrl(vaultPath: string): string {
+/**
+ * Resolve the handle (users.username) for the vault owner.
+ *
+ * Grove is single-tenant today — every public URL is scoped to one resident.
+ * Used as the fallback when a caller hasn't supplied an explicit handle.
+ * Returns "unknown" when no user row exists (fresh test databases).
+ */
+function getVaultOwnerHandle(): string {
+  try {
+    const db = getDb();
+    const row = db
+      .prepare(
+        "SELECT u.username FROM vaults v JOIN users u ON u.id = v.owner_id ORDER BY v.created_at ASC LIMIT 1",
+      )
+      .get() as { username: string | null } | undefined;
+    if (row?.username) return row.username;
+    const fallback = db
+      .prepare("SELECT username FROM users WHERE role = 'owner' LIMIT 1")
+      .get() as { username: string | null } | undefined;
+    return fallback?.username ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+/**
+ * Encode a vault path as a canonical `/@<handle>/<path>` URL.
+ * Every segment is URL-encoded; slashes are preserved.
+ */
+function noteUrl(vaultPath: string, handle: string): string {
   const stripped = vaultPath.replace(/\.md$/, "");
   const encoded = stripped.split("/").map(encodeURIComponent).join("/");
-  return `https://grove.md/${encoded}`;
+  return `https://grove.md/@${handle}/${encoded}`;
 }
 
 // ── Path traversal guard (same as server.ts) ────────────────────────
@@ -710,10 +738,14 @@ export function handleTrailPreviewTest(
 /**
  * Search notes via hybrid search. Returns structured results.
  * If a trail is provided, filters results to trail-visible notes.
+ * `handle` scopes result URLs to `/@<handle>/...`; falls back to the
+ * vault owner when the caller doesn't know it (single-tenant mode).
  */
-export async function handleSearch(query: string, limit: number = 10, trail?: TrailConfig | null): Promise<SearchResult[]> {
+export async function handleSearch(query: string, limit: number = 10, trail?: TrailConfig | null, handle?: string): Promise<SearchResult[]> {
   const fetchLimit = trail ? limit * 3 : limit; // over-fetch for trail filtering
   const results = await hybridSearch(query, fetchLimit);
+
+  const residentHandle = handle ?? getVaultOwnerHandle();
 
   // Resolve QMD's lowercase-kebab paths to real filesystem paths.
   // QMD index stores e.g. "resources/concepts/meditation-mindfulness.md"
@@ -734,7 +766,7 @@ export async function handleSearch(query: string, limit: number = 10, trail?: Tr
       score: r.rrf_score,
       vault_path: r.vault_path,
       real_path: realPath,
-      url: "https://grove.md/" + realPath.replace(/\.md$/, "").split("/").map(encodeURIComponent).join("/"),
+      url: noteUrl(realPath, residentHandle),
     };
   });
 
@@ -960,7 +992,7 @@ export async function handleWriteNote(
   notePath: string,
   frontmatter: Record<string, unknown>,
   content: string,
-  options: { ifHash?: string; trail?: TrailConfig | null; keyName?: string },
+  options: { ifHash?: string; trail?: TrailConfig | null; keyName?: string; handle?: string },
 ): Promise<WriteNoteResult> {
   // Trail write scope check
   if (options.trail) {
@@ -1021,7 +1053,7 @@ export async function handleWriteNote(
       action,
       content_hash: contentHash(serialized),
       commit: sha,
-      url: noteUrl(relPath),
+      url: noteUrl(relPath, options.handle ?? getVaultOwnerHandle()),
     };
   });
 
@@ -1199,7 +1231,7 @@ export interface MoveNoteResult {
 export async function handleMoveNote(
   notePath: string,
   newPath: string,
-  options: { ifHash?: string; trail?: TrailConfig | null; keyName?: string } = {},
+  options: { ifHash?: string; trail?: TrailConfig | null; keyName?: string; handle?: string } = {},
 ): Promise<MoveNoteResult> {
   // Validate both paths
   let srcAbs: string;
@@ -1310,7 +1342,7 @@ export async function handleMoveNote(
     links_updated: result.links_updated,
     commit: result.commit,
     content_hash: result.content_hash,
-    url: noteUrl(dstRel),
+    url: noteUrl(dstRel, options.handle ?? getVaultOwnerHandle()),
   };
 }
 
@@ -1450,7 +1482,7 @@ function slugFromFilename(filename: string | undefined, hash: string): string {
  */
 export async function handleImageUpload(
   input: ImageUploadInput,
-  options: { trail?: TrailConfig | null; keyName?: string } = {},
+  options: { trail?: TrailConfig | null; keyName?: string; handle?: string } = {},
 ): Promise<ImageUploadResult> {
   // Validate size
   if (input.file.length === 0) {
@@ -1514,6 +1546,7 @@ export async function handleImageUpload(
   const noteResult = await handleWriteNote(notePath, frontmatter, content, {
     trail: options.trail,
     keyName: options.keyName,
+    handle: options.handle,
   });
 
   // Queue async enrichment (Vision description + tags + OCR → rewrite note)

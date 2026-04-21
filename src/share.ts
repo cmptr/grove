@@ -8,6 +8,7 @@
 
 import { randomBytes } from "node:crypto";
 import { getDb } from "./db.js";
+import { getUserById } from "./users.js";
 
 export interface SharedLink {
   id: string;
@@ -50,9 +51,11 @@ export function createShareLink(
     "INSERT INTO shared_links (id, note_path, created_by, expires_at, max_views, view_count, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)",
   ).run(id, notePath, createdBy, expiresAt.toISOString(), maxViews, now.toISOString());
 
-  // URL points to grove-www /s/<id>
+  // URL points to grove-www /@<handle>/s/<id>
+  const owner = getUserById(createdBy);
+  const ownerHandle = owner?.username ?? "unknown";
   const wwwBase = baseUrl.replace("api.grove.md", "grove.md");
-  const url = `${wwwBase}/s/${id}`;
+  const url = `${wwwBase}/@${ownerHandle}/s/${id}`;
 
   return { id, url, expires_at: expiresAt.toISOString() };
 }
