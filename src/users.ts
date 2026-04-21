@@ -13,6 +13,7 @@ export interface User {
   email: string;
   role: UserRole;
   display_name: string | null;
+  bio: string | null;
   created_at: string;
   last_login_at: string | null;
 }
@@ -67,26 +68,143 @@ export function revokeAllOtherSessions(userId: string, keepSessionId: string): n
   return result.changes;
 }
 
-const RESERVED_USERNAMES = new Set([
-  "login", "auth", "settings", "api", "admin", "about",
-  "pricing", "help", "docs", "blog", "status", "health",
-  "mcp", "v1", "trails", "new", "search",
+// ── Handles (P16-1) ───────────────────────────────────────────────
+
+/**
+ * Reserved handles — rejected for new and changed handles. Superset of
+ * RESERVED_USERNAMES; covers top-level routes that the resident URL space
+ * must not shadow (`/@admin`, `/@api`, …) and paths grove-www serves
+ * outside a resident context.
+ */
+export const RESERVED_HANDLES = new Set([
+  "admin", "api", "v1", "login", "logout", "signup", "dashboard", "profile",
+  "keys", "images", "home", "trails", "s", "u", "me", "settings", "help",
+  "about", "docs", "support", "privacy", "terms", "well-known", "auth",
 ]);
 
-const USERNAME_RE = /^[a-z0-9][a-z0-9-]{2,30}$/;
+/**
+ * Handle syntax: 1–30 chars, lowercase `[a-z0-9_-]` only, must start with
+ * `[a-z0-9]`. No leading hyphen/underscore to avoid URL-routing footguns.
+ */
+const HANDLE_RE = /^[a-z0-9][a-z0-9_-]{0,29}$/;
 
-export function validateUsername(username: string): { valid: boolean; reason?: string } {
-  if (!USERNAME_RE.test(username)) {
-    return { valid: false, reason: "Username must be 3-31 chars, lowercase alphanumeric and hyphens, starting with alphanumeric" };
+export interface HandleValidation {
+  valid: boolean;
+  reason?: string;
+}
+
+/**
+ * Validate a candidate handle against shape, reserved list, and uniqueness
+ * (users.username + handle_history.handle). Pass `excludeUserId` to ignore
+ * the caller's current handle when checking for availability (so a user
+ * submitting their own current handle isn't rejected as "taken").
+ */
+export function isValidHandle(
+  handle: string,
+  opts: { excludeUserId?: string } = {},
+): HandleValidation {
+  if (typeof handle !== "string" || handle.length === 0) {
+    return { valid: false, reason: "handle is required" };
   }
-  if (RESERVED_USERNAMES.has(username)) {
-    return { valid: false, reason: "Username is reserved" };
+  if (handle.length > 30) {
+    return { valid: false, reason: "handle must be 30 chars or fewer" };
   }
+  if (!HANDLE_RE.test(handle)) {
+    return {
+      valid: false,
+      reason: "handle must be lowercase [a-z0-9_-], starting with a letter or digit",
+    };
+  }
+  if (RESERVED_HANDLES.has(handle)) {
+    return { valid: false, reason: "handle is reserved" };
+  }
+
+  const db = getDb();
+  const existing = db
+    .prepare("SELECT id FROM users WHERE username = ?")
+    .get(handle) as { id: string } | undefined;
+  if (existing && existing.id !== opts.excludeUserId) {
+    return { valid: false, reason: "handle is taken" };
+  }
+
+  const historical = db
+    .prepare("SELECT user_id FROM handle_history WHERE handle = ?")
+    .get(handle) as { user_id: string } | undefined;
+  if (historical && historical.user_id !== opts.excludeUserId) {
+    return { valid: false, reason: "handle was previously used and cannot be reclaimed" };
+  }
+
   return { valid: true };
 }
 
+/** Update a user's bio (nullable, max 280 chars). Returns true if updated. */
+export function updateUserBio(userId: string, bio: string | null): boolean {
+  if (bio !== null && bio.length > 280) {
+    throw new Error("bio too long (max 280 chars)");
+  }
+  const db = getDb();
+  const value = bio === null ? null : bio.trim() || null;
+  const result = db.prepare("UPDATE users SET bio = ? WHERE id = ?").run(value, userId);
+  return result.changes > 0;
+}
+
+/**
+ * Change a user's handle. Validates the new value, moves the old handle
+ * into `handle_history` (so it can't be reclaimed), and atomically updates
+ * `users.username`. Throws with a descriptive message on validation failure.
+ */
+export function changeUserHandle(userId: string, newHandle: string): void {
+  const db = getDb();
+  const user = db
+    .prepare("SELECT id, username FROM users WHERE id = ?")
+    .get(userId) as { id: string; username: string | null } | undefined;
+  if (!user) throw new Error("user not found");
+
+  if (user.username === newHandle) return;
+
+  const validation = isValidHandle(newHandle, { excludeUserId: userId });
+  if (!validation.valid) throw new Error(validation.reason ?? "invalid handle");
+
+  const tx = db.transaction(() => {
+    if (user.username) {
+      db.prepare(
+        "INSERT OR REPLACE INTO handle_history (handle, user_id, released_at) VALUES (?, ?, datetime('now'))",
+      ).run(user.username, userId);
+    }
+    db.prepare("UPDATE users SET username = ? WHERE id = ?").run(newHandle, userId);
+  });
+  tx();
+}
+
+/**
+ * Derive a handle from an email local-part for backfill / invite flows.
+ * Lowercases, strips disallowed chars, ensures an alphanumeric first char,
+ * clamps to 30 chars, and appends a 3-digit numeric suffix on collision.
+ * Never returns a reserved handle.
+ */
+export function deriveHandleFromEmail(email: string): string {
+  const local = email.split("@")[0] ?? "user";
+  let candidate = local
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, "")
+    .replace(/^[-_]+/, "");
+  if (candidate.length === 0 || !/^[a-z0-9]/.test(candidate)) candidate = `user${candidate}`;
+  candidate = candidate.slice(0, 30);
+
+  if (isValidHandle(candidate).valid) return candidate;
+
+  // Collision or reserved — append a numeric suffix. Up to 1000 tries, then fall back.
+  const base = candidate.slice(0, 26); // leave room for "-NNN"
+  for (let i = 0; i < 1000; i++) {
+    const suffix = String(i).padStart(3, "0");
+    const withSuffix = `${base}-${suffix}`;
+    if (isValidHandle(withSuffix).valid) return withSuffix;
+  }
+  throw new Error(`could not derive a unique handle from ${email}`);
+}
+
 export function createUser(email: string, username: string, role: UserRole = "viewer"): User {
-  const validation = validateUsername(username);
+  const validation = isValidHandle(username);
   if (!validation.valid) throw new Error(validation.reason);
 
   const id = "user_" + randomBytes(4).toString("hex");
@@ -95,7 +213,7 @@ export function createUser(email: string, username: string, role: UserRole = "vi
     "INSERT INTO users (id, username, email, role) VALUES (?, ?, ?, ?)"
   ).run(id, username, email, role);
 
-  return { id, username, email, role, display_name: null, created_at: new Date().toISOString(), last_login_at: null };
+  return { id, username, email, role, display_name: null, bio: null, created_at: new Date().toISOString(), last_login_at: null };
 }
 
 export function getUserById(id: string): User | null {

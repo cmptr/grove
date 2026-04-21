@@ -214,6 +214,14 @@ CREATE INDEX IF NOT EXISTS idx_flags_unresolved ON graph_health_flags(resolved_a
 CREATE UNIQUE INDEX IF NOT EXISTS idx_health_flags_unique
   ON graph_health_flags(flag_type, coalesce(source_path, ''), coalesce(target_path, ''))
   WHERE resolved_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS handle_history (
+  handle TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  released_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_handle_history_user ON handle_history(user_id);
 `;
 
 export function createSchema(): void {
@@ -224,6 +232,14 @@ export function createSchema(): void {
   migrateDiscoveryQueue(database);
   migrateSessionUserAgent(database);
   migrateApiKeySessionId(database);
+  migrateUserBio(database);
+}
+
+/** Add bio column to users (P16-1: resident profiles). */
+function migrateUserBio(database: Database.Database): void {
+  const cols = database.prepare("PRAGMA table_info(users)").all() as { name: string }[];
+  if (cols.some((c) => c.name === "bio")) return;
+  database.exec("ALTER TABLE users ADD COLUMN bio TEXT");
 }
 
 /** Add user_agent column to sessions (P15-1 follow-up). */

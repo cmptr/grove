@@ -50,6 +50,8 @@ import {
   revokeUserSession,
   revokeAllOtherSessions,
   getUserById,
+  changeUserHandle,
+  updateUserBio,
 } from "./users.js";
 import { generateRequestId, log as structuredLog, auditRead, auditWrite } from "./logger.js";
 import { installCrashHandlers } from "./crash-handlers.js";
@@ -60,6 +62,7 @@ import {
   handleDeleteNote, handleMoveNote,
   handleStatusHealth, handleStatusHistory, handleStatusDiagnostics,
   handleStatusGraph, handleStatusDigest, handleTrailInfo,
+  handleResidentProfile,
   handleTrailPreview, handleTrailPreviewTest,
   VALID_STATUS_MODES,
   handleImageUpload,
@@ -1476,6 +1479,21 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // GET /v1/residents/:handle — public resident profile (unauthenticated, P16-1)
+    const residentMatch = url.pathname.match(/^\/v1\/residents\/([^/]+)$/);
+    if (residentMatch && req.method === "GET") {
+      // CORS: allow any origin — profile pages render signed-out too.
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      const handle = decodeURIComponent(residentMatch[1]);
+      const profile = handleResidentProfile(handle);
+      if (!profile) {
+        sendJson(res, 404, { error: "resident not found" });
+        return;
+      }
+      sendJson(res, 200, profile);
+      return;
+    }
+
     // Auth — Bearer token required
     const restAuth = req.headers.authorization;
     const restToken = restAuth?.startsWith("Bearer ") ? restAuth.slice(7) : null;
@@ -1562,9 +1580,11 @@ const server = createServer(async (req, res) => {
       res.end(JSON.stringify({
         id: user.id,
         username: user.username,
+        handle: user.username,
         email: user.email,
         role: user.role,
         display_name: user.display_name,
+        bio: user.bio,
         created_at: user.created_at,
         last_login_at: user.last_login_at,
         keys: keys.map((k) => ({
@@ -1580,7 +1600,7 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // PATCH /v1/me — update display name (P15-1)
+    // PATCH /v1/me — update display name, handle, or bio (P15-1, P16-1)
     if (url.pathname === "/v1/me" && req.method === "PATCH") {
       let body: string;
       try { body = await readBody(req); } catch {
@@ -1588,30 +1608,66 @@ const server = createServer(async (req, res) => {
         res.end(JSON.stringify({ error: "read error" }));
         return;
       }
-      let parsed: { display_name?: string };
+      let parsed: { display_name?: string; handle?: string; bio?: string | null };
       try { parsed = JSON.parse(body); } catch {
         res.writeHead(400, restHeaders);
         res.end(JSON.stringify({ error: "invalid json" }));
         return;
       }
-      if (typeof parsed.display_name !== "string") {
+
+      const response: Record<string, unknown> = { ok: true };
+
+      if (typeof parsed.display_name === "string") {
+        if (parsed.display_name.length > 100) {
+          res.writeHead(400, restHeaders);
+          res.end(JSON.stringify({ error: "display_name too long (max 100 chars)" }));
+          return;
+        }
+        const updated = updateUserDisplayName(restKey.user_id, parsed.display_name);
+        if (!updated) {
+          res.writeHead(404, restHeaders);
+          res.end(JSON.stringify({ error: "user not found" }));
+          return;
+        }
+        response.display_name = parsed.display_name;
+      }
+
+      if (typeof parsed.handle === "string") {
+        try {
+          changeUserHandle(restKey.user_id, parsed.handle);
+        } catch (err) {
+          res.writeHead(400, restHeaders);
+          res.end(JSON.stringify({ error: (err as Error).message }));
+          return;
+        }
+        response.handle = parsed.handle;
+      }
+
+      if (parsed.bio !== undefined) {
+        const value = parsed.bio === null ? null : String(parsed.bio);
+        if (value !== null && value.length > 280) {
+          res.writeHead(400, restHeaders);
+          res.end(JSON.stringify({ error: "bio too long (max 280 chars)" }));
+          return;
+        }
+        try {
+          updateUserBio(restKey.user_id, value);
+        } catch (err) {
+          res.writeHead(400, restHeaders);
+          res.end(JSON.stringify({ error: (err as Error).message }));
+          return;
+        }
+        response.bio = value;
+      }
+
+      if (Object.keys(response).length === 1) {
         res.writeHead(400, restHeaders);
-        res.end(JSON.stringify({ error: "display_name (string) required" }));
+        res.end(JSON.stringify({ error: "no updatable fields provided (display_name, handle, bio)" }));
         return;
       }
-      if (parsed.display_name.length > 100) {
-        res.writeHead(400, restHeaders);
-        res.end(JSON.stringify({ error: "display_name too long (max 100 chars)" }));
-        return;
-      }
-      const updated = updateUserDisplayName(restKey.user_id, parsed.display_name);
-      if (!updated) {
-        res.writeHead(404, restHeaders);
-        res.end(JSON.stringify({ error: "user not found" }));
-        return;
-      }
+
       res.writeHead(200, restHeaders);
-      res.end(JSON.stringify({ ok: true, display_name: parsed.display_name }));
+      res.end(JSON.stringify(response));
       return;
     }
 

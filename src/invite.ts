@@ -8,7 +8,7 @@
 import { randomBytes } from "node:crypto";
 import { getDb } from "./db.js";
 import { createKey } from "./keys.js";
-import { getUserByEmail, createUser } from "./users.js";
+import { getUserByEmail, createUser, deriveHandleFromEmail } from "./users.js";
 import { sendMagicLinkEmail } from "./email.js";
 
 export interface InviteResult {
@@ -19,23 +19,6 @@ export interface InviteResult {
   created: boolean;   // true if new user was created
 }
 
-/**
- * Derive a username from an email address.
- * Takes the local part, lowercases, strips invalid chars, truncates to 30 chars.
- * If the result is too short or taken, appends a random suffix.
- */
-function usernameFromEmail(email: string): string {
-  const local = email.split("@")[0] ?? "user";
-  let name = local.toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 26);
-  if (name.length < 3) name = "user";
-
-  const db = getDb();
-  const existing = db.prepare("SELECT id FROM users WHERE username = ?").get(name);
-  if (!existing) return name;
-
-  // Append random suffix to avoid collision
-  return name.slice(0, 26) + "-" + randomBytes(2).toString("hex");
-}
 
 /**
  * Invite a user to a trail.
@@ -64,7 +47,7 @@ export async function inviteUser(
   let user = getUserByEmail(normalizedEmail);
   const created = !user;
   if (!user) {
-    const username = usernameFromEmail(normalizedEmail);
+    const username = deriveHandleFromEmail(normalizedEmail);
     user = createUser(normalizedEmail, username);
   }
 

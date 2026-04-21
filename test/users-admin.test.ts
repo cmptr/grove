@@ -11,6 +11,7 @@ const SCHEMA = `
   CREATE TABLE IF NOT EXISTS trail_grants (id TEXT PRIMARY KEY, trail_id TEXT NOT NULL REFERENCES trails(id) ON DELETE CASCADE, grantee_type TEXT NOT NULL, grantee_id TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')));
   CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL DEFAULT (datetime('now')), expires_at TEXT NOT NULL, absolute_expires_at TEXT NOT NULL, last_used_at TEXT, user_agent TEXT);
   CREATE TABLE IF NOT EXISTS magic_links (id TEXT PRIMARY KEY, email TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL DEFAULT (datetime('now')), expires_at TEXT NOT NULL, used_at TEXT);
+  CREATE TABLE IF NOT EXISTS handle_history (handle TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), released_at TEXT NOT NULL);
 `;
 
 const TEST_DIR = mkdtempSync(join(tmpdir(), "grove-users-admin-"));

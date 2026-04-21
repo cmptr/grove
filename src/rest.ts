@@ -31,7 +31,7 @@ import { analyzeGraph, computeDigest } from "./vault-graph.js";
 import { searchMetrics, metrics } from "./metrics.js";
 import { WriteQueue } from "./write-queue.js";
 import { embedFile } from "./embed-single.js";
-import { enqueueDiscovery } from "./db.js";
+import { enqueueDiscovery, getDb } from "./db.js";
 import { getImageStore, contentKey, extForContentType, type ImageStore } from "./image-store.js";
 import { autoTagImage, type ImageTagResult } from "./image-tag.js";
 
@@ -297,6 +297,51 @@ export interface TrailInfoResponse {
   description: string;
   note_count: number;
   created_at: string;
+}
+
+// ── Resident profile (unauthenticated, P16-1) ────────────────────
+
+export interface ResidentProfile {
+  handle: string;
+  display_name: string | null;
+  bio: string | null;
+  public_trail_slugs: string[];
+  note_count: number;
+}
+
+/**
+ * Public profile for a resident, keyed by handle (users.username).
+ *
+ * Returns null for 404 when the handle is unknown or belongs to no user.
+ * `public_trail_slugs` is currently always empty — per-trail public
+ * visibility is a future phase (see PLAN.md Phase 16 scope decision).
+ * `note_count` reflects the current vault total; this server is
+ * single-resident today.
+ */
+export function handleResidentProfile(handle: string): ResidentProfile | null {
+  if (!handle) return null;
+  const db = getDb();
+  const row = db
+    .prepare("SELECT id, username, display_name, bio FROM users WHERE username = ?")
+    .get(handle) as
+    | { id: string; username: string; display_name: string | null; bio: string | null }
+    | undefined;
+  if (!row) return null;
+
+  let noteCount = 0;
+  try {
+    noteCount = listNotes(VAULT_PATH, "*").length;
+  } catch {
+    // Vault missing or unreadable — fall back to 0 rather than 500.
+  }
+
+  return {
+    handle: row.username,
+    display_name: row.display_name,
+    bio: row.bio,
+    public_trail_slugs: [],
+    note_count: noteCount,
+  };
 }
 
 export function handleTrailInfo(trailId: string): TrailInfoResponse | null {
