@@ -3979,13 +3979,13 @@ Decisions made during planning. Reference these when implementing — don't re-l
 **Phase 17 — Post-Login Redirect** ✅ (shipped 2026-04-21):
 - p17: callback + marketing root + /login short-circuit + e2e test (single agent)
 
-**Phase 18 — Mobile-Optimized Pages** ⏳ (independent, parallel with P17):
+**Phase 18 — Mobile-Optimized Pages** ✅ (shipped 2026-04-21):
 - p18: viewport meta + hot-spot fixes + Playwright regression test + audit (single agent)
 
-**Phase 19 — Note Share UI** ⏳ (after P9-7, P16, P18):
-1. p19-1: schema migration + share.ts extensions (Agent A, solo, grove)
-2. p19-2: backend endpoints + rate limits + 410 + docs (Agent B, solo, grove)
-3. p19-3: proxy routes + CSRF ‖ expired recipient page (Agent C, grove-www) + share button + modal (Agent D, grove-www) — parallel
-4. p19-4: dashboard shares page (Agent E, solo, grove-www)
+**Phase 19 — Note Share UI** ✅ (shipped 2026-04-21, commits abf963c b2a0564 + grove-www 97c3a8a f11da33 804bb40):
+1. p19-1 ✅: schema migration + share.ts extensions
+2. p19-2 ✅: backend endpoints + rate limits + 410 + docs
+3. p19-3 ✅: proxy routes + CSRF, expired recipient page, share button + modal (2 parallel agents)
+4. p19-4 ✅: dashboard shares page
 
-Spec: `SPEC.md` at repo root (commit 2b92471).
+Spec: `SPEC.md` at repo root (commit 2b92471). Tests: grove 899 passing, grove-www vitest 60 passing, Playwright mobile+modal+dashboard 25 passing.
