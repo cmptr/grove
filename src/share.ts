@@ -29,6 +29,13 @@ export interface CreateShareResult {
   expires_at: string;
 }
 
+export type ShareStatus = "active" | "expired" | "revoked";
+
+export type PublicResolveResult =
+  | { status: "not_found" }
+  | { status: "gone"; reason: "expired" | "revoked" }
+  | { status: "ok"; link: SharedLink };
+
 function generateShareId(): string {
   return "sh_" + randomBytes(6).toString("hex");
 }
@@ -150,4 +157,43 @@ export function deleteShareLink(id: string): boolean {
   const db = getDb();
   const result = db.prepare("DELETE FROM shared_links WHERE id = ?").run(id);
   return result.changes > 0;
+}
+
+/**
+ * Derive public-facing status for a share row. Pure — no DB access.
+ * - `revoked` if revoked_at is set
+ * - `expired` if past TTL or view-capped
+ * - `active` otherwise
+ */
+export function deriveShareStatus(link: SharedLink, now: Date = new Date()): ShareStatus {
+  if (link.revoked_at !== null) return "revoked";
+  if (new Date(link.expires_at).getTime() <= now.getTime()) return "expired";
+  if (link.max_views !== null && link.view_count >= link.max_views) return "expired";
+  return "active";
+}
+
+/**
+ * Public share resolve: returns a discriminated result so callers can
+ * distinguish 404 (unknown id) from 410 (expired or revoked). On `ok`,
+ * bumps view_count and stamps last_accessed_at exactly like
+ * `resolveShareLink`.
+ */
+export function resolveSharePublic(id: string): PublicResolveResult {
+  const db = getDb();
+  const row = db.prepare("SELECT * FROM shared_links WHERE id = ?").get(id) as SharedLink | undefined;
+  if (!row) return { status: "not_found" };
+
+  if (row.revoked_at !== null) return { status: "gone", reason: "revoked" };
+  if (new Date(row.expires_at).getTime() <= Date.now()) return { status: "gone", reason: "expired" };
+  if (row.max_views !== null && row.view_count >= row.max_views) return { status: "gone", reason: "expired" };
+
+  const nowIso = new Date().toISOString();
+  db.prepare(
+    "UPDATE shared_links SET view_count = view_count + 1, last_accessed_at = ? WHERE id = ?",
+  ).run(nowIso, id);
+
+  return {
+    status: "ok",
+    link: { ...row, view_count: row.view_count + 1, last_accessed_at: nowIso },
+  };
 }

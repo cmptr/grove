@@ -15,7 +15,17 @@ const TEST_DB_PATH = join(TEST_DIR, "grove.db");
 process.env.GROVE_DB_PATH = TEST_DB_PATH;
 
 import { getDb, resetDb } from "../src/db.js";
-import { createShareLink, resolveShareLink, getShareLink, listShareLinks, deleteShareLink, revokeShareLink } from "../src/share.js";
+import {
+  createShareLink,
+  resolveShareLink,
+  resolveSharePublic,
+  deriveShareStatus,
+  getShareLink,
+  listShareLinks,
+  deleteShareLink,
+  revokeShareLink,
+  type SharedLink,
+} from "../src/share.js";
 
 function seedDb() {
   const db = getDb();
@@ -242,5 +252,97 @@ describe("share-a-note links", () => {
 
     const all = listShareLinks("user_00000000", { include_expired: true });
     expect(all.find((l) => l.id === capped.id)).toBeDefined();
+  });
+
+  // ── deriveShareStatus ────────────────────────────────────────────
+  describe("deriveShareStatus", () => {
+    function baseRow(overrides: Partial<SharedLink> = {}): SharedLink {
+      return {
+        id: "sh_x",
+        note_path: "n.md",
+        created_by: "user_00000000",
+        created_at: new Date().toISOString(),
+        expires_at: new Date(Date.now() + 86_400_000).toISOString(),
+        max_views: 100,
+        view_count: 0,
+        last_accessed_at: null,
+        revoked_by: null,
+        revoked_at: null,
+        ...overrides,
+      };
+    }
+
+    it("active row → 'active'", () => {
+      expect(deriveShareStatus(baseRow())).toBe("active");
+    });
+
+    it("revoked_at set → 'revoked' (even if also past TTL)", () => {
+      const row = baseRow({
+        revoked_at: new Date().toISOString(),
+        revoked_by: "user_00000000",
+        expires_at: new Date(Date.now() - 1000).toISOString(),
+      });
+      expect(deriveShareStatus(row)).toBe("revoked");
+    });
+
+    it("past TTL → 'expired'", () => {
+      const row = baseRow({ expires_at: new Date(Date.now() - 1000).toISOString() });
+      expect(deriveShareStatus(row)).toBe("expired");
+    });
+
+    it("view_count >= max_views → 'expired'", () => {
+      expect(deriveShareStatus(baseRow({ max_views: 5, view_count: 5 }))).toBe("expired");
+      expect(deriveShareStatus(baseRow({ max_views: 5, view_count: 10 }))).toBe("expired");
+    });
+
+    it("unlimited max_views never view-caps", () => {
+      expect(deriveShareStatus(baseRow({ max_views: null, view_count: 1000 }))).toBe("active");
+    });
+  });
+
+  // ── resolveSharePublic ───────────────────────────────────────────
+  describe("resolveSharePublic", () => {
+    it("returns not_found for unknown id", () => {
+      expect(resolveSharePublic("sh_nope")).toEqual({ status: "not_found" });
+    });
+
+    it("returns gone/revoked for revoked links", () => {
+      const r = createShareLink("r.md", "user_00000000", "https://api.grove.md");
+      revokeShareLink(r.id, "user_00000000");
+      const out = resolveSharePublic(r.id);
+      expect(out.status).toBe("gone");
+      if (out.status === "gone") expect(out.reason).toBe("revoked");
+    });
+
+    it("returns gone/expired for past-TTL links", () => {
+      const db = getDb();
+      const id = "sh_expired_public";
+      const past = new Date(Date.now() - 1000).toISOString();
+      db.prepare(
+        "INSERT INTO shared_links (id, note_path, created_by, expires_at, max_views, view_count, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)",
+      ).run(id, "e.md", "user_00000000", past, 100, new Date().toISOString());
+
+      const out = resolveSharePublic(id);
+      expect(out.status).toBe("gone");
+      if (out.status === "gone") expect(out.reason).toBe("expired");
+    });
+
+    it("returns gone/expired for view-capped links", () => {
+      const r = createShareLink("vc.md", "user_00000000", "https://api.grove.md", { max_views: 1 });
+      expect(resolveSharePublic(r.id).status).toBe("ok");
+      const out = resolveSharePublic(r.id);
+      expect(out.status).toBe("gone");
+      if (out.status === "gone") expect(out.reason).toBe("expired");
+    });
+
+    it("returns ok + bumps view_count + stamps last_accessed_at on success", () => {
+      const r = createShareLink("ok.md", "user_00000000", "https://api.grove.md");
+      const out = resolveSharePublic(r.id);
+      expect(out.status).toBe("ok");
+      if (out.status === "ok") {
+        expect(out.link.view_count).toBe(1);
+        expect(out.link.last_accessed_at).toBeTruthy();
+      }
+    });
   });
 });

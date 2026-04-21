@@ -82,6 +82,52 @@ describe("RateLimiter", () => {
       expect(limiter.checkWithLimit("trail:b", "read", 2).allowed).toBe(true);
     });
   });
+
+  // Matches the share-mint bucket in src/proxy.ts: 20/hr, keyed per owner userId.
+  describe("share mint limiter config (20/hr)", () => {
+    it("allows exactly 20 mints, then rejects the 21st", () => {
+      limiter = new RateLimiter({ reads: 20, writes: 20, windowMs: 60 * 60 * 1000 });
+      for (let i = 0; i < 20; i++) {
+        expect(limiter.check("user_owner", "write").allowed).toBe(true);
+        limiter.record("user_owner", "write");
+      }
+      const blocked = limiter.check("user_owner", "write");
+      expect(blocked.allowed).toBe(false);
+      expect(blocked.retryAfterMs).toBeGreaterThan(0);
+    });
+
+    it("separates per-owner buckets", () => {
+      limiter = new RateLimiter({ reads: 20, writes: 20, windowMs: 60 * 60 * 1000 });
+      for (let i = 0; i < 20; i++) limiter.record("user_a", "write");
+      expect(limiter.check("user_a", "write").allowed).toBe(false);
+      expect(limiter.check("user_b", "write").allowed).toBe(true);
+    });
+  });
+
+  // Matches the share-view bucket in src/proxy.ts: 60/min, keyed per client IP.
+  describe("share view limiter config (60/min)", () => {
+    it("allows 60 views from one IP, then rejects the 61st", () => {
+      limiter = new RateLimiter({ reads: 60, writes: 60, windowMs: 60_000 });
+      for (let i = 0; i < 60; i++) {
+        expect(limiter.check("1.2.3.4", "read").allowed).toBe(true);
+        limiter.record("1.2.3.4", "read");
+      }
+      expect(limiter.check("1.2.3.4", "read").allowed).toBe(false);
+    });
+
+    it("window rolls over after 60s", () => {
+      vi.useFakeTimers();
+      try {
+        limiter = new RateLimiter({ reads: 60, writes: 60, windowMs: 60_000 });
+        for (let i = 0; i < 60; i++) limiter.record("1.2.3.4", "read");
+        expect(limiter.check("1.2.3.4", "read").allowed).toBe(false);
+        vi.advanceTimersByTime(60_001);
+        expect(limiter.check("1.2.3.4", "read").allowed).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
 });
 
 // ── IdempotencyCache ────────────────────────────────────────────────

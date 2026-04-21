@@ -72,7 +72,15 @@ import { VaultLockedError } from "./index-crypto.js";
 import { parseMultipart, parseBoundary } from "./multipart.js";
 import { startStatsTimer } from "./vault-stats.js";
 import { inviteUser } from "./invite.js";
-import { createShareLink, resolveShareLink } from "./share.js";
+import {
+  createShareLink,
+  resolveSharePublic,
+  listShareLinks,
+  revokeShareLink,
+  getShareLink,
+  deriveShareStatus,
+  type SharedLink,
+} from "./share.js";
 import {
   encryptVault,
   unlockVault,
@@ -99,6 +107,38 @@ const MCP_LOG_PATH = join(LOG_DIR, "mcp.jsonl");
 const GROVE_URL = process.env.GROVE_URL ?? "https://api.grove.md";
 
 const rateLimiter = new RateLimiter({ reads: 120, writes: 20, windowMs: 60_000 });
+
+// Mint quota: 20 share links per hour per owner key.
+const shareMintLimiter = new RateLimiter({ reads: 20, writes: 20, windowMs: 60 * 60 * 1000 });
+
+// Public view quota: 60 resolutions per minute per client IP.
+const shareViewLimiter = new RateLimiter({ reads: 60, writes: 60, windowMs: 60 * 1000 });
+
+function clientIp(req: IncomingMessage): string {
+  const fwd = req.headers["x-forwarded-for"];
+  if (typeof fwd === "string" && fwd.length > 0) return fwd.split(",")[0]!.trim();
+  if (Array.isArray(fwd) && fwd.length > 0) return fwd[0]!.split(",")[0]!.trim();
+  return req.socket.remoteAddress ?? "unknown";
+}
+
+function shareRowToApi(link: SharedLink, baseUrl: string, ownerHandle: string | null): Record<string, unknown> {
+  const wwwBase = baseUrl.replace("api.grove.md", "grove.md");
+  const handle = ownerHandle ?? "unknown";
+  return {
+    id: link.id,
+    note_path: link.note_path,
+    url: `${wwwBase}/@${handle}/s/${link.id}`,
+    created_by: link.created_by,
+    created_at: link.created_at,
+    expires_at: link.expires_at,
+    max_views: link.max_views,
+    view_count: link.view_count,
+    last_accessed_at: link.last_accessed_at,
+    revoked_by: link.revoked_by,
+    revoked_at: link.revoked_at,
+    status: deriveShareStatus(link),
+  };
+}
 
 // ── Admin auth: persistent session cookie (SQLite) + Bearer fallback ──
 const GROVE_ADMIN_KEY = process.env.GROVE_ADMIN_KEY; // optional: restrict admin to a specific key name
@@ -1352,6 +1392,12 @@ const server = createServer(async (req, res) => {
       const admin = adminAuth(req);
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
+      const mintCheck = shareMintLimiter.check(admin.userId, "write");
+      if (!mintCheck.allowed) {
+        sendJson(res, 429, { error: "rate_limited", retry_after_ms: mintCheck.retryAfterMs });
+        return;
+      }
+
       let body: string;
       try { body = await readBody(req); } catch {
         sendJson(res, 400, { error: "read error" });
@@ -1369,11 +1415,73 @@ const server = createServer(async (req, res) => {
         return;
       }
 
+      // `max_views`: omitted → default 100; `null` → unlimited; number → cap.
+      let maxViewsOpt: number | null | undefined;
+      if (max_views === undefined) maxViewsOpt = undefined;
+      else if (max_views === null) maxViewsOpt = null;
+      else if (typeof max_views === "number" && Number.isFinite(max_views) && max_views > 0) maxViewsOpt = max_views;
+      else {
+        sendJson(res, 400, { error: "max_views must be a positive number or null" });
+        return;
+      }
+
       const result = createShareLink(note_path, admin.userId, GROVE_URL, {
         ttl_days: typeof ttl_days === "number" ? ttl_days : undefined,
-        max_views: typeof max_views === "number" ? max_views : undefined,
+        max_views: maxViewsOpt,
       });
+      shareMintLimiter.record(admin.userId, "write");
       sendJson(res, 200, result);
+      return;
+    }
+
+    // GET /v1/admin/share — list share links for the owner
+    if (url.pathname === "/v1/admin/share" && req.method === "GET") {
+      const admin = adminAuth(req);
+      if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
+
+      const notePathFilter = url.searchParams.get("note_path") ?? undefined;
+      const includeExpired = url.searchParams.get("include_expired") === "true";
+      const limitParam = url.searchParams.get("limit");
+      const limit = limitParam ? Math.max(1, Math.min(100, Number(limitParam) || 50)) : 50;
+
+      const rows = listShareLinks(admin.userId, {
+        note_path: notePathFilter,
+        include_expired: includeExpired,
+      });
+      const owner = getUserById(admin.userId);
+      const ownerHandle = owner?.username ?? null;
+      const page = rows.slice(0, limit);
+
+      sendJson(res, 200, {
+        shares: page.map((row) => shareRowToApi(row, GROVE_URL, ownerHandle)),
+        next_cursor: null,
+      });
+      return;
+    }
+
+    // DELETE /v1/admin/share/:id — soft-revoke a share link
+    const adminShareDeleteMatch = url.pathname.match(/^\/v1\/admin\/share\/([^/]+)$/);
+    if (adminShareDeleteMatch && req.method === "DELETE") {
+      const admin = adminAuth(req);
+      if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
+
+      const shareId = decodeURIComponent(adminShareDeleteMatch[1]!);
+      const existing = getShareLink(shareId);
+      if (!existing) { sendJson(res, 404, { error: "share not found" }); return; }
+      if (existing.revoked_at !== null) {
+        sendJson(res, 409, { error: "already_revoked", revoked_at: existing.revoked_at, revoked_by: existing.revoked_by });
+        return;
+      }
+
+      const ok = revokeShareLink(shareId, admin.userId);
+      if (!ok) { sendJson(res, 409, { error: "already_revoked" }); return; }
+
+      const updated = getShareLink(shareId);
+      sendJson(res, 200, {
+        id: shareId,
+        revoked_at: updated?.revoked_at ?? null,
+        revoked_by: updated?.revoked_by ?? null,
+      });
       return;
     }
 
@@ -1434,12 +1542,32 @@ const server = createServer(async (req, res) => {
       // CORS: allow any origin for public share links
       res.setHeader("Access-Control-Allow-Origin", "*");
 
-      const shareId = decodeURIComponent(shareMatch[1]);
-      const link = resolveShareLink(shareId);
-      if (!link) {
-        sendJson(res, 404, { error: "This link has expired or is no longer available" });
+      const ip = clientIp(req);
+      const viewCheck = shareViewLimiter.check(ip, "read");
+      if (!viewCheck.allowed) {
+        sendJson(res, 429, { error: "rate_limited", retry_after_ms: viewCheck.retryAfterMs });
         return;
       }
+      shareViewLimiter.record(ip, "read");
+
+      const shareId = decodeURIComponent(shareMatch[1]);
+      const result = resolveSharePublic(shareId);
+      if (result.status === "not_found") {
+        sendJson(res, 404, { error: "not_found" });
+        return;
+      }
+      if (result.status === "gone") {
+        sendJson(res, 410, {
+          error: "gone",
+          reason: result.reason,
+          message: result.reason === "revoked"
+            ? "This link has been revoked"
+            : "This link has expired",
+        });
+        return;
+      }
+
+      const link = result.link;
 
       // Read the note content from disk
       let noteContent: string | null = null;
