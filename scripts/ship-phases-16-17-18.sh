@@ -58,13 +58,27 @@ run_wave() {
   log " Tasks: ${tasks[*]}"
   log "════════════════════════════════════════════"
 
+  # Capture pre-batch HEAD so we can tell if the batch actually shipped code.
+  local pre_sha
+  pre_sha=$(git log -1 --format="%h")
+
   # Run the batch (agents → merge → test). Fails → set -e stops us.
   ./scripts/run-batch.sh "${batch}"
 
   # Capture the new HEAD sha (merge commit of the batch)
   local sha
   sha=$(git log -1 --format="%h")
-  log "Batch ${batch} merged at ${sha}"
+
+  # Sanity check: if HEAD didn't move, no code shipped. Refuse to mark PLAN.md
+  # complete — we'd be lying about what landed.
+  if [[ "${sha}" == "${pre_sha}" ]]; then
+    log "ERROR: batch ${batch} ran but HEAD did not advance (${sha})."
+    log "  No commits from worktree were merged. Agent work may have been lost."
+    log "  PLAN.md will NOT be marked complete. Driver halting."
+    exit 1
+  fi
+
+  log "Batch ${batch} merged: ${pre_sha} → ${sha}"
 
   # Update PLAN.md for every task this batch completed
   for task in "${tasks[@]}"; do
