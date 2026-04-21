@@ -3153,7 +3153,7 @@ CREATE INDEX IF NOT EXISTS idx_handle_history_user ON handle_history(user_id);
 - `GET /v1/me` response includes `handle` (and `bio` if set)
 - Old handles in `handle_history` block reclamation by anyone else
 
-#### P16-2: Scoped route scaffold (grove-www: `src/app/(resident)/[atHandle]/*`)
+#### P16-2: Scoped route scaffold (grove-www: `src/app/(resident)/[atHandle]/*`) ✅ COMPLETE 2026-04-21 (grove-www 0841bac)
 
 Next.js App Router reserves `@folder` for parallel routes, so a literal `@` in a route segment must be captured by a dynamic segment. Use a route group.
 
