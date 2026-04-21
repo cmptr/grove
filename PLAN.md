@@ -3102,6 +3102,407 @@ When a member or viewer signs in, they see a simplified dashboard scoped to thei
 
 ---
 
+### Phase 16: Multi-Resident URL Structure
+
+**Goal:** Scope every public/shareable surface by resident `@<handle>`. Admin surfaces stay unscoped. Unblock onboarding v2 users without breaking external URLs that already exist.
+
+**Prerequisites:** Phase 9 (user roles + invite flow + user-scoped keys), Phase 15 (profile page), Phase B (magic link auth).
+
+**Context:** Today every route on grove.md is single-tenant — the vault is implicitly "me". Before onboarding any second user, public URLs need a resident prefix so the same note path under different residents can't collide, and so shared links read coherently out of context. Decision locked: `/@<handle>/...` Mastodon/Instagram style, public-surface only (admin paths stay at `/dashboard`, `/profile`, `/keys`), handle derived from email at invite with editable override, permanent legacy fallback via 301.
+
+**Scope decision:** API surface (`/v1/*`) does NOT change — session/API key resolve the user. Public profile is added (`/@<handle>` bare URL renders a profile card). Note-level public/private toggling is OUT OF SCOPE for this phase (everything stays auth-gated; frontmatter `public: true` is future work).
+
+#### P16-1: Handle model & migration (`src/db.ts`, `src/users.ts`, `src/rest.ts`)
+
+Add canonical handle support and history table.
+
+**Schema additions in `src/db.ts`:**
+```sql
+-- users.username already exists; canonicalize as handle
+CREATE TABLE IF NOT EXISTS handle_history (
+  handle TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  released_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_handle_history_user ON handle_history(user_id);
+```
+
+**Validation** (`isValidHandle()` helper in `src/users.ts`):
+- 1–30 chars
+- Lowercase `[a-z0-9_-]` only; must start with `[a-z0-9]`
+- Unique across `users.username` and `handle_history.handle`
+- Reserved words rejected: `admin`, `api`, `v1`, `login`, `logout`, `signup`, `dashboard`, `profile`, `keys`, `images`, `home`, `trails`, `s`, `u`, `me`, `settings`, `help`, `about`, `docs`, `support`, `privacy`, `terms`, `well-known`, `auth`
+
+**Migration:**
+- Backfill each existing user whose `username` is NULL or email-local-form with the email local part (lowercased, invalid chars stripped, collision suffix `<handle>-<3-digit>`)
+- One-shot migration note: owner (`user_00000000`) runs `UPDATE users SET username = 'jm' WHERE id = 'user_00000000'` (or chosen handle) before deploy
+
+**API additions:**
+- `GET /v1/residents/:handle` — unauthenticated. Returns `{ handle, display_name, bio, public_trail_slugs, note_count }` or 404. Used by public profile page.
+- `GET /v1/me` already returns user — augment response with `handle` field.
+- `PATCH /v1/me` accepts `handle` field (see P16-5 for editor).
+- Add `bio TEXT` column to users (plain-text, max 280 chars) — nullable.
+
+**Files:** `src/db.ts`, `src/users.ts`, `src/rest.ts`, `src/proxy.ts`
+**Tests:** `test/users.test.ts` — validation cases (valid, invalid, reserved, collision); `test/handle-history.test.ts` — write on change, block re-use; `test/residents-endpoint.test.ts` — 200 + 404 paths
+**Docs:** `docs/api.md` — document `/v1/residents/:handle` and the `handle` field on `/v1/me`
+**Acceptance criteria:**
+- `isValidHandle()` accepts `jm`, `j-doe`, `j_doe_2`; rejects `admin`, `J`, `Jsmith`, `1abc`, `j@m`, 31-char string
+- New users via invite get auto-derived handle; collision → `<handle>-NNN`
+- `GET /v1/residents/jm` returns resident data; `GET /v1/residents/nonexistent` → 404
+- `GET /v1/me` response includes `handle` (and `bio` if set)
+- Old handles in `handle_history` block reclamation by anyone else
+
+#### P16-2: Scoped route scaffold (grove-www: `src/app/(resident)/[atHandle]/*`)
+
+Next.js App Router reserves `@folder` for parallel routes, so a literal `@` in a route segment must be captured by a dynamic segment. Use a route group.
+
+**New file structure:**
+```
+grove-www/src/app/(resident)/[atHandle]/
+  layout.tsx                  validates @-prefix, resolves handle, sets resident context
+  page.tsx                    public profile card
+  s/[id]/page.tsx             scoped share viewer
+  trails/[slug]/page.tsx      scoped trail page
+  [...path]/page.tsx          auth-gated note viewer
+```
+
+`layout.tsx` behavior:
+- `params.atHandle` must start with `@`; strip prefix; fetch `GET /v1/residents/<handle>`
+- If 404 → `notFound()`
+- If handle is in `handle_history` → `redirect('/@<current-handle>/<rest-of-path>')`
+- Pass resident context to children via server component props or `headers()` helper
+
+**Files:** the files above, plus `grove-www/src/lib/resident-context.ts` for a small helper that resolves handle from route params
+**Tests:** `grove-www/test/scoped-routes.spec.ts` — Playwright: render each page variant, signed-in and signed-out states; assert resident context shows in header
+**Acceptance criteria:**
+- `grove.md/@jm` (signed out) → renders public profile with display name, bio, public trails, note count, sign-in CTA
+- `grove.md/@jm/s/<id>` → share viewer (same content as current `/s/<id>`)
+- `grove.md/@jm/trails/<slug>` → trail viewer (same as current `/trails/<slug>`)
+- `grove.md/@jm/some/note-path` signed-out → sign-in prompt
+- `grove.md/@jm/some/note-path` signed-in with access → note renders
+- `grove.md/@nonexistent` → 404 page
+- Layout shows `@jm` in header chip as resident context
+
+#### P16-3: Legacy URL redirects (page-level, grove-www)
+
+No middleware. Each legacy page becomes a 301 shim to the canonical scoped URL.
+
+**Changes:**
+- `grove-www/src/app/s/[id]/page.tsx` — fetch share link, resolve owner's handle, `permanentRedirect('/@<handle>/s/<id>')`
+- `grove-www/src/app/trails/[slug]/page.tsx` — fetch trail, resolve owner's handle, `permanentRedirect('/@<handle>/trails/<slug>')`
+- `grove-www/src/app/[...path]/page.tsx` — existing note viewer. Signed-in users: resolve own handle, `redirect('/@<handle>/<path>')`. Signed-out: keep current 404 behavior.
+- Handle-history redirect — handled by P16-2 layout (`/@old` → 301 `/@current`).
+
+**Files:** `grove-www/src/app/s/[id]/page.tsx`, `src/app/trails/[slug]/page.tsx`, `src/app/[...path]/page.tsx`
+**Tests:** `grove-www/test/legacy-redirects.spec.ts` — hit each legacy path, assert 301 + correct `Location` header
+**Acceptance criteria:**
+- `curl -I grove.md/s/abc123` → `301`, `Location: /@jm/s/abc123`
+- `curl -I grove.md/trails/weekly-reads` → 301 → `/@jm/trails/weekly-reads`
+- Signed-in user hitting `grove.md/concepts/taste-graph` → 301 → `/@jm/concepts/taste-graph`
+- Signed-out on legacy unscoped note path → 404 (unchanged)
+- `curl -I grove.md/@old-jm/anything` → 301 → `/@jm/anything`
+
+#### P16-4: URL builders in grove repo (`src/share.ts`, `src/rest.ts`, `src/invite.ts`, `src/email.ts`)
+
+Every server-side URL builder emits canonical `@handle` URLs.
+
+**Changes:**
+- `src/share.ts:54-55` — resolve `ownerHandle = getUserHandle(createdBy)`; `return \`${wwwBase}/@${ownerHandle}/s/${id}\``
+- `src/rest.ts:54` — note URL: `return \`${wwwBase}/@${handle}/${encoded}\``; resolve handle from session user or key owner
+- `src/rest.ts:692` — search result URL, same pattern
+- `src/invite.ts:90-97` — callback URL: `${wwwBase}/auth/callback?code=<code>&trail=<id>&resident=<owner-handle>`
+- `src/email.ts:13` invite template — subject `@${ownerHandle} invited you to Grove`; body `${displayName} (@${ownerHandle}) shared the '${trailName}' trail with you. [Sign in]`
+
+**Files:** `src/share.ts`, `src/rest.ts`, `src/invite.ts`, `src/email.ts`
+**Tests:** update `test/share.test.ts`, `test/invite.test.ts`, `test/rest.test.ts` to assert new URL shapes
+**Docs:** `docs/api.md` — note every URL builder emits `@handle` form
+**Acceptance criteria:**
+- Creating a share link returns `{ url: "https://grove.md/@jm/s/abc123" }`
+- Invite callback URL embeds `resident=<handle>` context
+- Invite email subject contains `@<handle>`
+- No server-generated URL emits the legacy unscoped shape
+
+#### P16-5: Handle editor in profile (`grove-www/src/app/profile/page.tsx`, `src/rest.ts`)
+
+Extend the profile page with handle change UX.
+
+**Frontend UX:**
+- New "Handle" field above display name
+- Input with live validation (length, chars, availability via debounced `GET /v1/residents/:handle` — 200 = taken, 404 = available)
+- Preview string: `Your URL: grove.md/@<handle>` updates as user types
+- Save → `PATCH /v1/me { handle }` → on success, show "Old URL redirects: `grove.md/@<old>` → `grove.md/@<new>`"
+- Error states: validation failure, taken, reserved, server error
+
+**Backend `PATCH /v1/me`:**
+- Accept `handle` and `bio` fields
+- If `handle` changed: run `isValidHandle()`; insert old `users.username` into `handle_history(released_at=now)`; update `users.username`
+- Emit audit log entry `{ action: "handle_change", user_id, old_handle, new_handle }`
+
+**Files:** `grove-www/src/app/profile/page.tsx`, `grove-www/src/components/handle-editor.tsx` (new client component), `src/rest.ts`, `src/users.ts` (changeHandle helper)
+**Tests:** `test/profile-handle-change.test.ts` — change handle → row in handle_history → old URL 301s via P16-3 redirect; reserved handle rejected; collision rejected
+**Acceptance criteria:**
+- User changes handle from `/profile`; UI reflects new URL immediately
+- Invalid/taken/reserved handles show inline errors with specific messages
+- After change, old handle 301-redirects to new (verified by integration test in P16-6)
+- Old handle cannot be reclaimed by another user
+- Audit log shows handle_change event
+
+#### P16-6: End-to-end integration test (`grove-www/test/multi-resident.e2e.spec.ts`)
+
+Playwright spec covering the golden path:
+1. Signed-out visitor lands on `/@jm` → sees public profile card
+2. Signed-out visitor hits `/s/abc` (legacy) → 301 to `/@jm/s/abc` → share viewer loads
+3. Trail invitee receives email containing `@jm` → clicks link → lands in `/home` with trail context `@jm · Weekly Reads`
+4. Owner changes handle from `/profile` → legacy URLs still 301-redirect correctly via handle history
+5. `grove.md/@nonexistent` → 404 page
+
+**Acceptance criteria:**
+- All five flows pass in a single test run against a seeded fixture
+
+#### Phase 16 Design Decisions
+
+| Decision | Chosen | Alternatives | Why |
+|----------|--------|-------------|-----|
+| URL shape | `/@<handle>/...` | `/u/<handle>/`, bare `/<handle>/`, subdomain | No collision with existing catch-all routes. No reserved-word list for routing. Reads visually as a handle. Subdomain adds TLS + cross-subdomain cookie complexity for a low-tenant product. |
+| Scope | Public surfaces only | Everything including admin | Admin is personal ("my dashboard"). Content is resident. Keeps owner's everyday URLs short. |
+| Handle source | Email local-part at invite, editable | User picks on first login, admin assigns | Minimal friction. Editable later if default is ugly. |
+| Legacy URLs | 301 redirect forever | 410 after grace period, dual routing | External bookmarks must not break. Canonical URL becomes unambiguous. |
+| Handle reuse | Historic handles never reclaimable | Released after N days | Prevents impersonation. Acceptable namespace cost at this user count. |
+| Public profile default | Renders card for signed-out | Auth gate always, redirect | Matches mental model "send someone your grove.md link". |
+| Note visibility | Auth-gated by default | Public-by-default, trails-only | Existing notes weren't written for public consumption. Per-note opt-in is future work. |
+| API surface | Unchanged | `/v1/@<handle>/...` | Handle is a UI concern. Preserves MCP, CLI, third-party integrations. |
+| Route implementation | Route group `(resident)/[atHandle]` | Folder named `@[handle]` | `@folder` is reserved for App Router parallel routes; conflicts. |
+| Redirect mechanism | Page-level (`redirect()` in shim pages) | `middleware.ts` | Simpler, avoids per-request DB lookup for every route, no new middleware surface. |
+
+#### Phase 16 Execution Strategy
+
+**Batch 1 (solo, foundational):**
+- **Agent A:** P16-1 — DB + validation + `/v1/residents/:handle` + migration. Foundation for every downstream task.
+
+**Batch 2 (2 parallel, after Batch 1 merged):**
+- **Agent B:** P16-2 — scoped route scaffold (grove-www, new directory tree)
+- **Agent C:** P16-4 — URL builders in grove repo (different repo, no overlap with B)
+
+**Batch 3 (2 parallel, after Batch 2 merged):**
+- **Agent D:** P16-3 — legacy URL redirect shims (grove-www shim pages)
+- **Agent E:** P16-5 — handle editor (grove-www profile + `PATCH /v1/me` in grove)
+
+**Batch 4 (solo, after all above):**
+- **Agent F:** P16-6 — e2e integration test
+
+```bash
+./scripts/run-batch.sh p16-1   # agent A
+./scripts/run-batch.sh p16-2   # agents B + C
+./scripts/run-batch.sh p16-3   # agents D + E
+./scripts/run-batch.sh p16-4   # agent F
+```
+
+#### Phase 16 Success Criteria
+
+- Signed-out visitor hits `grove.md/@jm` → sees public profile card
+- Existing share URL `grove.md/s/abc123` still works via 301 → `/@jm/s/abc123`
+- Invited user's email names the resident and trail
+- Changing handle from `/profile` → old URL 301s to new; old handle never reclaimable
+- External-indexed URLs (search engines, shared links, bookmarks) remain resolvable
+- MCP/CLI/third-party clients unaffected (`/v1/*` unchanged)
+
+---
+
+### Phase 17: Post-Login Redirect
+
+**Goal:** Owners land at `/dashboard` after magic-link auth. Trail users land at `/home`. Marketing root redirects signed-in visitors to their app home.
+
+**Prerequisites:** Phase B (magic link auth), Phase 9 (roles), Phase 4 (dashboard), Phase 15 (`/home` for non-owners).
+
+**Context:** Current callback logic (`grove-www/src/app/api/auth/callback/route.ts:62-64`) redirects to `/home` only when a `trail=` query param exists, otherwise drops the user at `/` (marketing root). Owners completing magic-link auth therefore land on the public landing page — clearly wrong. Fixing this unblocks UX polish across several surfaces (invited trail users seeing correct context, signed-in users not re-seeing marketing copy).
+
+#### P17-1: Callback redirect by role (`grove-www/src/app/api/auth/callback/route.ts`)
+
+**Change:** After session + key creation succeed, call `GET /v1/whoami` once. Route by role: owner → `/dashboard`, member/viewer → `/home`. Honor `?redirect=<path>` from the original sign-in request when present; validate as same-origin relative path (`path.startsWith('/')` and not starting with `//`), reject external.
+
+Remove the existing `trailId ? "/home" : "/"` branch at lines 62-64.
+
+**Files:** `grove-www/src/app/api/auth/callback/route.ts`, `grove-www/src/lib/role.ts` (reuse existing `roleFromWhoami`)
+**Tests:** `grove-www/test/auth-callback.spec.ts` — owner branch, trail-user branch, explicit `?redirect=/foo`, rejected `?redirect=//evil.com`, rejected `?redirect=https://evil.com`
+**Acceptance criteria:**
+- Owner magic-link → `/dashboard`
+- Trail invitee magic-link → `/home`
+- `?redirect=/profile` → respected
+- `?redirect=//evil.com` → rejected; falls back to role default
+- `?redirect=/foo?q=bar` → preserved
+
+#### P17-2: Marketing root auth-aware (`grove-www/src/app/page.tsx`)
+
+**Change:** Convert `/` to a server component (or wrap existing in server shell). Read `grove_token` cookie; if valid, call `/v1/whoami`; `redirect()` to `/dashboard` (owner) or `/home` (trail user). If no session or 401, render the current marketing page unchanged.
+
+**Files:** `grove-www/src/app/page.tsx`
+**Tests:** `grove-www/test/marketing-root.spec.ts` — three states (signed-in owner, signed-in trail, signed-out); invalid cookie treated as signed-out
+**Acceptance criteria:**
+- Signed-in owner hitting `/` → `/dashboard`
+- Signed-in trail user hitting `/` → `/home`
+- Signed-out user hitting `/` → renders marketing page
+- Invalid/expired cookie → treated as signed-out, marketing renders
+
+#### P17-3: /login short-circuit (`grove-www/src/app/login/page.tsx`)
+
+**Change:** Before rendering the login form, server-side check for active session; if present, redirect to app home based on role. `?redirect=` override respected.
+
+**Files:** `grove-www/src/app/login/page.tsx`
+**Tests:** `grove-www/test/login-short-circuit.spec.ts`
+**Acceptance criteria:**
+- Signed-in user hitting `/login` → redirected to `/dashboard` or `/home`
+- Signed-in user hitting `/login?redirect=/profile` → `/profile`
+- Signed-out user hitting `/login` → renders login form (unchanged)
+
+#### P17-4: End-to-end success test (`grove-www/test/post-login.e2e.spec.ts`)
+
+Integration test: full magic-link round-trip for both roles. Simulates clicking a magic link from email, asserts correct landing destination, no extra navigation round-trips beyond the callback.
+
+**Acceptance criteria:**
+- Owner full flow: request magic link → click → lands at `/dashboard` (one redirect max)
+- Trail user full flow: invite email → click → lands at `/home` with trail context
+- `?redirect=` respected through the full flow
+
+#### Phase 17 Execution Strategy
+
+**Single agent, sequential tasks.** All four tasks are small changes to adjacent files in grove-www. One agent does the full phase.
+
+```bash
+./scripts/run-batch.sh p17
+```
+
+#### Phase 17 Design Decisions
+
+| Decision | Chosen | Alternatives | Why |
+|----------|--------|-------------|-----|
+| Redirect location | Callback + marketing root + /login | Callback only | Marketing root redirect matches GitHub/Vercel/Linear; prevents signed-in users from seeing marketing copy. |
+| `?redirect=` validation | Same-origin relative path only | Allowlist, no validation | Prevents open-redirect; simple rule to reason about. |
+| Role detection | `GET /v1/whoami` on each entry | JWT claim in cookie | Role already fetched via whoami elsewhere; reuse the existing helper. One extra server-side call is acceptable. |
+
+#### Phase 17 Success Criteria
+
+- Owner signs in via magic link → lands at `/dashboard`
+- Trail invitee signs in → lands at `/home` with trail context visible
+- Signed-in user hitting `/` or `/login` is redirected to app home
+- `?redirect=` is respected when same-origin; rejected when external
+
+---
+
+### Phase 18: Mobile-Optimized Pages
+
+**Goal:** Every page in grove-www renders without horizontal scroll at 375px (iPhone SE). Fix known hot spots. Add Playwright regression guard.
+
+**Prerequisites:** None. Independent of P16/P17 — can run concurrently.
+
+**Context:** Audit identified no explicit viewport meta tag in the root layout, plus five concrete hot spots (`/dashboard/usage` fixed grid-cols-3, `note-view` inline `max-width: 680`, code block wrapping in prose, Mermaid containers, some tables). Good responsive patterns exist (sidebar drawer, header collapse, image grid) — mobile is a gap, not a rewrite.
+
+#### P18-1: Viewport meta + global safety net (`grove-www/src/app/layout.tsx`, `grove-www/src/app/globals.css`)
+
+**Change:** Add `viewport` export via Next.js Metadata API; add `html, body { overflow-x: hidden; }` in globals.css so a single errant component cannot create page-wide horizontal scroll.
+
+```tsx
+// layout.tsx
+import type { Viewport } from "next";
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+};
+```
+
+```css
+/* globals.css */
+html, body { overflow-x: hidden; }
+```
+
+**Files:** `grove-www/src/app/layout.tsx`, `grove-www/src/app/globals.css`
+**Acceptance criteria:**
+- `<meta name="viewport" content="width=device-width, initial-scale=1">` present in every page's `<head>`
+- `document.body.scrollLeft === 0` on initial load for all tested pages
+- No layout regression on desktop (1440px viewport identical to before)
+
+#### P18-2: Fix identified hot spots
+
+**Changes:**
+- `grove-www/src/app/dashboard/usage/page.tsx:96,204` — `grid grid-cols-3` → `grid grid-cols-1 sm:grid-cols-3`
+- `grove-www/src/components/note-view.tsx:69` — remove inline `style={{ maxWidth: 680 }}`; add `className="max-w-[680px] w-full"`
+- `grove-www/src/app/globals.css:274` `.note-content .prose pre` — ensure wrapper has `max-width: 100%`; keep `overflow-x: auto` scoped inside note column; add `word-break: break-word` on inline code/long-string wrappers
+- `grove-www/src/components/mermaid-block.tsx:48-52` — wrapper class `max-w-full overflow-x-auto`; inner SVG `max-w-full h-auto`
+
+**Files:** as above
+**Tests:** assertions consolidated in P18-3 test
+**Acceptance criteria:**
+- `/dashboard/usage` at 375px shows 1-column grid (not 3)
+- Note viewer fits within 375px viewport
+- Code blocks wrap or scroll internally, no page-wide horizontal scroll
+- Mermaid diagrams do not force page scroll
+
+#### P18-3: Playwright regression test (`grove-www/test/mobile.spec.ts` — new)
+
+**Changes:** New Playwright spec. Viewport 375×667. Visits representative routes signed-in as test owner; asserts `document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1` (1px tolerance). Seeded test session via fixtures.
+
+**Routes tested:**
+- `/` (marketing, signed-out)
+- `/login`
+- `/dashboard` (owner)
+- `/home` (trail user, separate fixture)
+- `/profile`
+- `/dashboard/usage`
+- `/dashboard/trails`
+- `/dashboard/keys`
+- `/dashboard/users`
+- `/dashboard/health`
+- `/images`
+- `/[...path]` sample note
+
+**npm script:** `"test:mobile": "playwright test test/mobile.spec.ts"`
+
+**Files:** `grove-www/test/mobile.spec.ts`, `grove-www/package.json`, `grove-www/playwright.config.ts` (if not already present)
+**Acceptance criteria:**
+- `npm run test:mobile` exits 0 for all listed routes
+- Failure output names the route and reports `scrollWidth` vs `clientWidth`
+
+#### P18-4: Full mobile audit pass
+
+**Change:** Run dev server, walk every route at 375px (devtools emulation), catalog and fix any additional issues found.
+
+**Acceptance criteria:**
+- `npm run test:mobile` stays green after audit (no newly discovered issues)
+- Any additional fixes committed in the same PR
+
+#### P18-5: Documentation (`grove-www/README.md`)
+
+Short note: mobile baseline is 375px; `npm run test:mobile` is the regression guard; new pages must pass the test before merge.
+
+**Acceptance criteria:**
+- README documents the 375px baseline and the test script
+
+#### Phase 18 Execution Strategy
+
+**Single agent, sequential tasks.** All changes are in grove-www CSS/layout, low risk.
+
+```bash
+./scripts/run-batch.sh p18
+```
+
+#### Phase 18 Design Decisions
+
+| Decision | Chosen | Alternatives | Why |
+|----------|--------|-------------|-----|
+| Baseline viewport | 375px (iPhone SE) | 390px, 360px | Covers iPhone SE and 99% of modern phones; matches Tailwind `sm:` convention. |
+| Safety net | `html, body { overflow-x: hidden }` | No global | Defense-in-depth against future overflow bugs; cheap. |
+| Regression guard | Playwright via `npm run test:mobile` | Visual regression, no test | Scroll-width check is deterministic and fast. |
+| CI integration | Deferred to P4-PREREQ | Ship CI hook now | No CI exists yet; wire `test:mobile` into the pipeline when CI lands. |
+
+#### Phase 18 Success Criteria
+
+- Zero horizontal scroll at 375px on every current page
+- `npm run test:mobile` green
+- Future pages that break mobile fail the test
+- CI hook deferred to P4-PREREQ (add `test:mobile` to pipeline when CI/CD lands)
+
+---
+
 ## Design Decisions Log
 
 Decisions made during planning. Reference these when implementing — don't re-litigate settled questions.
@@ -3331,3 +3732,15 @@ Decisions made during planning. Reference these when implementing — don't re-l
 **Phase 13** ✅ — Graph health: metrics + scoring + daily monitoring, auto-healing, admin REST + grove-www dashboard (2026-04-20)
 **Phase 14** ✅ — Image system: R2 storage, upload endpoint, search integration with thumbnails, Pinterest grid view (2026-04-20)
 **Phase 15** ✅ — Profile & settings UX: /v1/me profile + sessions, visual trail scope editor with preview, non-owner dashboard (2026-04-20)
+
+**Phase 16 — Multi-Resident URL Structure** ⏳ (after Phase 15 stable):
+1. p16-1: handle model + validation + /v1/residents/:handle (Agent A, solo)
+2. p16-2: scoped routes (grove-www) ‖ URL builders (grove) (Agents B + C parallel)
+3. p16-3: legacy redirects ‖ handle editor (Agents D + E parallel)
+4. p16-4: e2e integration test (Agent F, solo)
+
+**Phase 17 — Post-Login Redirect** ⏳ (independent, small, ship first):
+- p17: callback + marketing root + /login short-circuit + e2e test (single agent)
+
+**Phase 18 — Mobile-Optimized Pages** ⏳ (independent, parallel with P17):
+- p18: viewport meta + hot-spot fixes + Playwright regression test + audit (single agent)

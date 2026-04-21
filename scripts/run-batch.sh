@@ -25,7 +25,7 @@ TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 # Agents within a batch run in parallel.
 # Merge order = definition order (first defined = first merged).
 
-ALL_BATCHES="p4-prereq p4b-1 rest cli-a cli-b p5-tag p7-1 p7-2 p7-3 p9-1 p9-2 p9-3 p10-1 p10-2 p11-1 p11-2 p12-1 p12-2 p13-1 p13-2 p14-1 p14-2 p15-1 p15-2"
+ALL_BATCHES="p4-prereq p4b-1 rest cli-a cli-b p5-tag p7-1 p7-2 p7-3 p9-1 p9-2 p9-3 p10-1 p10-2 p11-1 p11-2 p12-1 p12-2 p13-1 p13-2 p14-1 p14-2 p15-1 p15-2 p16-1 p16-2 p16-3 p16-4 p17 p18"
 
 get_batch() {
   ENTRIES=()
@@ -136,6 +136,32 @@ get_batch() {
       ENTRIES+=("p15-nonowner|Read PLAN.md task P15-3. Build non-owner dashboard experience per spec. Run npm test before committing.")
       ;;
 
+    # ── Phase 16: Multi-Resident URL Structure ──
+    p16-1)
+      ENTRIES+=("p16-handle-model|Read PLAN.md task P16-1. Add handle model, handle_history table, validation, reserved-word list, /v1/residents/:handle endpoint, bio column, and migration per spec. Run npm test before committing.")
+      ;;
+    p16-2)
+      ENTRIES+=("p16-scoped-routes|Read PLAN.md task P16-2. Build scoped route scaffold at grove-www/src/app/(resident)/[atHandle]/* including public profile, scoped share viewer, scoped trail page, and auth-gated note viewer per spec. Run tests before committing.")
+      ENTRIES+=("p16-url-builders|Read PLAN.md task P16-4. Update URL builders in src/share.ts, src/rest.ts, src/invite.ts, src/email.ts to emit /@<handle>/... canonical URLs per spec. Update existing tests and docs/api.md. Run npm test before committing.")
+      ;;
+    p16-3)
+      ENTRIES+=("p16-legacy-redirects|Read PLAN.md task P16-3. Convert legacy pages (/s/[id], /trails/[slug], /[...path]) in grove-www to 301 redirect shims to /@<handle>/... canonical URLs per spec. Run tests before committing.")
+      ENTRIES+=("p16-handle-editor|Read PLAN.md task P16-5. Build handle editor in grove-www profile page + PATCH /v1/me backend support for handle + bio changes with handle_history writes and audit log per spec. Run tests before committing.")
+      ;;
+    p16-4)
+      ENTRIES+=("p16-e2e|Read PLAN.md task P16-6. Write end-to-end Playwright integration test at grove-www/test/multi-resident.e2e.spec.ts covering the five-step golden path per spec. Run tests before committing.")
+      ;;
+
+    # ── Phase 17: Post-Login Redirect ──
+    p17)
+      ENTRIES+=("p17-redirect|Read PLAN.md tasks P17-1, P17-2, P17-3, P17-4. Fix callback redirect by role, make marketing root and /login auth-aware, and add e2e integration test per spec. All changes in grove-www. Run tests before committing.")
+      ;;
+
+    # ── Phase 18: Mobile-Optimized Pages ──
+    p18)
+      ENTRIES+=("p18-mobile|Read PLAN.md tasks P18-1 through P18-5. Add viewport meta + global safety net, fix identified hot spots (usage grid, note-view max-width, code blocks, Mermaid), add Playwright mobile regression test at grove-www/test/mobile.spec.ts with npm run test:mobile script, complete full audit pass, and update README. Run tests before committing.")
+      ;;
+
     *)
       return 1
       ;;
@@ -163,6 +189,9 @@ list_batches() {
   echo "  p13-1 → p13-2 (graph health, after p7 + p11)"
   echo "  p14-1 → p14-2 (images, independent)"
   echo "  p15-1 → p15-2 (profile UX, after p9)"
+  echo "  p16-1 → p16-2 → p16-3 → p16-4 (multi-resident URL, after p15)"
+  echo "  p17 (post-login redirect, independent)"
+  echo "  p18 (mobile-optimized pages, independent)"
 }
 
 log() {

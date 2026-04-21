@@ -21,10 +21,7 @@ Tell me an idea — a sentence, a half-thought, a "what if." I'll capture it as 
 - **Open source calibration** — decide what's the right amount of Grove to open-source (SDK? proxy? nothing? everything minus hosted infra?)
 - **Extract design system** — pull a coherent design system out of the current Grove UI so future surfaces stay visually consistent
 - **SOC2 baseline** — SSO, encryption at rest/transit, access logs, no prod access without MFA — the minimum surface to be SOC2-ready
-- **Mobile-optimized pages** — fix pages that have horizontal scroll outside the viewport on mobile
-- **Post-login lands at grove.md/dashboard** — today successful auth drops owners at `/` (marketing root) and trail users at `/home`. Owners especially should land at `/dashboard` so the signed-in experience starts on a page that actually reflects the work (keys, trails, health, usage) rather than the public landing page. Needs decision on trail-user destination and whether the marketing root should redirect when already authenticated.
 - **Multimodal image embeddings via Voyage `voyage-multimodal-3`** — today the image upload pipeline embeds the companion markdown note's text (description + OCR + tags), so semantic search works on the description. But the image pixels themselves are never embedded, so "find an image that looks visually similar to this one" doesn't work. Swap (or add alongside) the embed step to use `voyage-multimodal-3`, which accepts interleaved text + image and returns 1024-dim vectors in a unified space. Store multimodal vectors in a distinct column or table so hybrid search can blend or separate them. Enables: (1) "find images that look like this photo" via image upload as query, (2) strict text-only or image-only modes, (3) better cross-modal retrieval when a text query matches an image's visual content (not just its description). Needs: DB migration for new vector storage, update to hybrid-search.ts, cost estimate (multimodal is more expensive per call), decision on whether to keep text embeddings alongside or replace.
-- **Multi-resident URL structure** — today every route on grove.md is single-tenant (the vault is implicitly mine). Before onboarding any other user we need a URL shape that scopes to a resident — `/u/<handle>/…` or `grove.md/<handle>/…` or a subdomain — and threads the resident through routing, auth, sharing, and the API surface. Also affects deep links shared externally, OG images, and the `/profile`/`/home`/`/images` paths that currently assume "you". Decide the shape before we have v2 users with live links we'd have to migrate.
 
 ---
 
@@ -51,3 +48,6 @@ Ideas that have been spec'd and moved into PLAN.md.
 - **Pinterest-Style Image View** → Phase 14
 - **Vault-Agnostic Structure** → Phase 10
 - **DELETE/Move Endpoint** → Phase 11
+- **Multi-resident URL structure** → Phase 16
+- **Post-login lands at grove.md/dashboard** → Phase 17
+- **Mobile-optimized pages** → Phase 18
