@@ -3397,7 +3397,7 @@ Integration test: full magic-link round-trip for both roles. Simulates clicking 
 
 **Context:** Audit identified no explicit viewport meta tag in the root layout, plus five concrete hot spots (`/dashboard/usage` fixed grid-cols-3, `note-view` inline `max-width: 680`, code block wrapping in prose, Mermaid containers, some tables). Good responsive patterns exist (sidebar drawer, header collapse, image grid) — mobile is a gap, not a rewrite.
 
-#### P18-1: Viewport meta + global safety net (`grove-www/src/app/layout.tsx`, `grove-www/src/app/globals.css`)
+#### P18-1: Viewport meta + global safety net (`grove-www/src/app/layout.tsx`, `grove-www/src/app/globals.css`) ✅
 
 **Change:** Add `viewport` export via Next.js Metadata API; add `html, body { overflow-x: hidden; }` in globals.css so a single errant component cannot create page-wide horizontal scroll.
 
@@ -3421,7 +3421,7 @@ html, body { overflow-x: hidden; }
 - `document.body.scrollLeft === 0` on initial load for all tested pages
 - No layout regression on desktop (1440px viewport identical to before)
 
-#### P18-2: Fix identified hot spots
+#### P18-2: Fix identified hot spots ✅
 
 **Changes:**
 - `grove-www/src/app/dashboard/usage/page.tsx:96,204` — `grid grid-cols-3` → `grid grid-cols-1 sm:grid-cols-3`
@@ -3437,7 +3437,7 @@ html, body { overflow-x: hidden; }
 - Code blocks wrap or scroll internally, no page-wide horizontal scroll
 - Mermaid diagrams do not force page scroll
 
-#### P18-3: Playwright regression test (`grove-www/test/mobile.spec.ts` — new)
+#### P18-3: Playwright regression test (`grove-www/test/mobile.spec.ts` — new) ✅
 
 **Changes:** New Playwright spec. Viewport 375×667. Visits representative routes signed-in as test owner; asserts `document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1` (1px tolerance). Seeded test session via fixtures.
 
@@ -3462,7 +3462,7 @@ html, body { overflow-x: hidden; }
 - `npm run test:mobile` exits 0 for all listed routes
 - Failure output names the route and reports `scrollWidth` vs `clientWidth`
 
-#### P18-4: Full mobile audit pass
+#### P18-4: Full mobile audit pass ✅
 
 **Change:** Run dev server, walk every route at 375px (devtools emulation), catalog and fix any additional issues found.
 
@@ -3470,7 +3470,7 @@ html, body { overflow-x: hidden; }
 - `npm run test:mobile` stays green after audit (no newly discovered issues)
 - Any additional fixes committed in the same PR
 
-#### P18-5: Documentation (`grove-www/README.md`)
+#### P18-5: Documentation (`grove-www/README.md`) ✅
 
 Short note: mobile baseline is 375px; `npm run test:mobile` is the regression guard; new pages must pass the test before merge.
 
