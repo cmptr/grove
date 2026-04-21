@@ -837,16 +837,29 @@ async function cmdSync(config: Config, dir: string, flags: Record<string, string
 
 // ── Ingest (bulk import .md files) ─────────────────────────
 
-const INGEST_TYPE_PATHS: Record<string, string> = {
-  concept: "Resources/Concepts/",
-  person:  "Resources/People/",
-  recipe:  "Resources/Recipes/",
-  project: "Resources/Projects/",
-  company: "Resources/Companies/",
-  place:   "Resources/Places/",
-  journal: "Journal/",
-  source:  "Sources/",
-};
+/**
+ * Build the type→folder map used to route ingested notes.
+ *
+ * Reads from the vault's configured `type_paths`. If the vault config is
+ * unreadable (stale symlink, missing vault), falls back to PARA defaults so
+ * ingest can still run against a remote server.
+ */
+function loadIngestTypePaths(): Record<string, string> {
+  try {
+    return { ...loadVaultConfig(VAULT_PATH).structure.type_paths };
+  } catch {
+    return {
+      concept: "Resources/Concepts/",
+      person:  "Resources/People/",
+      recipe:  "Resources/Recipes/",
+      project: "Resources/Projects/",
+      company: "Resources/Companies/",
+      place:   "Resources/Places/",
+      journal: "Journal/",
+      source:  "Sources/",
+    };
+  }
+}
 
 async function cmdIngest(config: Config, dir: string, flags: Record<string, string | boolean>): Promise<CmdResult> {
   if (!dir) throw new CliError("bad_request", "Usage: grove ingest <dir> [--dry-run]", 1);
@@ -872,12 +885,19 @@ async function cmdIngest(config: Config, dir: string, flags: Record<string, stri
   }
   const candidates: IngestCandidate[] = [];
   const prefixesNeeded = new Set<string>();
+  const typePaths = loadIngestTypePaths();
+  let defaultPrefix = "Inbox/";
+  try {
+    defaultPrefix = loadVaultConfig(VAULT_PATH).structure.entities.default;
+  } catch {
+    // Fall back to Inbox/ already set above
+  }
 
   for (const entry of mdFiles) {
     const raw = readFileSync(join(dir, entry.name), "utf-8");
     const { frontmatter, content } = parseNote(raw);
     const type = typeof frontmatter.type === "string" ? frontmatter.type : undefined;
-    const prefix = type && INGEST_TYPE_PATHS[type] ? INGEST_TYPE_PATHS[type] : "Inbox/";
+    const prefix = type && typePaths[type] ? typePaths[type] : defaultPrefix;
     const mdName = entry.name.replace(/\.txt$/, ".md");
     const targetPath = prefix + mdName;
     const title = mdName.replace(/\.md$/, "").toLowerCase();

@@ -1,10 +1,13 @@
 /**
  * Bookmark integration — syncs X bookmarks into Source notes and enqueues for discovery.
  *
- * Fetches bookmarks via `bird` CLI, creates Source notes in Sources/X/,
- * and enqueues each new note in discovery_queue for concept extraction.
+ * Fetches bookmarks via `bird` CLI, creates Source notes in <sources>/X/ (the
+ * folder is derived from `structure.type_paths.source` in the vault config,
+ * defaulting to "Sources/"), and enqueues each new note in discovery_queue for
+ * concept extraction.
  *
- * Deduplicates by tweet ID: checks existing notes in Sources/X/ for matching tweet_id frontmatter.
+ * Deduplicates by tweet ID: checks existing notes in the bookmarks folder for
+ * matching tweet_id frontmatter.
  */
 
 import { execSync } from "node:child_process";
@@ -13,6 +16,12 @@ import { homedir } from "node:os";
 import { readdirSync, readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { parseNote, serializeNote, inferTags } from "./notes-validate.js";
 import { enqueueDiscovery } from "./db.js";
+import { loadVaultConfig, sourcePath, type VaultConfig } from "./vault-config.js";
+
+/** Where bookmarked tweets live, relative to the vault root. */
+function bookmarksFolder(config: VaultConfig): string {
+  return `${sourcePath(config)}X/`;
+}
 
 function getVaultPath(): string {
   return process.env.GROVE_VAULT ?? join(homedir(), "life");
@@ -65,16 +74,20 @@ function parseTweetDate(createdAt: string): string {
   return d.toISOString().slice(0, 10);
 }
 
-export function bookmarkToNote(bookmark: BirdBookmark): {
+export function bookmarkToNote(
+  bookmark: BirdBookmark,
+  config?: VaultConfig,
+): {
   path: string;
   frontmatter: Record<string, unknown>;
   content: string;
 } {
+  const folder = bookmarksFolder(config ?? loadVaultConfig(getVaultPath()));
   const date = parseTweetDate(bookmark.createdAt);
   const handle = bookmark.author.username;
   const slug = slugify(bookmark.text) || bookmark.id;
   const filename = `${date} @${handle} - ${slug}.md`;
-  const path = `Sources/X/${filename}`;
+  const path = `${folder}${filename}`;
   const tweetUrl = `https://x.com/${handle}/status/${bookmark.id}`;
 
   const frontmatter: Record<string, unknown> = {
@@ -104,8 +117,12 @@ export function bookmarkToNote(bookmark: BirdBookmark): {
 
 // ── Dedup: find tweet IDs already in vault ──────────────────────
 
-export function existingTweetIds(vaultPath: string): Set<string> {
-  const sourcesDir = join(vaultPath, "Sources", "X");
+export function existingTweetIds(
+  vaultPath: string,
+  config?: VaultConfig,
+): Set<string> {
+  const folder = bookmarksFolder(config ?? loadVaultConfig(vaultPath));
+  const sourcesDir = join(vaultPath, folder);
   const ids = new Set<string>();
 
   if (!existsSync(sourcesDir)) return ids;
@@ -159,9 +176,10 @@ export interface BookmarkSyncResult {
  */
 export function syncBookmarks(
   count: number = 20,
-  opts?: { vaultPath?: string; bookmarks?: BirdBookmark[] },
+  opts?: { vaultPath?: string; bookmarks?: BirdBookmark[]; config?: VaultConfig },
 ): BookmarkSyncResult {
   const vaultPath = opts?.vaultPath ?? getVaultPath();
+  const config = opts?.config ?? loadVaultConfig(vaultPath);
   const result: BookmarkSyncResult = {
     fetched: 0,
     created: 0,
@@ -178,7 +196,7 @@ export function syncBookmarks(
   if (bookmarks.length === 0) return result;
 
   // Dedup
-  const existing = existingTweetIds(vaultPath);
+  const existing = existingTweetIds(vaultPath, config);
 
   for (const bm of bookmarks) {
     if (existing.has(bm.id)) {
@@ -187,7 +205,7 @@ export function syncBookmarks(
     }
 
     try {
-      const note = bookmarkToNote(bm);
+      const note = bookmarkToNote(bm, config);
       writeBookmarkNote(vaultPath, note);
       result.created++;
       result.notes.push(note.path);

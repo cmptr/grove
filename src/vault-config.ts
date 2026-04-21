@@ -224,6 +224,21 @@ export function entityPath(config: VaultConfig, type: string): string {
   return entities[type] ?? entities.default;
 }
 
+/** Distinct entity folders (excluding the "default" fallback). */
+export function entityFolders(config: VaultConfig): string[] {
+  const out = new Set<string>();
+  for (const [k, v] of Object.entries(config.structure.entities)) {
+    if (k === "default") continue;
+    out.add(v);
+  }
+  return [...out];
+}
+
+/** Where external-source notes live (bookmarks etc.). Falls back to "Sources/". */
+export function sourcePath(config: VaultConfig): string {
+  return config.structure.type_paths.source ?? "Sources/";
+}
+
 // ── Auto-detection ──────────────────────────────────────────────────
 
 export type DetectedPattern = "para" | "zettelkasten" | "minimal";

@@ -38,6 +38,12 @@ import { log as structuredLog, auditRead } from "./logger.js";
 import { installCrashHandlers } from "./crash-handlers.js";
 import { filterByTrail, logTrailAccess, type TrailConfig, type NoteMetadata } from "./trails.js";
 import {
+  loadVaultConfig,
+  entityPath,
+  entityFolders,
+  type VaultConfig,
+} from "./vault-config.js";
+import {
   runMigration,
   enqueueDiscovery,
   discoveryQueueDepth,
@@ -68,6 +74,7 @@ function sanitizePath(vaultRoot: string, filePath: string): string | null {
 
 const VAULT_PATH = process.env.GROVE_VAULT ?? join(homedir(), "life");
 const PORT = Number(process.env.GROVE_SERVER_PORT ?? 8190);
+const VAULT_CONFIG: VaultConfig = loadVaultConfig(VAULT_PATH);
 
 const rateLimiter = new RateLimiter({ reads: 120, writes: 20, windowMs: 60_000 });
 const idempotencyCache = new IdempotencyCache(1000, 3_600_000);
@@ -150,20 +157,35 @@ export async function dispatchWriteNote(input: WriteNoteInput, deps: WriteNoteDe
 
 // ── Server instructions (what Claude.ai sees) ─────────────────────
 
-const INSTRUCTIONS = `Grove is your knowledge API over a personal Obsidian vault (~1000 notes).
+function formatVaultStructure(config: VaultConfig): string {
+  const lines: string[] = [];
+  const typePaths = config.structure.type_paths;
+  const entities = config.structure.entities;
+
+  // Type → path mapping (from type_paths, or fallback to entities)
+  const pairs = new Map<string, string>();
+  for (const [type, path] of Object.entries(typePaths)) pairs.set(type, path);
+  for (const [type, path] of Object.entries(entities)) {
+    if (type === "default") continue;
+    if (!pairs.has(type)) pairs.set(type, path);
+  }
+
+  const width = Math.max(0, ...[...pairs.values()].map((p) => p.length));
+  for (const [type, path] of pairs)
+    lines.push(`  ${path.padEnd(width)}  (type: ${type})`);
+
+  const defaultPath = entities.default;
+  if (defaultPath && ![...pairs.values()].includes(defaultPath))
+    lines.push(`  ${defaultPath.padEnd(width)}  (unsorted captures)`);
+
+  return lines.join("\n");
+}
+
+function buildInstructions(config: VaultConfig): string {
+  return `Grove is your knowledge API over an Obsidian vault.
 
 Vault structure:
-  Journal/YYYY/       — daily entries (type: journal)
-  Resources/Concepts/ — ideas, frameworks (type: concept)
-  Resources/People/   — people (type: person)
-  Resources/Recipes/  — recipes (type: recipe)
-  Resources/Projects/ — projects (type: project)
-  Resources/Companies/— companies (type: company)
-  Resources/Places/   — places (type: place)
-  Areas/              — ongoing life domains (Health, Finances, Business, Meal Planning)
-  Inbox/              — unsorted captures
-  Sources/            — external content archive
-  Notes/              — working scratchpad
+${formatVaultStructure(config)}
 
 Linking: Use [[wikilinks]] aggressively. Pipe for readability: [[Full Name|display text]].
 Red links (to notes that don't exist yet) are fine — they're a backlog.
@@ -173,6 +195,27 @@ Searching: Use query with lex (keyword) and vec (semantic) sub-queries. Provide 
 Writing: Use write_note with proper frontmatter (type + tags required). Use if_hash for safe updates to existing notes.
 
 URLs: Every tool response includes a url field. ALWAYS show it to the user as a clickable link — especially after writes. This is the primary way the user accesses their notes.`;
+}
+
+const INSTRUCTIONS = buildInstructions(VAULT_CONFIG);
+
+function formatWriteStructure(config: VaultConfig): string {
+  const lines: string[] = [];
+  const entities = config.structure.entities;
+  const journal = config.structure.journal_path;
+  const picks: Array<[string, string]> = [];
+  for (const t of ["concept", "person", "recipe", "project"]) {
+    if (entities[t]) picks.push([t, `${entities[t]}Name.md`]);
+  }
+  for (let i = 0; i < picks.length; i += 2) {
+    const a = picks[i][1];
+    const b = picks[i + 1]?.[1] ?? "";
+    lines.push(b ? `  ${a.padEnd(44)}${b}` : `  ${a}`);
+  }
+  if (journal) lines.push(`  ${journal}YYYY/YYYY-MM-DD.md`);
+  lines.push(`  ${entities.default}Name.md`);
+  return lines.join("\n");
+}
 
 // ── Create MCP server with all 6 tools ────────────────────────────
 
@@ -285,7 +328,7 @@ Example: searches=[{type:'lex', query:'salary'}, {type:'vec', query:'how much do
       title: "Read a note",
       description: `Read a note by path. Returns frontmatter + content + content_hash.
 
-Paths are relative to vault root: "Resources/Concepts/Taste Graph.md"
+Paths are relative to vault root: e.g. "${entityPath(VAULT_CONFIG, "concept")}Taste Graph.md"
 If not found, tries fuzzy matching by title via search.
 Use the content_hash as if_hash when updating the note.`,
       inputSchema: {
@@ -383,7 +426,7 @@ Use the content_hash as if_hash when updating the note.`,
     {
       title: "Batch read notes",
       description: `Read multiple notes at once. Accepts a glob pattern or comma-separated paths.
-Examples: "Resources/People/*.md", "Journal/2026/*.md", "path1.md,path2.md"`,
+Examples: "${entityPath(VAULT_CONFIG, "person")}*.md", "${VAULT_CONFIG.structure.journal_path ?? ""}2026/*.md", "path1.md,path2.md"`,
       inputSchema: {
         pattern: z.string().describe("Glob pattern or comma-separated file paths"),
       },
@@ -439,20 +482,16 @@ ACTIONS:
   move            — rename/relocate a note and rewrite wikilinks pointing to it
 
 STRUCTURE — common paths (but any path works):
-  Resources/Concepts/Name.md   Resources/People/Name.md
-  Resources/Recipes/Name.md    Resources/Projects/Name.md
-  Sources/Name.md              Journal/YYYY/YYYY-MM-DD.md
-  Areas/Name.md                Inbox/Name.md
-  Notes/Name.md
+${formatWriteStructure(VAULT_CONFIG)}
 
 FILENAMES — use kebab-case (hyphens, lowercase) for clean URLs:
-  Resources/Concepts/gentle-oxiclean-alternatives.md  ✓
-  Resources/Concepts/Gentle OxiClean Alternatives.md  ✗
-  Resources/People/John-Milinovich.md                 ✓
+  ${entityPath(VAULT_CONFIG, "concept")}gentle-oxiclean-alternatives.md  ✓
+  ${entityPath(VAULT_CONFIG, "concept")}Gentle OxiClean Alternatives.md  ✗
+  ${entityPath(VAULT_CONFIG, "person")}John-Milinovich.md                 ✓
 Use aliases in frontmatter for the human-readable title.
 
 Only constraint: don't put a type in another type's designated folder
-(e.g., don't put type: person in Resources/Concepts/).
+(e.g., don't put type: person in ${entityPath(VAULT_CONFIG, "concept")}).
 
 FRONTMATTER — needs type (any string) + at least one tag:
   type: concept          — any string works, not just known types
@@ -478,7 +517,7 @@ MOVE — action: "move" with move_to. Updates all exact wikilink matches across 
 After writing, present the url field from the response to the user.`,
       inputSchema: {
         action: z.enum(["write", "delete", "hard_delete", "move"]).optional().default("write").describe("What to do: write (default), delete (soft/archive), hard_delete, or move"),
-        path: z.string().describe("File path relative to vault root, kebab-case (e.g., 'Resources/Concepts/context-engineering.md')"),
+        path: z.string().describe(`File path relative to vault root, kebab-case (e.g., '${entityPath(VAULT_CONFIG, "concept")}context-engineering.md')`),
         frontmatter: z.string().optional().describe("YAML frontmatter as JSON string (required for write; ignored otherwise)"),
         content: z.string().optional().describe("Note body (markdown) (required for write; ignored otherwise)"),
         if_hash: z.string().optional().describe("Content hash from prior read — rejects if file changed since"),
@@ -501,11 +540,11 @@ After writing, present the url field from the response to the user.`,
       description: `List notes matching a pattern. Returns path, name, type, and modified date.
 Use for:
   - Check if a note exists before creating (avoid duplicates)
-  - Get all entity names + aliases: list_notes("Resources/People/*", include_aliases=true)
-  - Browse a folder: list_notes("Journal/2026/*")
-  - Find Inbox items: list_notes("Inbox/*")`,
+  - Get all entity names + aliases: list_notes("${entityPath(VAULT_CONFIG, "person")}*", include_aliases=true)
+  - Browse a folder: list_notes("${VAULT_CONFIG.structure.journal_path ?? ""}2026/*")
+  - Find unsorted items: list_notes("${VAULT_CONFIG.structure.entities.default}*")`,
       inputSchema: {
-        pattern: z.string().describe("Glob pattern (e.g., 'Resources/People/*', 'Journal/2026/*')"),
+        pattern: z.string().describe(`Glob pattern (e.g., '${entityPath(VAULT_CONFIG, "person")}*', '${VAULT_CONFIG.structure.journal_path ?? ""}2026/*')`),
         include_aliases: z.boolean().optional().default(false).describe("Include frontmatter aliases (for entity matching)"),
       },
     },
@@ -623,7 +662,7 @@ Modes:
       if (mode === "discovery") {
         const result = {
           recent_extractions: getRecentExtractions(20),
-          new_concepts_created: getNewConceptsCreated(20),
+          new_concepts_created: getNewConceptsCreated(20, entityPath(VAULT_CONFIG, "concept")),
           surprising_connections: getSurprisingConnections(10),
           queue_depth: discoveryQueueDepth(),
           last_processed_at: getLastProcessedAt(),
@@ -665,6 +704,11 @@ async function runDiagnostics() {
     stale_inbox: [],
   };
 
+  const entityPaths = entityFolders(VAULT_CONFIG);
+  const defaultFolder = VAULT_CONFIG.structure.entities.default;
+  const isEntity = (p: string) => entityPaths.some((f) => p.startsWith(f));
+  const isDefault = (p: string) => p.startsWith(defaultFolder);
+
   // Build link graph
   const incomingLinks = new Map<string, number>();
   for (const note of notes) incomingLinks.set(note.path, 0);
@@ -690,23 +734,23 @@ async function runDiagnostics() {
       }
     }
 
-    // Missing frontmatter (Resource notes only)
-    if (note.path.startsWith("Resources/") && !note.type) {
+    // Missing frontmatter (entity notes only)
+    if (isEntity(note.path) && !note.type) {
       issues.missing_frontmatter.push(note.path);
     }
   }
 
-  // Orphans: Resource notes with zero incoming links
+  // Orphans: entity notes with zero incoming links
   for (const note of notes) {
-    if (note.path.startsWith("Resources/") && (incomingLinks.get(note.path) ?? 0) === 0) {
+    if (isEntity(note.path) && (incomingLinks.get(note.path) ?? 0) === 0) {
       issues.orphans.push(note.path);
     }
   }
 
-  // Stale inbox: files older than 7 days
+  // Stale inbox: files in the default-capture folder older than 7 days
   const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
   for (const note of notes) {
-    if (note.path.startsWith("Inbox/") && new Date(note.modified_at).getTime() < sevenDaysAgo) {
+    if (isDefault(note.path) && new Date(note.modified_at).getTime() < sevenDaysAgo) {
       issues.stale_inbox.push(note.path);
     }
   }

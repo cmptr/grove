@@ -85,6 +85,33 @@ describe("buildVocabulary", () => {
     expect(nn).toBeDefined();
     expect(nn!.aliases).toEqual([]);
   });
+
+  it("scans only the entity folders declared in the passed config", () => {
+    // Add a Zettelkasten-style folder and confirm a custom config picks it up
+    mkdirSync(join(vaultDir, "Zettelkasten"), { recursive: true });
+    writeFileSync(
+      join(vaultDir, "Zettelkasten", "Attention Is All You Need.md"),
+      `---\ntype: concept\n---\nA paper.\n`,
+    );
+
+    const customConfig = {
+      structure: {
+        entities: { default: "Inbox/", concept: "Zettelkasten/" },
+        type_paths: {},
+        tag_rules: [],
+        private_paths: [],
+        archive_path: "Archives/",
+        journal_path: null,
+        journal_filename: null,
+      },
+    };
+
+    const vocab = buildVocabulary(vaultDir, customConfig);
+    // Should find the Zettelkasten note, NOT the Resources/ ones
+    expect(vocab.map((v) => v.path)).toEqual([
+      "Zettelkasten/Attention Is All You Need.md",
+    ]);
+  });
 });
 
 // ── extractEntities (with mocked Claude API) ────────────────────────
@@ -182,6 +209,46 @@ describe("extractEntities", () => {
 
     expect(result.new_notes).toHaveLength(1);
     expect(result.new_notes[0].path).toBe("Resources/Concepts/Reinforcement Learning.md");
+  });
+
+  it("rewrites new-note paths to the folder configured for the type", async () => {
+    const customConfig = {
+      structure: {
+        entities: { default: "Inbox/", concept: "Ideas/" },
+        type_paths: {},
+        tag_rules: [],
+        private_paths: [],
+        archive_path: "Archives/",
+        journal_path: null,
+        journal_filename: null,
+      },
+    };
+
+    const apiResponse: ExtractionResult = {
+      entities: [
+        { name: "Context Engineering", type: "concept", confidence: 0.95 },
+      ],
+      suggested_links: [],
+      // Claude returned the old PARA path — we should rewrite to Ideas/
+      new_notes: [
+        {
+          path: "Resources/Concepts/Context Engineering.md",
+          type: "concept",
+          tags: ["ai"],
+          content: "Prompting discipline.",
+        },
+      ],
+    };
+
+    mockClient(apiResponse);
+    const result = await extractEntities(
+      "Lots of context engineering lately.",
+      [],
+      customConfig,
+    );
+
+    expect(result.new_notes).toHaveLength(1);
+    expect(result.new_notes[0].path).toBe("Ideas/Context Engineering.md");
   });
 
   it("includes confidence scores and logs low-confidence entities", async () => {

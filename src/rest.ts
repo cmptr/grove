@@ -24,7 +24,7 @@ import {
   updateWikilinks,
 } from "./vault-ops.js";
 import { validatePath, validateNote, parseNote, serializeNote, contentHash } from "./notes-validate.js";
-import { loadVaultConfig } from "./vault-config.js";
+import { loadVaultConfig, entityFolders } from "./vault-config.js";
 import { filterByTrail, trailAllowsWrite, getTrailPublicInfo, getTrailConfig, type TrailConfig, type NoteMetadata } from "./trails.js";
 import { getStats } from "./vault-stats.js";
 import { analyzeGraph, computeDigest } from "./vault-graph.js";
@@ -814,6 +814,12 @@ export async function handleStatusHistory(
 export function handleStatusDiagnostics(): Record<string, unknown> {
   const notes = listNotes(VAULT_PATH, "*", { includeAliases: true });
 
+  const config = loadVaultConfig(VAULT_PATH);
+  const folders = entityFolders(config);
+  const defaultFolder = config.structure.entities.default;
+  const isEntityNote = (p: string) => folders.some((f) => p.startsWith(f));
+  const isDefaultNote = (p: string) => p.startsWith(defaultFolder);
+
   const issues = {
     orphans: [] as string[],
     broken_links: [] as string[],
@@ -843,22 +849,22 @@ export function handleStatusDiagnostics(): Record<string, unknown> {
       }
     }
 
-    if (note.path.startsWith("Resources/") && !note.type) {
+    if (isEntityNote(note.path) && !note.type) {
       issues.missing_frontmatter.push(note.path);
     }
   }
 
-  // Orphans: Resource notes with zero incoming links
+  // Orphans: entity notes with zero incoming links
   for (const note of notes) {
-    if (note.path.startsWith("Resources/") && (incomingLinks.get(note.path) ?? 0) === 0) {
+    if (isEntityNote(note.path) && (incomingLinks.get(note.path) ?? 0) === 0) {
       issues.orphans.push(note.path);
     }
   }
 
-  // Stale inbox: files older than 7 days
+  // Stale inbox: files in the default-capture folder older than 7 days
   const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
   for (const note of notes) {
-    if (note.path.startsWith("Inbox/") && new Date(note.modified_at).getTime() < sevenDaysAgo) {
+    if (isDefaultNote(note.path) && new Date(note.modified_at).getTime() < sevenDaysAgo) {
       issues.stale_inbox.push(note.path);
     }
   }

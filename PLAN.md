@@ -2015,9 +2015,7 @@ claude --worktree "Read PLAN.md task P9-7. Build share-a-note links per spec. Br
 
 ---
 
-### Phase 10: Vault-Agnostic Structure — MOSTLY COMPLETE (P10-3 pending)
-
-**Status:** P10-1, P10-2, P10-4, P10-5, P10-6 shipped. P10-3 (decouple discovery/server/rest/cli) still pending.
+### Phase 10: Vault-Agnostic Structure ✅ COMPLETE 2026-04-21
 
 **Goal:** Decouple Grove from PARA folder conventions so any Obsidian vault works out of the box. Foundation for multi-vault SaaS product.
 
@@ -2143,7 +2141,7 @@ Replace hard-coded `TYPE_PATHS`, `TAG_RULES` constants with config-driven lookup
 
 ---
 
-#### P10-3: Decouple discovery-extract.ts (`src/discovery-extract.ts`) ⏳ PENDING — only remaining Phase 10 task
+#### P10-3: Decouple discovery-extract.ts (`src/discovery-extract.ts`) ✅ COMPLETE 2026-04-21
 
 Replace hard-coded `Resources/*` vocabulary building with config-driven entity paths.
 
@@ -3327,7 +3325,7 @@ Decisions made during planning. Reference these when implementing — don't re-l
 **Phase 8** — Multi-vault: deferred until Phase 10 (vault-agnostic) lands
 **~~Phase 9c~~** — Annotations: REMOVED FROM SCOPE
 
-**Phase 10** ⏳ — Vault-agnostic structure: config + auto-detect + notes-validate + stats + CLI shipped (2026-04-20). **Only P10-3 remains** (decouple discovery-extract / discovery-link / discovery-bookmarks / db.ts concept-prefix query / server.ts tool descriptions / rest.ts diagnostics / cli.ts INGEST_TYPE_PATHS).
+**Phase 10** ✅ — Vault-agnostic structure: config, auto-detect, notes-validate, stats, CLI (2026-04-20) + discovery/server/rest/cli decoupling (2026-04-21)
 **Phase 11** ✅ — Note lifecycle: DELETE (soft+hard), PATCH move with wikilink update, MCP write_note actions, CLI (2026-04-20)
 **Phase 12** ✅ — Encryption at rest: per-vault key lifecycle, transparent vault-ops layer, encrypted search index, CLI passphrase UX (2026-04-20)
 **Phase 13** ✅ — Graph health: metrics + scoring + daily monitoring, auto-healing, admin REST + grove-www dashboard (2026-04-20)
