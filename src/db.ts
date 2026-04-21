@@ -626,21 +626,28 @@ export interface NewConceptCreated {
   triggered_by: string;
 }
 
-/** Get recently created concept notes from discovery results. */
-export function getNewConceptsCreated(limit = 20): NewConceptCreated[] {
+/**
+ * Get recently created concept notes from discovery results.
+ *
+ * Callers should pass `conceptPrefix` from the vault config (e.g.
+ * `entityPath(config, "concept")`). The default "Resources/Concepts/" keeps
+ * legacy behavior for PARA vaults when no prefix is provided.
+ */
+export function getNewConceptsCreated(
+  limit = 20,
+  conceptPrefix = "Resources/Concepts/",
+): NewConceptCreated[] {
   const database = getDb();
-  // Concept notes appear as target_path in discovery_results with Resources/Concepts/ prefix
-  // The source_path is what triggered the creation
   return database
     .prepare(
       `SELECT DISTINCT target_path AS path, created_at, source_path AS triggered_by
        FROM discovery_results
-       WHERE target_path LIKE 'Resources/Concepts/%'
+       WHERE target_path LIKE ?
          AND dismissed_at IS NULL
        ORDER BY created_at DESC
        LIMIT ?`,
     )
-    .all(limit) as NewConceptCreated[];
+    .all(`${conceptPrefix}%`, limit) as NewConceptCreated[];
 }
 
 export interface SurprisingConnection {
