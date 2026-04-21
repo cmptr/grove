@@ -3203,7 +3203,7 @@ No middleware. Each legacy page becomes a 301 shim to the canonical scoped URL.
 - Signed-out on legacy unscoped note path → 404 (unchanged)
 - `curl -I grove.md/@old-jm/anything` → 301 → `/@jm/anything`
 
-#### P16-4: URL builders in grove repo (`src/share.ts`, `src/rest.ts`, `src/invite.ts`, `src/email.ts`)
+#### P16-4: URL builders in grove repo (`src/share.ts`, `src/rest.ts`, `src/invite.ts`, `src/email.ts`) ✅ COMPLETE 2026-04-21 (7e62ce4)
 
 Every server-side URL builder emits canonical `@handle` URLs.
 
