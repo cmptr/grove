@@ -3317,7 +3317,7 @@ Playwright spec covering the golden path:
 
 **Context:** Current callback logic (`grove-www/src/app/api/auth/callback/route.ts:62-64`) redirects to `/home` only when a `trail=` query param exists, otherwise drops the user at `/` (marketing root). Owners completing magic-link auth therefore land on the public landing page — clearly wrong. Fixing this unblocks UX polish across several surfaces (invited trail users seeing correct context, signed-in users not re-seeing marketing copy).
 
-#### P17-1: Callback redirect by role (`grove-www/src/app/api/auth/callback/route.ts`)
+#### P17-1: Callback redirect by role (`grove-www/src/app/api/auth/callback/route.ts`) ✅ COMPLETE 2026-04-21 (grove-www 4cbb169)
 
 **Change:** After session + key creation succeed, call `GET /v1/whoami` once. Route by role: owner → `/dashboard`, member/viewer → `/home`. Honor `?redirect=<path>` from the original sign-in request when present; validate as same-origin relative path (`path.startsWith('/')` and not starting with `//`), reject external.
 
@@ -3332,7 +3332,7 @@ Remove the existing `trailId ? "/home" : "/"` branch at lines 62-64.
 - `?redirect=//evil.com` → rejected; falls back to role default
 - `?redirect=/foo?q=bar` → preserved
 
-#### P17-2: Marketing root auth-aware (`grove-www/src/app/page.tsx`)
+#### P17-2: Marketing root auth-aware (`grove-www/src/app/page.tsx`) ✅ COMPLETE 2026-04-21 (grove-www 4cbb169)
 
 **Change:** Convert `/` to a server component (or wrap existing in server shell). Read `grove_token` cookie; if valid, call `/v1/whoami`; `redirect()` to `/dashboard` (owner) or `/home` (trail user). If no session or 401, render the current marketing page unchanged.
 
@@ -3344,7 +3344,7 @@ Remove the existing `trailId ? "/home" : "/"` branch at lines 62-64.
 - Signed-out user hitting `/` → renders marketing page
 - Invalid/expired cookie → treated as signed-out, marketing renders
 
-#### P17-3: /login short-circuit (`grove-www/src/app/login/page.tsx`)
+#### P17-3: /login short-circuit (`grove-www/src/app/login/page.tsx`) ✅ COMPLETE 2026-04-21 (grove-www 4cbb169)
 
 **Change:** Before rendering the login form, server-side check for active session; if present, redirect to app home based on role. `?redirect=` override respected.
 
@@ -3355,7 +3355,7 @@ Remove the existing `trailId ? "/home" : "/"` branch at lines 62-64.
 - Signed-in user hitting `/login?redirect=/profile` → `/profile`
 - Signed-out user hitting `/login` → renders login form (unchanged)
 
-#### P17-4: End-to-end success test (`grove-www/test/post-login.e2e.spec.ts`)
+#### P17-4: End-to-end success test (`grove-www/test/post-login.e2e.spec.ts`) ✅ COMPLETE 2026-04-21 (grove-www 4cbb169)
 
 Integration test: full magic-link round-trip for both roles. Simulates clicking a magic link from email, asserts correct landing destination, no extra navigation round-trips beyond the callback.
 
@@ -3739,7 +3739,7 @@ Decisions made during planning. Reference these when implementing — don't re-l
 3. p16-3: legacy redirects ‖ handle editor (Agents D + E parallel)
 4. p16-4: e2e integration test (Agent F, solo)
 
-**Phase 17 — Post-Login Redirect** ⏳ (independent, small, ship first):
+**Phase 17 — Post-Login Redirect** ✅ (shipped 2026-04-21):
 - p17: callback + marketing root + /login short-circuit + e2e test (single agent)
 
 **Phase 18 — Mobile-Optimized Pages** ⏳ (independent, parallel with P17):
