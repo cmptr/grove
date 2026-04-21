@@ -29,24 +29,22 @@ Tell me an idea — a sentence, a half-thought, a "what if." I'll capture it as 
 **Problem:** Grove's graph has gaps — orphan notes, thin concepts, disconnected islands, unstated tensions — but nothing proactively surfaces them. Without a rhythm, gaps compound silently. Daily interactive use pulls new content in but doesn't cycle attention back to what's already in the vault.
 
 **Sketch:**
-- Daily cron (~7am local) scans graph state for **mechanical signals**: orphan notes, thin concepts (<100 words, no outbound links), islands (2+ disconnected components), stale notes with unresolved TODOs. Signals ranked by impact.
+- Daily pass scans graph state for **mechanical signals**: orphan notes, thin concepts (<100 words, no outbound links), islands (2+ disconnected components), stale notes with unresolved TODOs. Signals ranked by impact.
 - Separately, a **random-walk pass** samples N short walks through the wikilink graph; an LLM reads each walk and looks for latent patterns — implicit questions, unstated super-categories, unnamed tensions between concepts. Produces "thoughtful" prompts beyond mechanical gap-filling.
-- Top 3 prompts go into a morning **email digest**: 1–2 mechanical + 1 thoughtful. Silent-day fallback when the graph is genuinely healthy.
+- Top 3 prompts/day emitted into the **Grove Heartbeat Digest's Prompts section** (see separate shaping): 1–2 mechanical + 1 thoughtful.
 - Answer routing: narrow prompts (e.g., "Alice has no backlinks") edit the triggering note directly. Broad prompts (essay-shaped, reflective) append to today's journal entry. User chooses mode per reply.
 
 **Dependencies:**
-- Email infra (exists: `src/email.ts`, Phase B)
+- Grove Heartbeat Digest (shared delivery surface — see its own entry)
 - Graph health metrics (exists: Phase 13)
 - LLM access for walk synthesis + prompt polishing (likely Claude Haiku, same as Phase 7 discovery)
-- Shared pipeline with "Extract learnings from autonomous runs" — both emit a daily email with human-attention items (possible convergence into one unified "Grove heartbeat" digest)
 
 **Success signal:** After 30 days, graph health metrics (orphans, islands, thin concepts) trend down. Daily prompt email produces 1–2 vault edits or journal entries per week on average. Silent-day rate feels correct (neither every day nor never). Random-walk prompts surface at least one "I hadn't thought of that" insight per week.
 
 **Open questions:**
-- Unified "Grove daily heartbeat" email (growth prompts + cron learnings combined) vs. two separate streams?
 - Random-walk cost: N walks/day, which model, what's the budget?
-- Reply-to-email → vault write plumbing: forward-to-grove address, IMAP poll, or link back to dashboard-answer surface?
 - "Reject this prompt" feedback loop so heartbeat learns what's signal vs. noise — built in from the start, or add when needed?
+- How does this interact with `/garden` (daily practice skill that already surfaces similar prompts pulled interactively)? Unify the prompt source so both channels draw from the same ranked queue?
 
 ---
 
@@ -59,13 +57,13 @@ Tell me an idea — a sentence, a half-thought, a "what if." I'll capture it as 
 - Each cron run appends a terse section `## <ISO-date> <run-name>` with:
   - `Observed:` anomalies, drift, repairs made
   - `Acted:` auto-resolutions taken
-  - `Asks:` questions for the human (rolls into the daily heartbeat email)
+  - `Asks:` questions for the human — items promoted into the Grove Heartbeat Digest's Asks section
 - CLAUDE.md references `LEARNINGS.md` so agent sessions load recent findings at startup — no re-diagnosing problems an earlier run already solved.
 - Weekly pulse (`/garden:pulse` or a new `/garden:learnings`) summarizes the week's entries; patterns worth keeping graduate to vault concept notes or PLAN.md tasks.
 
 **Dependencies:**
 - Existing cron surfaces: `post-sync-discover.sh`, Phase 13 auto-healer, Phase 13 graph-health
-- Shared email digest with Growth Prompting Heartbeat (the "Asks" section is a direct input to that email)
+- Grove Heartbeat Digest (delivery surface for "Asks" — see its own entry)
 - CLAUDE.md reference pattern (standard, works today)
 
 **Success signal:** After 2 weeks, a fresh Claude Code session in `grove/` cites prior learnings without prompting (e.g., "per last week's LEARNINGS, the auto-healer already normalized broken wikilinks after move X"). Human answers the daily "Asks" section occasionally — indicating the filter surfaces genuinely ambiguous signals, not noise. File stays under a size cap (30-day inline window, older archived).
@@ -74,7 +72,35 @@ Tell me an idea — a sentence, a half-thought, a "what if." I'll capture it as 
 - Rigid template (easier to parse, drifts to boilerplate) vs. free-form bullets (higher quality, harder to summarize)?
 - Size cap: when to rotate `LEARNINGS.md` into `LEARNINGS/2026-Q2.md` archives? 30 days? 200 lines?
 - Dedup: if two crons observe the same anomaly, does it write twice, or increment a `seen: N` counter on the existing entry?
-- Single email vs. separate from growth-prompting heartbeat — same question from both shapings; resolve together.
+- When does an "Ask" time out? If I never answer, does it re-surface forever, or age out after N days?
+
+---
+
+### Grove Heartbeat Digest
+
+**Problem:** Multiple Grove subsystems want user attention on a daily cadence — growth prompts (graph-derived questions), cron "Asks" (anomalies needing a decision), future additions (weekly pulse, harvest results). Delivering each in its own email creates inbox noise and inconsistent conventions. One shared daily email + mirrored dashboard card is the single attention surface.
+
+**Sketch:**
+- Daily cron (~7am local) collects items from all producers: Growth Prompting Heartbeat (Prompts), Extract Learnings from Autonomous Runs (Asks), later additions (weekly Pulse).
+- Email structure: fixed section order (Prompts → Asks → Pulse). A section with zero items is omitted entirely. When all sections are empty → **no email is sent** (silent-day rule). After N silent days in a row, the next email includes a small "(quiet streak: Nd)" note.
+- `grove.md/dashboard` shows a "Today" card at the top that mirrors the email state exactly — same items, same structure, same silent-day behavior ("Garden is quiet today" when no items).
+- Email → dashboard link at the bottom: `[Open in Grove]`. The dashboard card holds the answer UI (inline note edit, decision buttons for Asks). Email is the notification; dashboard is the workbench.
+- One email per user per day, max. One cron job, one sender address, one template.
+
+**Dependencies:**
+- Email infra (exists: `src/email.ts`, Phase B)
+- Grove cron system (exists — 5-min sync, auto-healer, graph-health)
+- `grove.md/dashboard` (exists — Phase 4)
+- Producers publish items into a shared queue/table (new schema — see open questions)
+
+**Success signal:** User receives one email/day max, often fewer. Dashboard "Today" card and email always match. When answered (via dashboard UI), items disappear from both surfaces. Silent-day rate stabilizes around 20–40% after a few weeks (enough signal without daily obligation).
+
+**Open questions:**
+- Item storage: new `heartbeat_items` table with `{id, producer, kind: prompt|ask, payload, created_at, resolved_at}`, or leave producers as files and aggregate at send-time? (Leaning: table — resolves dedup, resolution tracking, dashboard state cleanly.)
+- Reply-to-email → answer plumbing: is email purely notification (click through to dashboard to answer), or does reply-to-address support inline answers? (Leaning: click-through only for v1; inline-reply via IMAP later if email answering becomes desired.)
+- Send time: fixed 7am local, or user-configurable? (Leaning: fixed for v1; configurable when there's a second user.)
+- Quiet-streak counter rule: reset on any non-silent day, or only after a "real" item (not Pulse-only)?
+- When does an unanswered Ask escalate or age out? (Shared with Extract Learnings open question.)
 
 ---
 
