@@ -53,7 +53,7 @@ import {
   changeUserHandle,
   updateUserBio,
 } from "./users.js";
-import { generateRequestId, log as structuredLog, auditRead, auditWrite } from "./logger.js";
+import { generateRequestId, log as structuredLog, auditRead, auditWrite, auditUserAction } from "./logger.js";
 import { installCrashHandlers } from "./crash-handlers.js";
 import { metrics, searchMetrics } from "./metrics.js";
 import { resolveTrail, loadTrails, createTrail, updateTrail, disableTrail, deleteTrail, type TrailConfig } from "./trails.js";
@@ -1633,12 +1633,19 @@ const server = createServer(async (req, res) => {
       }
 
       if (typeof parsed.handle === "string") {
+        let oldHandle: string | null = null;
         try {
-          changeUserHandle(restKey.user_id, parsed.handle);
+          oldHandle = changeUserHandle(restKey.user_id, parsed.handle);
         } catch (err) {
           res.writeHead(400, restHeaders);
           res.end(JSON.stringify({ error: (err as Error).message }));
           return;
+        }
+        if (oldHandle !== null) {
+          auditUserAction(rid, restKey.user_id, "handle_change", {
+            old_handle: oldHandle,
+            new_handle: parsed.handle,
+          });
         }
         response.handle = parsed.handle;
       }

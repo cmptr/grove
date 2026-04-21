@@ -101,3 +101,25 @@ export function auditWrite(rid: string, keyId: string, keyName: string, tool: st
     result: result as Record<string, unknown>,
   });
 }
+
+/**
+ * Audit log entry for a user-level account change (e.g. handle change).
+ * Unlike {@link auditRead}/{@link auditWrite} the actor here is a user, not
+ * an API key — so the payload is keyed on `user_id` rather than `key_id`.
+ */
+export function auditUserAction(
+  rid: string,
+  userId: string,
+  action: string,
+  details: Record<string, unknown>,
+): void {
+  structuredLog({
+    ts: new Date().toISOString(),
+    rid,
+    level: "info",
+    msg: "audit.user",
+    user_id: userId,
+    action,
+    ...details,
+  });
+}

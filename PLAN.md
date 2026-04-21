@@ -3223,7 +3223,7 @@ Every server-side URL builder emits canonical `@handle` URLs.
 - Invite email subject contains `@<handle>`
 - No server-generated URL emits the legacy unscoped shape
 
-#### P16-5: Handle editor in profile (`grove-www/src/app/profile/page.tsx`, `src/rest.ts`)
+#### P16-5: Handle editor in profile (`grove-www/src/app/profile/page.tsx`, `src/rest.ts`) ✅ COMPLETE 2026-04-21
 
 Extend the profile page with handle change UX.
 
