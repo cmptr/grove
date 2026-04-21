@@ -152,8 +152,11 @@ CREATE TABLE IF NOT EXISTS shared_links (
   note_path TEXT NOT NULL,
   created_by TEXT NOT NULL REFERENCES users(id),
   expires_at TEXT NOT NULL,
-  max_views INTEGER DEFAULT 100,
-  view_count INTEGER DEFAULT 0,
+  max_views INTEGER,
+  view_count INTEGER NOT NULL DEFAULT 0,
+  last_accessed_at TEXT,
+  revoked_by TEXT REFERENCES users(id),
+  revoked_at TEXT,
   created_at TEXT NOT NULL
 );
 
@@ -233,6 +236,51 @@ export function createSchema(): void {
   migrateSessionUserAgent(database);
   migrateApiKeySessionId(database);
   migrateUserBio(database);
+  migrateSharedLinks(database);
+}
+
+/**
+ * Ensure shared_links has the P19-1 columns (max_views nullable, last_accessed_at,
+ * revoked_by, revoked_at). SQLite can't ALTER a column's nullability in place —
+ * requires a transactional table rebuild. Idempotent via column inspection.
+ */
+function migrateSharedLinks(database: Database.Database): void {
+  const cols = database
+    .prepare("PRAGMA table_info(shared_links)")
+    .all() as { name: string }[];
+  if (cols.length === 0) return;
+
+  const names = new Set(cols.map((c) => c.name));
+  if (names.has("last_accessed_at") && names.has("revoked_by") && names.has("revoked_at")) {
+    return;
+  }
+
+  const tx = database.transaction(() => {
+    database.exec(`
+      CREATE TABLE shared_links_new (
+        id TEXT PRIMARY KEY,
+        note_path TEXT NOT NULL,
+        created_by TEXT NOT NULL REFERENCES users(id),
+        expires_at TEXT NOT NULL,
+        max_views INTEGER,
+        view_count INTEGER NOT NULL DEFAULT 0,
+        last_accessed_at TEXT,
+        revoked_by TEXT REFERENCES users(id),
+        revoked_at TEXT,
+        created_at TEXT NOT NULL
+      );
+      INSERT INTO shared_links_new (id, note_path, created_by, expires_at, max_views, view_count, created_at)
+        SELECT id, note_path, created_by, expires_at, max_views, COALESCE(view_count, 0), created_at FROM shared_links;
+      DROP TABLE shared_links;
+      ALTER TABLE shared_links_new RENAME TO shared_links;
+    `);
+  });
+  tx();
+
+  const fkCheck = database.prepare("PRAGMA foreign_key_check").all();
+  if (fkCheck.length > 0) {
+    throw new Error(`[db] shared_links migration left dangling FKs: ${JSON.stringify(fkCheck)}`);
+  }
 }
 
 /** Add bio column to users (P16-1: resident profiles). */

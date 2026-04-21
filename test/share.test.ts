@@ -7,7 +7,7 @@ const SCHEMA = `
   CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT UNIQUE, email TEXT UNIQUE, role TEXT NOT NULL DEFAULT 'member', created_at TEXT NOT NULL DEFAULT (datetime('now')), last_login_at TEXT);
   CREATE TABLE IF NOT EXISTS vaults (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id), slug TEXT NOT NULL, display_name TEXT NOT NULL, git_repo_path TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')), storage_bytes INTEGER NOT NULL DEFAULT 0, storage_quota_bytes INTEGER NOT NULL DEFAULT 104857600, UNIQUE(owner_id, slug));
   CREATE TABLE IF NOT EXISTS api_keys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), vault_id TEXT NOT NULL, name TEXT NOT NULL, hashed_token TEXT NOT NULL UNIQUE, scopes TEXT NOT NULL DEFAULT 'read,write', created_at TEXT NOT NULL DEFAULT (datetime('now')), last_used_at TEXT, expires_at TEXT, session_id TEXT);
-  CREATE TABLE IF NOT EXISTS shared_links (id TEXT PRIMARY KEY, note_path TEXT NOT NULL, created_by TEXT NOT NULL REFERENCES users(id), expires_at TEXT NOT NULL, max_views INTEGER DEFAULT 100, view_count INTEGER DEFAULT 0, created_at TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS shared_links (id TEXT PRIMARY KEY, note_path TEXT NOT NULL, created_by TEXT NOT NULL REFERENCES users(id), expires_at TEXT NOT NULL, max_views INTEGER, view_count INTEGER NOT NULL DEFAULT 0, last_accessed_at TEXT, revoked_by TEXT REFERENCES users(id), revoked_at TEXT, created_at TEXT NOT NULL);
 `;
 
 const TEST_DIR = mkdtempSync(join(tmpdir(), "grove-share-test-"));
@@ -15,7 +15,7 @@ const TEST_DB_PATH = join(TEST_DIR, "grove.db");
 process.env.GROVE_DB_PATH = TEST_DB_PATH;
 
 import { getDb, resetDb } from "../src/db.js";
-import { createShareLink, resolveShareLink, getShareLink, listShareLinks, deleteShareLink } from "../src/share.js";
+import { createShareLink, resolveShareLink, getShareLink, listShareLinks, deleteShareLink, revokeShareLink } from "../src/share.js";
 
 function seedDb() {
   const db = getDb();
@@ -132,5 +132,115 @@ describe("share-a-note links", () => {
   it("URL uses grove.md domain with canonical /@<handle>/s/<id> shape", () => {
     const result = createShareLink("test.md", "user_00000000", "https://api.grove.md");
     expect(result.url).toMatch(/^https:\/\/grove\.md\/@admin\/s\/sh_/);
+  });
+
+  it("creates a share link with max_views: null (unlimited) and stores NULL", () => {
+    const result = createShareLink(
+      "unlimited.md", "user_00000000", "https://api.grove.md",
+      { max_views: null },
+    );
+    const link = getShareLink(result.id);
+    expect(link).not.toBeNull();
+    expect(link!.max_views).toBeNull();
+  });
+
+  it("resolves an unlimited share link repeatedly without view-cap", () => {
+    const result = createShareLink(
+      "unlimited.md", "user_00000000", "https://api.grove.md",
+      { max_views: null },
+    );
+    for (let i = 0; i < 50; i++) {
+      const resolved = resolveShareLink(result.id);
+      expect(resolved).not.toBeNull();
+      expect(resolved!.max_views).toBeNull();
+    }
+  });
+
+  it("stamps last_accessed_at on each successful resolve", () => {
+    const result = createShareLink("accessed.md", "user_00000000", "https://api.grove.md");
+
+    let link = getShareLink(result.id);
+    expect(link!.last_accessed_at).toBeNull();
+
+    const resolved1 = resolveShareLink(result.id);
+    expect(resolved1!.last_accessed_at).toBeTruthy();
+    const firstStamp = resolved1!.last_accessed_at!;
+
+    // Small gap so the second stamp is strictly later than the first.
+    const sleepUntil = Date.now() + 10;
+    while (Date.now() < sleepUntil) { /* spin */ }
+
+    const resolved2 = resolveShareLink(result.id);
+    expect(resolved2!.last_accessed_at).toBeTruthy();
+    expect(new Date(resolved2!.last_accessed_at!).getTime()).toBeGreaterThanOrEqual(
+      new Date(firstStamp).getTime(),
+    );
+
+    link = getShareLink(result.id);
+    expect(link!.last_accessed_at).toBe(resolved2!.last_accessed_at);
+  });
+
+  it("revokeShareLink stamps audit columns and prevents subsequent resolve", () => {
+    const result = createShareLink("revoke-me.md", "user_00000000", "https://api.grove.md");
+
+    const revoker = "user_00000000";
+    expect(revokeShareLink(result.id, revoker)).toBe(true);
+
+    const link = getShareLink(result.id);
+    expect(link!.revoked_by).toBe(revoker);
+    expect(link!.revoked_at).toBeTruthy();
+
+    expect(resolveShareLink(result.id)).toBeNull();
+  });
+
+  it("revokeShareLink is idempotent — second call returns false", () => {
+    const result = createShareLink("revoke-twice.md", "user_00000000", "https://api.grove.md");
+    expect(revokeShareLink(result.id, "user_00000000")).toBe(true);
+    expect(revokeShareLink(result.id, "user_00000000")).toBe(false);
+  });
+
+  it("revokeShareLink returns false for non-existent id", () => {
+    expect(revokeShareLink("sh_missing", "user_00000000")).toBe(false);
+  });
+
+  it("listShareLinks filters by note_path", () => {
+    createShareLink("a.md", "user_00000000", "https://api.grove.md");
+    createShareLink("b.md", "user_00000000", "https://api.grove.md");
+    createShareLink("a.md", "user_00000000", "https://api.grove.md");
+
+    const filtered = listShareLinks("user_00000000", { note_path: "a.md" });
+    expect(filtered).toHaveLength(2);
+    expect(filtered.every((l) => l.note_path === "a.md")).toBe(true);
+  });
+
+  it("listShareLinks excludes revoked & expired by default, includes them with include_expired", () => {
+    const active = createShareLink("active.md", "user_00000000", "https://api.grove.md");
+    const revoked = createShareLink("revoked.md", "user_00000000", "https://api.grove.md");
+    revokeShareLink(revoked.id, "user_00000000");
+
+    // Manually insert an already-expired row
+    const db = getDb();
+    const pastDate = new Date(Date.now() - 1000).toISOString();
+    db.prepare(
+      "INSERT INTO shared_links (id, note_path, created_by, expires_at, max_views, view_count, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)",
+    ).run("sh_expired1", "old.md", "user_00000000", pastDate, 100, new Date().toISOString());
+
+    const activeOnly = listShareLinks("user_00000000");
+    expect(activeOnly.map((l) => l.id)).toEqual([active.id]);
+
+    const all = listShareLinks("user_00000000", { include_expired: true });
+    const ids = all.map((l) => l.id).sort();
+    expect(ids).toEqual([active.id, revoked.id, "sh_expired1"].sort());
+  });
+
+  it("listShareLinks excludes view-capped rows by default", () => {
+    const capped = createShareLink("capped.md", "user_00000000", "https://api.grove.md", { max_views: 1 });
+    resolveShareLink(capped.id);
+
+    const activeOnly = listShareLinks("user_00000000");
+    expect(activeOnly.find((l) => l.id === capped.id)).toBeUndefined();
+
+    const all = listShareLinks("user_00000000", { include_expired: true });
+    expect(all.find((l) => l.id === capped.id)).toBeDefined();
   });
 });
