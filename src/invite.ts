@@ -35,13 +35,25 @@ export async function inviteUser(
   const db = getDb();
   const normalizedEmail = email.toLowerCase().trim();
 
-  // 1. Validate trail exists
-  const trail = db.prepare("SELECT id, name FROM trails WHERE id = ?").get(trailId) as {
-    id: string; name: string;
+  // 1. Validate trail exists and resolve its owning resident (vault owner).
+  //    The handle embeds in the callback URL and invite email so the invitee
+  //    can see whose trail they've been added to before signing in.
+  //    trails.vault_id is historically set to either the vault id or its
+  //    slug — match on both so legacy rows still resolve.
+  const trail = db.prepare(
+    `SELECT t.id AS id, t.name AS name, u.username AS owner_handle, u.display_name AS owner_display_name
+       FROM trails t
+       LEFT JOIN vaults v ON v.id = t.vault_id OR v.slug = t.vault_id
+       LEFT JOIN users u ON u.id = v.owner_id
+       WHERE t.id = ?`,
+  ).get(trailId) as {
+    id: string; name: string; owner_handle: string | null; owner_display_name: string | null;
   } | undefined;
   if (!trail) {
     throw new Error(`Trail not found: ${trailId}`);
   }
+  const ownerHandle = trail.owner_handle ?? "unknown";
+  const ownerDisplayName = trail.owner_display_name ?? `@${ownerHandle}`;
 
   // 2. Find or create user
   let user = getUserByEmail(normalizedEmail);
@@ -93,11 +105,19 @@ export async function inviteUser(
     new Date(Date.now() + 15 * 60 * 1000).toISOString(),
   );
 
-  // Redirect through grove.md auth callback so the user gets a session cookie and lands on the trail
+  // Redirect through grove.md auth callback so the user gets a session cookie
+  // and lands on the trail. `resident=<handle>` carries the owning resident
+  // into grove-www so the UI can render "@<handle> · <trailName>" chrome
+  // before the session is fully established.
   const wwwBase = baseUrl.replace("api.grove.md", "grove.md");
-  const redirect = `${wwwBase}/api/auth/callback?trail=${encodeURIComponent(trailId)}`;
+  const redirect = `${wwwBase}/api/auth/callback?trail=${encodeURIComponent(trailId)}&resident=${encodeURIComponent(ownerHandle)}`;
   const verifyUrl = `${baseUrl}/auth/verify?token=${token}&email=${encodeURIComponent(normalizedEmail)}&redirect=${encodeURIComponent(redirect)}`;
-  await sendMagicLinkEmail(normalizedEmail, verifyUrl, { welcome: true, trailName: trail.name });
+  await sendMagicLinkEmail(normalizedEmail, verifyUrl, {
+    welcome: true,
+    trailName: trail.name,
+    ownerHandle,
+    ownerDisplayName,
+  });
 
   return {
     user_id: user.id,

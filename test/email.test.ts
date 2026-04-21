@@ -43,4 +43,25 @@ describe("sendMagicLinkEmail", () => {
     expect(body.subject).toBe("Sign in to Grove");
     expect(body.html).toContain("https://api.grove.md/auth/verify?token=abc");
   });
+
+  it("welcome email names the resident via @handle (P16-4)", async () => {
+    process.env.RESEND_API_KEY = "re_test_123";
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const { sendMagicLinkEmail } = await import("../src/email.js");
+
+    await sendMagicLinkEmail(
+      "invitee@example.com",
+      "https://api.grove.md/auth/verify?token=xyz",
+      { welcome: true, trailName: "Weekly Reads", ownerHandle: "jm", ownerDisplayName: "John Milinovich" },
+    );
+
+    const body = JSON.parse(mockFetch.mock.calls[0]![1].body);
+    expect(body.subject).toBe("@jm invited you to Grove");
+    expect(body.html).toContain("@jm");
+    expect(body.html).toContain("John Milinovich");
+    expect(body.html).toContain("Weekly Reads");
+    expect(body.html).toContain("Sign in");
+  });
 });
