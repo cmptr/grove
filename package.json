@@ -32,7 +32,8 @@
     "test:int": "vitest run test/integration/",
     "test:smoke": "bats test/smoke/*.bats",
     "test:eval": "tsx scripts/run-evals.ts",
-    "iterate": "tsx scripts/iterate.ts"
+    "iterate": "tsx scripts/iterate.ts",
+    "check:plan": "tsx scripts/check-plan-drift.ts"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

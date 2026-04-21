@@ -67,7 +67,7 @@ Grove is a TypeScript API server that wraps a git-tracked Obsidian vault and exp
 
 ---
 
-## Current State (as of 2026-04-12)
+## Current State (as of 2026-04-21)
 
 Snapshot for cold-start agents. Verify against live system before acting.
 
@@ -103,10 +103,19 @@ How autonomous coding agents should work on this repo. Follow this protocol exac
 3. Run `npm test` — all tests must pass
 4. Run `npx tsc --noEmit` — must compile clean
 5. Commit with descriptive message referencing the task ID
-6. Open PR with task ID in title (e.g., `P4-API-2: User list endpoint + fix last_login_at`)
-7. CI runs tests + typecheck automatically. If it fails, fix and push.
-8. After merge to main, CI deploys automatically. Verify via health check.
-9. If broken post-deploy: `git revert <merge-commit>`, open issue, re-spec task.
+6. **Mark the task complete in PLAN.md** — edit the `#### <task-id>:` heading to append ` ✅ COMPLETE YYYY-MM-DD (<short-sha>)`. This commit can be in the same PR. Post-ship fixes don't need a new marker.
+7. Open PR with task ID in title (e.g., `P4-API-2: User list endpoint + fix last_login_at`)
+8. CI runs tests + typecheck + plan-drift check. If any fails, fix and push.
+9. After merge to main, CI deploys automatically. Verify via health check.
+10. If broken post-deploy: `git revert <merge-commit>`, open issue, re-spec task.
+
+### PLAN.md Stewardship
+
+PLAN.md is the single source of truth for what's shipped. Every agent that closes a task is responsible for marking it complete in the same PR — don't leave it to a later "reconciliation" pass, because reconciliation never happens on a parallel-merge day.
+
+The `scripts/check-plan-drift.ts` CI check enforces this: if a PR's commit messages reference a task ID (`P11-1`, `P4-API-2`, `CLI-A3`, `REST-2`, `P5-TAG-1`, etc.) and PLAN.md on `main` doesn't already show that ID as `✅ COMPLETE`, then PLAN.md must be edited in the same PR. Run locally with `npm run check:plan`.
+
+Bulk reconciliation is a fallback, not a strategy. If drift is ever detected, fix both the plan and whatever broke the stewardship rule.
 
 ### File Ownership Rules
 
@@ -2006,7 +2015,9 @@ claude --worktree "Read PLAN.md task P9-7. Build share-a-note links per spec. Br
 
 ---
 
-### Phase 10: Vault-Agnostic Structure
+### Phase 10: Vault-Agnostic Structure — MOSTLY COMPLETE (P10-3 pending)
+
+**Status:** P10-1, P10-2, P10-4, P10-5, P10-6 shipped. P10-3 (decouple discovery/server/rest/cli) still pending.
 
 **Goal:** Decouple Grove from PARA folder conventions so any Obsidian vault works out of the box. Foundation for multi-vault SaaS product.
 
@@ -2021,7 +2032,7 @@ These assumptions lock Grove to one organizational philosophy. A Zettelkasten us
 
 **Approach:** Convention-based defaults with a dead-simple config file. If no config exists, auto-detect and generate one. Existing PARA vaults get auto-generated config matching current behavior — zero disruption.
 
-#### P10-1: Vault config schema (`src/vault-config.ts`)
+#### P10-1: Vault config schema (`src/vault-config.ts`) ✅ COMPLETE 2026-04-20 (2a68019)
 
 New module. Defines, loads, and validates vault structure configuration.
 
@@ -2110,7 +2121,7 @@ export function entityPath(config: VaultConfig, type: string): string;  // resol
 
 ---
 
-#### P10-2: Decouple notes-validate.ts (`src/notes-validate.ts`)
+#### P10-2: Decouple notes-validate.ts (`src/notes-validate.ts`) ✅ COMPLETE 2026-04-20 (9951378)
 
 Replace hard-coded `TYPE_PATHS`, `TAG_RULES` constants with config-driven lookups.
 
@@ -2132,7 +2143,7 @@ Replace hard-coded `TYPE_PATHS`, `TAG_RULES` constants with config-driven lookup
 
 ---
 
-#### P10-3: Decouple discovery-extract.ts (`src/discovery-extract.ts`)
+#### P10-3: Decouple discovery-extract.ts (`src/discovery-extract.ts`) ⏳ PENDING — only remaining Phase 10 task
 
 Replace hard-coded `Resources/*` vocabulary building with config-driven entity paths.
 
@@ -2161,7 +2172,7 @@ Replace hard-coded `Resources/*` vocabulary building with config-driven entity p
 
 ---
 
-#### P10-4: Decouple vault-stats.ts (`src/vault-stats.ts`)
+#### P10-4: Decouple vault-stats.ts (`src/vault-stats.ts`) ✅ COMPLETE 2026-04-20 (00243a6, merged eb5a081)
 
 Replace hard-coded PARA folder counting with config-driven stats.
 
@@ -2179,7 +2190,7 @@ Replace hard-coded PARA folder counting with config-driven stats.
 
 ---
 
-#### P10-5: Auto-detection (`src/vault-config.ts`)
+#### P10-5: Auto-detection (`src/vault-config.ts`) ✅ COMPLETE 2026-04-20 (combined into 2a68019)
 
 When no `.grove/config.yaml` exists and `loadVaultConfig()` is called, auto-detect the vault structure and generate a config.
 
@@ -2201,7 +2212,7 @@ When no `.grove/config.yaml` exists and `loadVaultConfig()` is called, auto-dete
 
 ---
 
-#### P10-6: CLI command (`src/cli.ts`)
+#### P10-6: CLI command (`src/cli.ts`) ✅ COMPLETE 2026-04-20 (c73c156, merged c9dd0bb)
 
 `grove config` — show current vault config. `grove config init` — force re-detect and regenerate.
 
@@ -2251,7 +2262,7 @@ claude --worktree "Read PLAN.md task P10-6. Add grove config CLI command per spe
 
 ---
 
-### Phase 11: Note Lifecycle Operations (DELETE/Move)
+### Phase 11: Note Lifecycle Operations (DELETE/Move) ✅ COMPLETE 2026-04-20
 
 **Goal:** Complete the CRUD surface. Notes can be created, read, updated — but not deleted or moved. This blocks vault reorganization, inbox processing, lifecycle management, and the graph health auto-healer (Phase 13).
 
@@ -2263,7 +2274,7 @@ claude --worktree "Read PLAN.md task P10-6. Add grove config CLI command per spe
 - Wikilink update on move is critical — a moved note with broken links is worse than no move
 - All operations go through the write queue. No new concurrency concerns.
 
-#### P11-1: Delete operation (`src/rest.ts`, `src/vault-ops.ts`)
+#### P11-1: Delete operation (`src/rest.ts`, `src/vault-ops.ts`) ✅ COMPLETE 2026-04-20 (602bace, 1afdfb8)
 
 **`DELETE /v1/notes/{path}`** — soft delete by default, hard delete with `?hard=true`.
 
@@ -2321,7 +2332,7 @@ DELETE /v1/notes/Inbox/old-idea.md?hard=true
 
 ---
 
-#### P11-2: Move operation (`src/rest.ts`, `src/vault-ops.ts`)
+#### P11-2: Move operation (`src/rest.ts`, `src/vault-ops.ts`) ✅ COMPLETE 2026-04-20 (602bace)
 
 **`PATCH /v1/notes/{path}`** with `move_to` field — rename/move a note.
 
@@ -2375,7 +2386,7 @@ Content-Type: application/json
 
 ---
 
-#### P11-3: MCP integration (`src/server.ts`)
+#### P11-3: MCP integration (`src/server.ts`) ✅ COMPLETE 2026-04-20 (6e30b32)
 
 Fold delete and move into existing MCP tools to stay within the 6-tool limit.
 
@@ -2408,7 +2419,7 @@ Fold delete and move into existing MCP tools to stay within the 6-tool limit.
 
 ---
 
-#### P11-4: CLI commands (`src/cli.ts`)
+#### P11-4: CLI commands (`src/cli.ts`) ✅ COMPLETE 2026-04-20 (666dd14, merged 9fbb650)
 
 ```bash
 grove delete "Inbox/old-idea.md"              # soft delete (archive)
@@ -2457,7 +2468,7 @@ claude --worktree "Read PLAN.md task P11-3. Extend write_note MCP tool with dele
 
 ---
 
-### Phase 12: Encryption at Rest
+### Phase 12: Encryption at Rest ✅ COMPLETE 2026-04-20
 
 **Goal:** Vault data is encrypted on disk and in git. Server processes plaintext only in memory. Users trust that Grove operators cannot read their data without the user's passphrase.
 
@@ -2481,7 +2492,7 @@ Search indexes encrypted at rest (SQLCipher or file-level encryption)
 - **Passphrase caching** — decrypted master key held in memory for session duration, purged on timeout or restart
 - **No recovery** by design — lost passphrase = lost access (optional recovery key for users who want it)
 
-#### P12-1: Encryption module (`src/crypto.ts`)
+#### P12-1: Encryption module (`src/crypto.ts`) ✅ COMPLETE 2026-04-20 (3b99d80, merged d9b6186)
 
 Core cryptographic operations.
 
@@ -2512,7 +2523,7 @@ export function decryptIndexToMemory(encryptedPath: string, vaultKey: Buffer): B
 
 ---
 
-#### P12-2: Vault key lifecycle (`src/db.ts`, `src/proxy.ts`)
+#### P12-2: Vault key lifecycle (`src/db.ts`, `src/proxy.ts`) ✅ COMPLETE 2026-04-20 (3b99d80, 12306be)
 
 Store encrypted vault keys in the database. Manage unlock/lock lifecycle.
 
@@ -2550,7 +2561,7 @@ POST /v1/admin/vault/change-passphrase — re-encrypt vault key with new passphr
 
 ---
 
-#### P12-3: Transparent encryption layer (`src/vault-ops.ts`)
+#### P12-3: Transparent encryption layer (`src/vault-ops.ts`) ✅ COMPLETE 2026-04-20 (ceec1a3)
 
 Intercept all file reads and writes to encrypt/decrypt transparently.
 
@@ -2574,7 +2585,7 @@ Intercept all file reads and writes to encrypt/decrypt transparently.
 
 ---
 
-#### P12-4: Search index encryption (`src/hybrid-search.ts`)
+#### P12-4: Search index encryption (`src/hybrid-search.ts`) ✅ COMPLETE 2026-04-20 (1663e6e, merged 0dad520)
 
 The QMD SQLite index and embedding vectors contain plaintext content. Encrypt them.
 
@@ -2597,7 +2608,7 @@ The QMD SQLite index and embedding vectors contain plaintext content. Encrypt th
 
 ---
 
-#### P12-5: Passphrase UX (grove-www + CLI)
+#### P12-5: Passphrase UX (grove-www + CLI) ✅ COMPLETE 2026-04-20 (c4b6337, merged 621a14b)
 
 **CLI:** `grove vault encrypt`, `grove vault unlock`, `grove vault lock`, `grove vault status`
 
@@ -2646,7 +2657,7 @@ claude --worktree "Read PLAN.md task P12-4. Encrypt search index per spec. Branc
 
 ---
 
-### Phase 13: Graph Health & Auto-Healing
+### Phase 13: Graph Health & Auto-Healing ✅ COMPLETE 2026-04-20
 
 **Goal:** The knowledge graph monitors itself and fixes non-risky issues automatically. Vault owners see a health score with trends. Problems are surfaced before they compound.
 
@@ -2663,7 +2674,7 @@ claude --worktree "Read PLAN.md task P12-4. Encrypt search index per spec. Branc
 - ⚠️ Flag (but don't auto-fix) long-orphaned notes (may be intentional stubs)
 - ❌ Never auto-merge, auto-delete, or auto-restructure
 
-#### P13-1: Health metrics schema (`src/db.ts`, `src/graph-health.ts`)
+#### P13-1: Health metrics schema (`src/db.ts`, `src/graph-health.ts`) ✅ COMPLETE 2026-04-20 (0fb20ae)
 
 New module and DB table for time-series graph health data.
 
@@ -2716,7 +2727,7 @@ interface GraphHealthMetrics {
 
 ---
 
-#### P13-2: Automated monitoring (`src/graph-health.ts`)
+#### P13-2: Automated monitoring (`src/graph-health.ts`) ✅ COMPLETE 2026-04-20 (0fb20ae, 9c24a87, abfdbb0)
 
 Cron-driven health checks that run daily (configurable) and store metrics.
 
@@ -2740,7 +2751,7 @@ Cron-driven health checks that run daily (configurable) and store metrics.
 
 ---
 
-#### P13-3: Auto-healing (`src/graph-health.ts`)
+#### P13-3: Auto-healing (`src/graph-health.ts`) ✅ COMPLETE 2026-04-20 (5d093ec, ebf2533)
 
 After computing metrics, auto-fix non-risky issues.
 
@@ -2778,7 +2789,7 @@ CREATE TABLE IF NOT EXISTS graph_health_flags (
 
 ---
 
-#### P13-4: Health dashboard (`src/proxy.ts`, grove-www)
+#### P13-4: Health dashboard (`src/proxy.ts`, grove-www) ✅ COMPLETE 2026-04-20 (a21a259, merged 4481795)
 
 **API endpoints:**
 ```
@@ -2822,7 +2833,7 @@ POST /v1/admin/health/flags/:id/resolve — dismiss a flag
 
 ---
 
-### Phase 14: Image System
+### Phase 14: Image System ✅ COMPLETE 2026-04-20
 
 **Goal:** Images are first-class knowledge graph nodes — uploadable, auto-tagged, searchable, and visually browsable. Supports recipes, travel notes, design work, diagrams, and any visual knowledge.
 
@@ -2835,7 +2846,7 @@ POST /v1/admin/health/flags/:id/resolve — dismiss a flag
 - **CDN for serving** — R2 public bucket or Cloudflare CDN for fast image loading
 - **Pinterest-style view** — masonry grid in grove.md for visual browsing
 
-#### P14-1: R2 storage setup (`src/image-store.ts`)
+#### P14-1: R2 storage setup (`src/image-store.ts`) ✅ COMPLETE 2026-04-20 (b375f12, merged c300490)
 
 Object storage client for image upload, retrieval, and deletion.
 
@@ -2861,7 +2872,7 @@ interface ImageStore {
 
 ---
 
-#### P14-2: Image upload endpoint (`src/proxy.ts`, `src/rest.ts`)
+#### P14-2: Image upload endpoint (`src/proxy.ts`, `src/rest.ts`) ✅ COMPLETE 2026-04-20 (b375f12, perf fast path 6c346d6)
 
 **`POST /v1/images`** — upload an image, auto-tag it, create a companion vault note.
 
@@ -2930,7 +2941,7 @@ tags: "ai,architecture"  (optional — supplemental to auto-detected)
 
 ---
 
-#### P14-3: Image search integration (`src/hybrid-search.ts`)
+#### P14-3: Image search integration (`src/hybrid-search.ts`) ✅ COMPLETE 2026-04-20 (88ea1ad, merged 76b3197)
 
 Image notes are already searchable by their text content (description + OCR). Ensure:
 1. Image descriptions and OCR text are embedded for vector search
@@ -2945,7 +2956,7 @@ Image notes are already searchable by their text content (description + OCR). En
 
 ---
 
-#### P14-4: Pinterest-style image view (grove-www)
+#### P14-4: Pinterest-style image view (grove-www) ✅ COMPLETE 2026-04-20 (7ca40cc, merged fa941a4)
 
 Masonry grid component in grove.md for browsing image notes visually.
 
@@ -2993,7 +3004,7 @@ Masonry grid component in grove.md for browsing image notes visually.
 
 ---
 
-### Phase 15: Profile & Settings UX
+### Phase 15: Profile & Settings UX ✅ COMPLETE 2026-04-20
 
 **Goal:** Vault owners and trail consumers can manage their identity and settings through grove.md. Owners get a visual trail scope editor. Non-owners see their profile and access.
 
@@ -3001,7 +3012,7 @@ Masonry grid component in grove.md for browsing image notes visually.
 
 **Context:** Phase 4 built the owner dashboard (keys, trails, usage, health). Phase 9 added user roles and invite flow. But the dashboard is owner-only. Trail consumers have no self-service — they can't see their profile, change their email, manage their sessions, or understand what they have access to. Owners also lack a visual trail scope editor (currently: raw JSON fields in a form).
 
-#### P15-1: User profile page (grove-www)
+#### P15-1: User profile page (grove-www) ✅ COMPLETE 2026-04-20 (shipped in non-owner merge 01b5ef2; fixes 000abcc, 2bb6a2b)
 
 **Route:** `/profile` — available to all authenticated users (owner + members + viewers).
 
@@ -3031,7 +3042,7 @@ DELETE /v1/me/sessions         — revoke all sessions except current
 
 ---
 
-#### P15-2: Visual trail scope editor (grove-www)
+#### P15-2: Visual trail scope editor (grove-www) ✅ COMPLETE 2026-04-20 (d6a105c, merged 68b5a44)
 
 Replace the raw text inputs for trail allow/deny configuration with a visual editor.
 
@@ -3316,20 +3327,9 @@ Decisions made during planning. Reference these when implementing — don't re-l
 **Phase 8** — Multi-vault: deferred until Phase 10 (vault-agnostic) lands
 **~~Phase 9c~~** — Annotations: REMOVED FROM SCOPE
 
-**Phase 10 — Vault-Agnostic Structure (independent, foundational for multi-vault SaaS):**
-- Vault config system, decouple validation/discovery/tagging from PARA, auto-detection
-
-**Phase 11 — Note Lifecycle Operations (after Phase 10):**
-- DELETE (soft+hard), move with wikilink update, CLI commands
-
-**Phase 12 — Encryption at Rest (independent):**
-- Per-vault encryption key, passphrase escrow, encrypted git/disk, in-memory-only plaintext
-
-**Phase 13 — Graph Health & Auto-Healing (after Phase 7):**
-- Deeper metrics, automated monitoring, non-risky auto-fixes, health dashboard
-
-**Phase 14 — Image System (independent):**
-- R2 storage, upload API, vision auto-tagging, image reference notes, Pinterest grid view
-
-**Phase 15 — Profile & Settings UX (after Phase 9):**
-- User profile pages, visual trail editor, non-owner dashboard views
+**Phase 10** ⏳ — Vault-agnostic structure: config + auto-detect + notes-validate + stats + CLI shipped (2026-04-20). **Only P10-3 remains** (decouple discovery-extract / discovery-link / discovery-bookmarks / db.ts concept-prefix query / server.ts tool descriptions / rest.ts diagnostics / cli.ts INGEST_TYPE_PATHS).
+**Phase 11** ✅ — Note lifecycle: DELETE (soft+hard), PATCH move with wikilink update, MCP write_note actions, CLI (2026-04-20)
+**Phase 12** ✅ — Encryption at rest: per-vault key lifecycle, transparent vault-ops layer, encrypted search index, CLI passphrase UX (2026-04-20)
+**Phase 13** ✅ — Graph health: metrics + scoring + daily monitoring, auto-healing, admin REST + grove-www dashboard (2026-04-20)
+**Phase 14** ✅ — Image system: R2 storage, upload endpoint, search integration with thumbnails, Pinterest grid view (2026-04-20)
+**Phase 15** ✅ — Profile & settings UX: /v1/me profile + sessions, visual trail scope editor with preview, non-owner dashboard (2026-04-20)

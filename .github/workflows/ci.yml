@@ -18,6 +18,20 @@ jobs:
       - run: npx tsc --noEmit
       - run: npm test
 
+  plan-drift:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run check:plan
+
   deploy:
     needs: test
     if: github.event_name == 'workflow_dispatch'
