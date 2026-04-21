@@ -1454,6 +1454,11 @@ const server = createServer(async (req, res) => {
         // Note may have been deleted — still return the share metadata
       }
 
+      // Resolve the owner's handle so legacy `/s/:id` pages can 301 to
+      // the canonical `/@<handle>/s/:id` shape (P16-3).
+      const owner = getUserById(link.created_by);
+      const ownerHandle = owner?.username ?? null;
+
       sendJson(res, 200, {
         id: link.id,
         note_path: link.note_path,
@@ -1462,6 +1467,7 @@ const server = createServer(async (req, res) => {
         expires_at: link.expires_at,
         view_count: link.view_count,
         max_views: link.max_views,
+        owner_handle: ownerHandle,
       });
       return;
     }

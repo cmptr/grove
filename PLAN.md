@@ -3184,7 +3184,7 @@ grove-www/src/app/(resident)/[atHandle]/
 - `grove.md/@nonexistent` → 404 page
 - Layout shows `@jm` in header chip as resident context
 
-#### P16-3: Legacy URL redirects (page-level, grove-www)
+#### P16-3: Legacy URL redirects (page-level, grove-www) ✅ COMPLETE 2026-04-21 (grove-www a166d99)
 
 No middleware. Each legacy page becomes a 301 shim to the canonical scoped URL.
 

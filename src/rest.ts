@@ -325,6 +325,7 @@ export interface TrailInfoResponse {
   description: string;
   note_count: number;
   created_at: string;
+  owner_handle: string | null;
 }
 
 // ── Resident profile (unauthenticated, P16-1) ────────────────────
@@ -392,11 +393,21 @@ export function handleTrailInfo(trailId: string): TrailInfoResponse | null {
     }).length;
   }
 
+  // Trails don't carry an explicit owner column — Grove is single-resident
+  // today, so the vault owner is the trail's effective owner. The legacy
+  // `/trails/:slug` page uses this to 301 to `/@<handle>/trails/:slug`
+  // (P16-3). `getVaultOwnerHandle()` returns "unknown" on empty databases;
+  // normalize that to null so the client can skip the redirect rather than
+  // hit `/@unknown`.
+  const rawOwner = getVaultOwnerHandle();
+  const ownerHandle = rawOwner === "unknown" ? null : rawOwner;
+
   return {
     name: info.name,
     description: info.description,
     note_count: noteCount,
     created_at: info.created_at,
+    owner_handle: ownerHandle,
   };
 }
 
