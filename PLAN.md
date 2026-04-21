@@ -3248,7 +3248,7 @@ Extend the profile page with handle change UX.
 - Old handle cannot be reclaimed by another user
 - Audit log shows handle_change event
 
-#### P16-6: End-to-end integration test (`grove-www/test/multi-resident.e2e.spec.ts`)
+#### P16-6: End-to-end integration test (`grove-www/test/multi-resident.e2e.spec.ts`) ✅ COMPLETE 2026-04-21 (grove-www e4cae65)
 
 Playwright spec covering the golden path:
 1. Signed-out visitor lands on `/@jm` → sees public profile card
