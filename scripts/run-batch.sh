@@ -25,7 +25,7 @@ TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 # Agents within a batch run in parallel.
 # Merge order = definition order (first defined = first merged).
 
-ALL_BATCHES="p4-prereq p4b-1 rest cli-a cli-b p5-tag p7-1 p7-2 p7-3 p9-1 p9-2 p9-3 p10-1 p10-2 p11-1 p11-2 p12-1 p12-2 p13-1 p13-2 p14-1 p14-2 p15-1 p15-2 p16-1 p16-2 p16-3 p16-4 p17 p18"
+ALL_BATCHES="p4-prereq p4b-1 rest cli-a cli-b p5-tag p7-1 p7-2 p7-3 p9-1 p9-2 p9-3 p10-1 p10-2 p11-1 p11-2 p12-1 p12-2 p13-1 p13-2 p14-1 p14-2 p15-1 p15-2 p16-1 p16-2 p16-3 p16-4 p17 p18 p19-1 p19-2 p19-3 p19-4"
 
 get_batch() {
   ENTRIES=()
@@ -165,6 +165,21 @@ get_batch() {
       ENTRIES+=("p18-mobile|Read PLAN.md tasks P18-1 through P18-5. Add viewport meta + global safety net, fix identified hot spots (usage grid, note-view max-width, code blocks, Mermaid), add Playwright mobile regression test at grove-www/test/mobile.spec.ts with npm run test:mobile script, complete full audit pass, and update README. Install @playwright/test if needed. Run npm run test:mobile to confirm it passes. THEN commit: git add -A && git reset HEAD .claude && git commit -m 'feat(P18): mobile baseline at 375px + Playwright regression'. Verify with git log -1 before exiting. DO NOT EXIT WITHOUT COMMITTING.")
       ;;
 
+    # ── Phase 19: Note Share UI ──
+    p19-1)
+      ENTRIES+=("p19-schema|Read PLAN.md task P19-1 and SPEC.md sections B1+B2. Add schema migration (table rebuild for nullable max_views + revoked_by + revoked_at + last_accessed_at columns, idempotent) and extend src/share.ts with new signatures (createShareLink accepts max_views: null, listShareLinks with note_path/include_expired filters, new revokeShareLink, resolveShareLink updates last_accessed_at) per spec. Run npm test. THEN commit: git add -A && git reset HEAD .claude && git commit -m 'feat(P19-1): share schema migration + share.ts extensions'. Verify with git log -1 before exiting. DO NOT EXIT WITHOUT COMMITTING.")
+      ;;
+    p19-2)
+      ENTRIES+=("p19-backend|Read PLAN.md task P19-2 and SPEC.md sections B3+B4+B5+B6+B7. Add GET /v1/admin/share and DELETE /v1/admin/share/:id endpoints, extend POST to accept null max_views, return 410 on expired/revoked public resolves, add rate limits (20/hr mint per owner key, 60/min public view per IP), update docs/api.md. Run npm test. THEN commit: git add -A && git reset HEAD .claude && git commit -m 'feat(P19-2): share list/revoke endpoints + rate limits + 410'. Verify with git log -1 before exiting. DO NOT EXIT WITHOUT COMMITTING.")
+      ;;
+    p19-3)
+      ENTRIES+=("p19-proxy|Read PLAN.md tasks P19-3 and P19-6 and SPEC.md sections F5+F6. In grove-www add/extend /api/admin/share proxy routes (GET+POST+DELETE) with Origin-header CSRF check on mutating routes, verify SameSite=Strict session cookie; and update (resident)/[atHandle]/s/[id]/page.tsx to render 410 expired/revoked page with noindex metadata. Run tests. THEN commit: git add -A && git reset HEAD .claude && git commit -m 'feat(P19-3,P19-6): share proxy routes + CSRF + 410 recipient page'. Verify with git log -1 before exiting. DO NOT EXIT WITHOUT COMMITTING.")
+      ENTRIES+=("p19-share-ui|Read PLAN.md task P19-4 and SPEC.md sections F1+F2+F3. In grove-www add ShareButton and ShareModal components (modal lazy-loaded via next/dynamic ssr:false), integrate into note-view.tsx (owner-only, role passed from route), presets-only form (TTL 24h/7d/30d, Max 10/100/Unlimited), responsive bottom-sheet<640px/centered>=640px, auto-copy with clipboard-fallback, full a11y (ARIA dialog, focus trap, aria-live copy announcement). Run tests including npm run test:mobile. THEN commit: git add -A && git reset HEAD .claude && git commit -m 'feat(P19-4): share button + modal on note-view'. Verify with git log -1 before exiting. DO NOT EXIT WITHOUT COMMITTING.")
+      ;;
+    p19-4)
+      ENTRIES+=("p19-dashboard|Read PLAN.md task P19-5 and SPEC.md section F4. In grove-www add /dashboard/shares page (server) + SharesTable client component: fetch include_expired=true, single table with muted expired rows, columns Note/Link/Status/Created/Expires/Views/Actions, client-side search by note_path, sort by created_at, inline-confirm revoke with optimistic update + rollback, empty-state one-liner, add Shares nav item (owner-only). Run tests including npm run test:mobile. THEN commit: git add -A && git reset HEAD .claude && git commit -m 'feat(P19-5): dashboard shares management page'. Verify with git log -1 before exiting. DO NOT EXIT WITHOUT COMMITTING.")
+      ;;
+
     *)
       return 1
       ;;
@@ -195,6 +210,7 @@ list_batches() {
   echo "  p16-1 → p16-2 → p16-3 → p16-4 (multi-resident URL, after p15)"
   echo "  p17 (post-login redirect, independent)"
   echo "  p18 (mobile-optimized pages, independent)"
+  echo "  p19-1 → p19-2 → p19-3 → p19-4 (note share UI, after p9-7 + p16 + p18)"
 }
 
 log() {

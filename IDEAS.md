@@ -15,7 +15,6 @@ Tell me an idea — a sentence, a half-thought, a "what if." I'll capture it as 
 
 ## Sparks
 
-- **Share button on note-view** — grove-www has no client-side share UI for notes today. Backend exists (P9-7 share-a-note endpoints) and CLI exists (`grove share <path>`), but there's no button in the web reader. Add to note-view: a Share control that triggers the existing share flow, lets user configure TTL + max views, displays + copies the resulting `/@<handle>/s/<id>` URL, and likely includes share management (list/revoke existing share links for that note). Closes the owner-journey loop — today the only way to share a note from the web is to switch to a terminal.
 - **Open source calibration** — decide what's the right amount of Grove to open-source (SDK? proxy? nothing? everything minus hosted infra?)
 - **Extract design system** — pull a coherent design system out of the current Grove UI so future surfaces stay visually consistent
 - **SOC2 baseline** — SSO, encryption at rest/transit, access logs, no prod access without MFA — the minimum surface to be SOC2-ready
@@ -183,3 +182,4 @@ Ideas that have been spec'd and moved into PLAN.md.
 - **Multi-resident URL structure** → Phase 16
 - **Post-login lands at grove.md/dashboard** → Phase 17
 - **Mobile-optimized pages** → Phase 18
+- **Share button on note-view** → Phase 19 (SPEC.md)

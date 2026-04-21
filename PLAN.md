@@ -3503,6 +3503,243 @@ Short note: mobile baseline is 375px; `npm run test:mobile` is the regression gu
 
 ---
 
+### Phase 19: Note Share UI
+
+**Goal:** Owner can create, copy, and manage share-a-note links from the web reader — closing the owner-journey loop (no more terminal-hop to share from the web). Adds a create-modal on the note-view and a `/dashboard/shares` management page, plus the missing list/revoke HTTP endpoints.
+
+**Prerequisites:** Phase 9 (P9-7 share-a-note backend, P9-1 adminAuth), Phase 16 (multi-resident URLs — share URLs already use `/@<handle>/s/<id>` shape), Phase 18 (mobile regression test — P19 UI passes `npm run test:mobile`).
+
+**Context:** Share-a-note backend (`POST /v1/admin/share`) + CLI (`grove share <path>`) exist. grove-www has no Share button — to share from web, the owner must switch to a terminal. `listShareLinks` / `deleteShareLink` are DB helpers only; no HTTP endpoints. Full design rationale, research, and expert-panel review in `SPEC.md` at repo root (commit `2b92471`).
+
+**Scope decisions (see SPEC.md for full rationale):**
+- Owner-only (button hidden for non-owners, not disabled — backend is already owner-only via `adminAuth`)
+- Presets only for v1 (TTL: 24h/7d/30d · Max views: 10/100/Unlimited). No Custom inputs.
+- Single dashboard list with muted expired rows (no Active/Expired tabs — premature IA at expected <20 shares/year)
+- Soft revoke with `revoked_by` + `revoked_at` audit columns
+- 410 Gone (vs 404) on expired/revoked public URLs with branded page
+- Out of scope: Web Share API native sheet, bulk revoke, share-view notifications, `last_accessed_at` beyond the column itself (no UI for "last viewed" in v1 — just the column for future use)
+
+#### P19-1: Schema migration + share.ts extensions (`src/db.ts`, `src/share.ts`)
+
+SQLite can't ALTER a column to nullable in place — table rebuild required. Migration is idempotent (schema check before rebuild).
+
+**Schema changes** (via transactional table rebuild):
+```sql
+-- shared_links_new with:
+--   max_views INTEGER       (nullable; NULL = unlimited)
+--   last_accessed_at TEXT   (new; updated on each resolveShareLink)
+--   revoked_by TEXT REFERENCES users(id)  (new; null = not revoked)
+--   revoked_at TEXT         (new; null = not revoked)
+```
+
+**`src/share.ts` extensions:**
+- `createShareLink(notePath, createdBy, baseUrl, opts?: { ttl_days?, max_views?: number | null })` — `null` means unlimited
+- `listShareLinks(userId, opts?: { note_path?, include_expired? })` — optional filters
+- `revokeShareLink(id, revokedBy): boolean` — new; sets `expires_at = now()`, `revoked_by`, `revoked_at`
+- `resolveShareLink(id)` — update: check `view_count < max_views OR max_views IS NULL`; UPDATE `last_accessed_at = now()` on successful resolve
+
+**Files:** `src/db.ts`, `src/share.ts`, `test/db-migration.test.ts` (new), `test/share.test.ts`
+**Tests:**
+- Migration idempotent (runs twice safely)
+- Existing rows (`max_views = 100`) preserved through rebuild
+- `createShareLink({ max_views: null })` stores NULL; `resolveShareLink` never view-caps
+- `last_accessed_at` updates on each resolve
+- `revokeShareLink` sets both audit columns; subsequent resolve fails
+- `listShareLinks` filters by `note_path` + `include_expired` correctly
+
+**Acceptance criteria:**
+- All four new/changed columns present and nullable as spec'd
+- Foreign-key integrity preserved (`PRAGMA foreign_key_check` passes)
+- Migration guarded by schema-version check — running twice is a no-op
+
+#### P19-2: Backend endpoints + rate limits + 410 (`src/proxy.ts`, `src/rate-limit.ts`, `docs/api.md`)
+
+**New endpoints:**
+- `GET /v1/admin/share?note_path=<path>&include_expired=<bool>&cursor=<id>&limit=<n>` — list with optional filters. Response shape:
+  ```json
+  {
+    "shares": [{ "id", "note_path", "url", "created_by", "created_at", "expires_at",
+                 "max_views", "view_count", "last_accessed_at", "revoked_by", "revoked_at",
+                 "status": "active" | "expired" | "revoked" }],
+    "next_cursor": null
+  }
+  ```
+  `status` derived server-side: `revoked` if `revoked_at` set; `expired` if past TTL or view-capped; else `active`. Pagination plumbed but not required in v1 client.
+- `DELETE /v1/admin/share/:id` — soft revoke. 404 unknown, 409 already revoked, 200 `{ id, revoked_at, revoked_by }` on success.
+
+**POST extension:** accept `max_views: null` meaning unlimited. No other behavior change.
+
+**410 Gone on public resolve:** `GET /v1/share/:id` currently 404s on expired. New behavior:
+- Share doesn't exist → 404
+- Expired (TTL or view cap) or revoked → 410 Gone (with reason in body)
+
+**Rate limits:**
+- `POST /v1/admin/share`: 20 per hour per owner key
+- Public `GET /v1/share/:id`: 60 per minute per IP (in-memory token bucket; single-process server)
+
+**Files:** `src/proxy.ts`, `src/rate-limit.ts` (new or extend existing), `test/rest.test.ts`, `test/rate-limit.test.ts`, `docs/api.md`
+**Tests:** list returns correct shape + derived `status`; filter and `include_expired` honored; DELETE soft-revokes + 409 on double-revoke; POST with `max_views: null` stored as NULL; mint beyond 20/hr → 429; view beyond 60/min → 429; expired and revoked URLs return 410
+**Acceptance criteria:**
+- All three new/changed endpoints behave per spec
+- Rate limits fire with 429 (not 500)
+- `docs/api.md` documents new routes + response shapes
+- Non-owner hitting admin endpoints gets 403 (`adminAuth` unchanged)
+
+#### P19-3: grove-www proxy routes + CSRF (grove-www repo)
+
+Thin pass-throughs from grove-www to grove. Same pattern as existing `/api/admin/*` routes.
+
+**Files:**
+- `grove-www/src/app/api/admin/share/route.ts` — `GET` (new) + `POST` (exists? extend if present, add if not)
+- `grove-www/src/app/api/admin/share/[id]/route.ts` — `DELETE` (new)
+- `grove-www/src/lib/csrf.ts` — Origin-header check helper (new, or extend if present)
+
+**CSRF on mutating routes** (`POST`, `DELETE`): reject if `Origin` header doesn't match request host. Verify session cookie uses `SameSite=Strict` (if not, fix in same PR).
+
+**Tests:** `test/api-share-proxy.spec.ts` — cross-origin DELETE rejected; same-origin DELETE succeeds; Bearer token forwarded from session; grove error bodies pass through with status preserved
+**Acceptance criteria:**
+- Mutating routes reject cross-origin requests with 403
+- Non-mutating GET works cross-origin (read-only, no CSRF concern)
+- Session cookie `SameSite=Strict` verified
+
+#### P19-4: Share button + modal on note-view (grove-www repo)
+
+**Files:**
+- `grove-www/src/components/note-view.tsx` — render owner-only Share button in header flex row (role passed as prop)
+- `grove-www/src/app/(resident)/[atHandle]/[...path]/page.tsx` — pass `role` prop (already fetched via `/v1/whoami`)
+- `grove-www/src/components/share-button.tsx` (new, client) — imports `ShareModal` via `next/dynamic({ ssr: false })`
+- `grove-www/src/components/share-modal.tsx` (new, client) — states: form → loading → success | error
+- `grove-www/test/share-modal.spec.ts` (new) — Playwright
+
+**Modal form:**
+- TTL dropdown: 24 hours / 7 days / 30 days (default 7d)
+- Max views dropdown: 10 / 100 / Unlimited (default 100, Unlimited sends `{ max_views: null }`)
+- URL preview (grayed): `Your URL: grove.md/@<handle>/s/…`
+- [Cancel] [Generate]
+
+**On Generate:**
+- Loading state, disable inputs
+- `POST /api/admin/share` with body
+- On 200: attempt `navigator.clipboard.writeText(url)`
+  - Success → success state: `✓ Link created · Copied to clipboard` with `aria-live="polite"` announcement, URL + Copy-again, `Expires in 7 days · 0/100 views`, [Done] [Manage all shares →]
+  - Clipboard reject → same success state, but `⚠ Couldn't copy — select and copy manually` with URL in readonly auto-selected input
+- On error: inline "Couldn't create link. Try again." with error details if useful
+
+**Responsive layout (one component, Tailwind classes):**
+- `<640px`: bottom sheet — `fixed inset-x-0 bottom-0 max-h-[85vh] rounded-t-2xl`
+- `≥640px`: centered — `sm:inset-auto sm:top-1/2 sm:left-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2 sm:max-w-[420px] sm:rounded-lg`
+
+**Accessibility:**
+- `role="dialog"`, `aria-modal="true"`, `aria-labelledby`
+- Focus trap while open; Esc closes; backdrop click closes
+- Focus moves to first input on open, to [Done] button on success state
+- Copy confirmation announced via `aria-live="polite"` region
+
+**Tests:** desktop + mobile viewport render; generate happy path; clipboard failure fallback renders selected input; keyboard nav (Tab cycles within modal); Esc closes; focus returns to Share button on close
+**Acceptance criteria:**
+- Button renders only when `role === 'owner'`
+- Mobile: icon-only; Desktop: icon + "Share" label
+- Modal layout correct at 375px (no horizontal scroll; passes `npm run test:mobile`)
+- `next/dynamic({ ssr: false })` — modal code not in initial page JS
+- All accessibility criteria pass axe scan
+
+#### P19-5: Dashboard shares page (grove-www repo)
+
+**Files:**
+- `grove-www/src/app/dashboard/shares/page.tsx` (new, server) — fetch + render
+- `grove-www/src/components/shares-table.tsx` (new, client) — interactive table
+- `grove-www/src/app/dashboard/layout.tsx` — add "Shares" nav item (owner-only)
+- `grove-www/test/dashboard-shares.spec.ts` (new) — Playwright
+
+**Page layout:**
+- Header: `## Shares` + active count
+- Search input (client-side filter by note_path)
+- Single table, columns: **Note** (path, links to canonical URL) · **Link** (short id + Copy) · **Status** (badge, muted for non-active) · **Created** (relative) · **Expires/Expired** (relative) · **Views** (`3/100` or `3 / ∞`) · **Actions** (Active: [Copy][Revoke]; non-active: [Copy URL] only)
+- Sort by `created_at` desc default; column-header click toggles sort
+- Empty state: one-line `No shares yet. Open any note and click Share in its header.`
+
+**Data:**
+- Server fetch `GET /v1/admin/share?include_expired=true&limit=100` on page load
+- Revoke: inline confirm → `DELETE /api/admin/share/:id` → optimistic row update → rollback + toast on failure
+- Copy: `navigator.clipboard.writeText` with 2s "Copied!" feedback (match `components/key-table.tsx` pattern)
+
+**Tests:** empty state at zero shares; search filters; sort toggles; copy; revoke optimistic update + rollback on forced failure; expired rows render muted; `npm run test:mobile` passes on `/dashboard/shares` at 375px
+**Acceptance criteria:**
+- "Shares" nav item visible only to owner
+- Empty / populated / mixed states render correctly
+- Revoke moves row to muted state immediately; persists after refresh
+- Mobile passes 375px regression test
+
+#### P19-6: Expired-link recipient page + tests (grove-www repo)
+
+**File:** `grove-www/src/app/(resident)/[atHandle]/s/[id]/page.tsx` (existing — update)
+
+On 410 response from `GET /v1/share/:id`:
+- Render "This link has expired" page
+- Distinguish subtly: expired-by-TTL ("This link expired on `<date>`") vs revoked ("This link was revoked")
+- Metadata: `title: "Expired link · Grove"`, `robots: noindex`
+- Include a link back to `/@<handle>` (public profile)
+
+On 404: existing not-found behavior (no change).
+
+**Tests:** `grove-www/test/share-expired.spec.ts` — expired URL renders expired page + returns 410 status; revoked URL renders revoked variant; 404 unchanged
+**Acceptance criteria:**
+- 410 rendered with friendly copy distinguishing expired vs revoked
+- `noindex` metadata present
+- HTTP status code is 410 (not 200)
+
+#### Phase 19 Design Decisions
+
+| Decision | Chosen | Why |
+|----------|--------|-----|
+| Scope split | Create-modal in note header + `/dashboard/shares` global page | Create is local to note; management benefits from global view |
+| Expired display | Single list with muted rows | <20 shares/year scale; tabs are premature IA |
+| UI config | Presets only for v1 | YAGNI (Panel 3); add Custom when wanted twice |
+| Revoke | Soft with `revoked_by` + `revoked_at` audit columns | Preserves history; URL 410s immediately |
+| `max_views` unlimited | `NULL` | Semantically correct; `view_count < max_views OR max_views IS NULL` |
+| Recipient UX | HTTP 410 Gone + branded page | Distinct from 404 |
+| Modal delivery | `next/dynamic({ ssr: false })` | Keeps note-view server-pure; zero JS for non-owners |
+| Audience | Owner only — button hidden (not disabled) | No dead affordances |
+| Rate limits | 20/hr mint, 60/min public view | Prevents flood + scraping |
+| CSRF | Origin-header match on mutating proxy routes | Prevents one-click revoke attack |
+| Mobile | One responsive dialog component | Don't maintain two |
+
+Full rationale in `SPEC.md` at repo root.
+
+#### Phase 19 Execution Strategy
+
+**Batch 1 (solo, foundational):**
+- **Agent A:** P19-1 — schema migration + share.ts extensions. Foundation for all downstream work.
+
+**Batch 2 (solo, after P19-1 merged):**
+- **Agent B:** P19-2 — backend endpoints, rate limits, 410 response, docs. Grove-only.
+
+**Batch 3 (2 parallel, after P19-2 merged):**
+- **Agent C:** P19-3 + P19-6 — grove-www proxy routes + expired recipient page (both small, both grove-www-only, disjoint files)
+- **Agent D:** P19-4 — Share button + modal (grove-www only, disjoint from C)
+
+**Batch 4 (solo, after Batch 3):**
+- **Agent E:** P19-5 — dashboard shares page (depends on proxy routes from C and the "Manage all shares →" link target from D)
+
+```bash
+./scripts/run-batch.sh p19-1   # agent A
+./scripts/run-batch.sh p19-2   # agent B
+./scripts/run-batch.sh p19-3   # agents C + D parallel
+./scripts/run-batch.sh p19-4   # agent E
+```
+
+#### Phase 19 Success Criteria
+
+- Owner opens a note on grove.md, clicks Share in the header, picks TTL + max-views, clicks Generate → URL auto-copied to clipboard
+- Owner navigates to `/dashboard/shares` → sees all active shares; can search by note, copy, revoke
+- Revoking a share causes its URL to return 410 with branded page immediately
+- Non-owner browsing via trail never sees the Share button nor the Shares nav item
+- MCP/CLI clients unaffected (backend API contracts unchanged; new endpoints additive)
+- `npm run test:mobile` stays green on all new pages at 375px
+- No new horizontal-scroll regressions
+
+---
+
 ## Design Decisions Log
 
 Decisions made during planning. Reference these when implementing — don't re-litigate settled questions.
@@ -3744,3 +3981,11 @@ Decisions made during planning. Reference these when implementing — don't re-l
 
 **Phase 18 — Mobile-Optimized Pages** ⏳ (independent, parallel with P17):
 - p18: viewport meta + hot-spot fixes + Playwright regression test + audit (single agent)
+
+**Phase 19 — Note Share UI** ⏳ (after P9-7, P16, P18):
+1. p19-1: schema migration + share.ts extensions (Agent A, solo, grove)
+2. p19-2: backend endpoints + rate limits + 410 + docs (Agent B, solo, grove)
+3. p19-3: proxy routes + CSRF ‖ expired recipient page (Agent C, grove-www) + share button + modal (Agent D, grove-www) — parallel
+4. p19-4: dashboard shares page (Agent E, solo, grove-www)
+
+Spec: `SPEC.md` at repo root (commit 2b92471).
