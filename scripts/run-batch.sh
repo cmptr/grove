@@ -137,29 +137,32 @@ get_batch() {
       ;;
 
     # ── Phase 16: Multi-Resident URL Structure ──
+    # IMPORTANT: every prompt ends with an explicit commit step. Agents
+    # running in --print mode have silently exited without committing
+    # before, and `git worktree remove --force` then destroyed the work.
     p16-1)
-      ENTRIES+=("p16-handle-model|Read PLAN.md task P16-1. Add handle model, handle_history table, validation, reserved-word list, /v1/residents/:handle endpoint, bio column, and migration per spec. Run npm test before committing.")
+      ENTRIES+=("p16-handle-model|Read PLAN.md task P16-1. Add handle model, handle_history table, validation, reserved-word list, /v1/residents/:handle endpoint, bio column, and migration per spec. Run npm test — all tests must pass. THEN run: git add -A && git reset HEAD .claude && git commit -m 'feat(P16-1): handle model + handle_history + /v1/residents/:handle'. Verify the commit exists with git log -1 before exiting. DO NOT EXIT WITHOUT COMMITTING.")
       ;;
     p16-2)
-      ENTRIES+=("p16-scoped-routes|Read PLAN.md task P16-2. Build scoped route scaffold at grove-www/src/app/(resident)/[atHandle]/* including public profile, scoped share viewer, scoped trail page, and auth-gated note viewer per spec. Run tests before committing.")
-      ENTRIES+=("p16-url-builders|Read PLAN.md task P16-4. Update URL builders in src/share.ts, src/rest.ts, src/invite.ts, src/email.ts to emit /@<handle>/... canonical URLs per spec. Update existing tests and docs/api.md. Run npm test before committing.")
+      ENTRIES+=("p16-scoped-routes|Read PLAN.md task P16-2. Build scoped route scaffold at grove-www/src/app/(resident)/[atHandle]/* including public profile, scoped share viewer, scoped trail page, and auth-gated note viewer per spec. Run any existing tests. THEN commit: git add -A && git reset HEAD .claude && git commit -m 'feat(P16-2): scoped /@<handle>/* routes'. Verify with git log -1 before exiting. DO NOT EXIT WITHOUT COMMITTING.")
+      ENTRIES+=("p16-url-builders|Read PLAN.md task P16-4. Update URL builders in src/share.ts, src/rest.ts, src/invite.ts, src/email.ts to emit /@<handle>/... canonical URLs per spec. Update existing tests and docs/api.md. Run npm test — all tests must pass. THEN commit: git add -A && git reset HEAD .claude && git commit -m 'feat(P16-4): URL builders emit /@<handle>/... canonical URLs'. Verify with git log -1 before exiting. DO NOT EXIT WITHOUT COMMITTING.")
       ;;
     p16-3)
-      ENTRIES+=("p16-legacy-redirects|Read PLAN.md task P16-3. Convert legacy pages (/s/[id], /trails/[slug], /[...path]) in grove-www to 301 redirect shims to /@<handle>/... canonical URLs per spec. Run tests before committing.")
-      ENTRIES+=("p16-handle-editor|Read PLAN.md task P16-5. Build handle editor in grove-www profile page + PATCH /v1/me backend support for handle + bio changes with handle_history writes and audit log per spec. Run tests before committing.")
+      ENTRIES+=("p16-legacy-redirects|Read PLAN.md task P16-3. Convert legacy pages (/s/[id], /trails/[slug], /[...path]) in grove-www to 301 redirect shims to /@<handle>/... canonical URLs per spec. Run any tests. THEN commit: git add -A && git reset HEAD .claude && git commit -m 'feat(P16-3): 301 redirects from legacy paths to /@<handle>/*'. Verify with git log -1 before exiting. DO NOT EXIT WITHOUT COMMITTING.")
+      ENTRIES+=("p16-handle-editor|Read PLAN.md task P16-5. Build handle editor in grove-www profile page + PATCH /v1/me backend support for handle + bio changes with handle_history writes and audit log per spec. Run npm test — all tests must pass. THEN commit: git add -A && git reset HEAD .claude && git commit -m 'feat(P16-5): handle + bio editor in profile; PATCH /v1/me accepts handle/bio'. Verify with git log -1 before exiting. DO NOT EXIT WITHOUT COMMITTING.")
       ;;
     p16-4)
-      ENTRIES+=("p16-e2e|Read PLAN.md task P16-6. Write end-to-end Playwright integration test at grove-www/test/multi-resident.e2e.spec.ts covering the five-step golden path per spec. Run tests before committing.")
+      ENTRIES+=("p16-e2e|Read PLAN.md task P16-6. Write end-to-end Playwright integration test at grove-www/test/multi-resident.e2e.spec.ts covering the five-step golden path per spec. Install @playwright/test if grove-www/package.json doesn't have it yet and add test:e2e script. Run the new test locally to confirm it passes. THEN commit: git add -A && git reset HEAD .claude && git commit -m 'test(P16-6): multi-resident e2e golden path'. Verify with git log -1 before exiting. DO NOT EXIT WITHOUT COMMITTING.")
       ;;
 
     # ── Phase 17: Post-Login Redirect ──
     p17)
-      ENTRIES+=("p17-redirect|Read PLAN.md tasks P17-1, P17-2, P17-3, P17-4. Fix callback redirect by role, make marketing root and /login auth-aware, and add e2e integration test per spec. All changes in grove-www. Run tests before committing.")
+      ENTRIES+=("p17-redirect|Read PLAN.md tasks P17-1, P17-2, P17-3, P17-4. Fix callback redirect by role, make marketing root and /login auth-aware, and add e2e integration test per spec. All changes in grove-www. Run any tests. THEN commit: git add -A && git reset HEAD .claude && git commit -m 'feat(P17): post-login redirect — callback + marketing + /login + e2e'. Verify with git log -1 before exiting. DO NOT EXIT WITHOUT COMMITTING.")
       ;;
 
     # ── Phase 18: Mobile-Optimized Pages ──
     p18)
-      ENTRIES+=("p18-mobile|Read PLAN.md tasks P18-1 through P18-5. Add viewport meta + global safety net, fix identified hot spots (usage grid, note-view max-width, code blocks, Mermaid), add Playwright mobile regression test at grove-www/test/mobile.spec.ts with npm run test:mobile script, complete full audit pass, and update README. Run tests before committing.")
+      ENTRIES+=("p18-mobile|Read PLAN.md tasks P18-1 through P18-5. Add viewport meta + global safety net, fix identified hot spots (usage grid, note-view max-width, code blocks, Mermaid), add Playwright mobile regression test at grove-www/test/mobile.spec.ts with npm run test:mobile script, complete full audit pass, and update README. Install @playwright/test if needed. Run npm run test:mobile to confirm it passes. THEN commit: git add -A && git reset HEAD .claude && git commit -m 'feat(P18): mobile baseline at 375px + Playwright regression'. Verify with git log -1 before exiting. DO NOT EXIT WITHOUT COMMITTING.")
       ;;
 
     *)
@@ -389,6 +392,37 @@ if [[ ${#FAILED[@]} -gt 0 ]]; then
 fi
 
 log "All agents completed successfully."
+echo ""
+
+# ── Auto-commit safety net ────────────────────────────────────────
+# Agents running in `claude --print` mode sometimes finish their work,
+# run tests, and exit WITHOUT committing. The next `git worktree remove
+# --force` would then destroy the uncommitted changes. Catch that here:
+# any worktree with uncommitted (but non-.claude) work gets auto-committed.
+
+for name in "${BRANCHES[@]}"; do
+  wt_dir="$REPO_DIR/.claude/worktrees/$name"
+  [[ -d "$wt_dir" ]] || continue
+
+  # Detect uncommitted work: staged, unstaged, or untracked (excluding .claude/)
+  tracked_dirty=false
+  if ! git -C "$wt_dir" diff --quiet || ! git -C "$wt_dir" diff --cached --quiet; then
+    tracked_dirty=true
+  fi
+  untracked=$(git -C "$wt_dir" ls-files --others --exclude-standard 2>/dev/null | grep -vE "^\.claude/" || true)
+
+  if $tracked_dirty || [[ -n "$untracked" ]]; then
+    log "⚠ Worktree $name has uncommitted changes — auto-committing (agent exited without committing)"
+    git -C "$wt_dir" add -A
+    # Unstage .claude/ (claude CLI writes session artifacts there)
+    git -C "$wt_dir" reset -q HEAD -- .claude 2>/dev/null || true
+    git -C "$wt_dir" commit -m "auto: run-batch safety-net commit for $name
+
+Agent completed without committing. Files staged automatically.
+Review the contents before relying on this commit." || log "  (nothing committable after excluding .claude/)"
+  fi
+done
+
 echo ""
 
 # ── Merge branches ────────────────────────────────────────────────
