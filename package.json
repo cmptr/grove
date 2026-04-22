@@ -35,7 +35,8 @@
     "iterate": "tsx scripts/iterate.ts",
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm test",
-    "check:plan": "tsx scripts/check-plan-drift.ts"
+    "check:plan": "tsx scripts/check-plan-drift.ts",
+    "ship": "tsx scripts/ship.ts"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
