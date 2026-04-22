@@ -1795,19 +1795,402 @@ grove.md/api/auth/callback         api.grove.md
 
 ---
 
-### Phase 8: Multi-Vault (deferred)
+### Phase 8: Multi-Vault Onboarding
 
-**Goal:** Add additional vaults (e.g., work vault `~/canva/`) as separate queryable indexes.
+**Goal:** Multi-vault support on a single Grove server (`api.grove.md`) so you can onboard other humans. Some users will have access to multiple vaults simultaneously (personal + team + consulting-client). Ship vehicle: one Grove deployment, many vaults — not federation across deployments.
 
-**Prerequisites:** Phases 5-7 stable.
+**Prerequisites:** Phases 9 (multi-user), 10 (vault-agnostic), 12 (encryption at rest), 13 (graph health), 16 (multi-resident URL) complete. All shipped.
 
-This was originally Phase 2 but deferred — trails and discovery are higher impact than multi-vault support. The work vault is read-only and auto-generated; it can wait.
+**Status:** Spec'd 2026-04-21 via `/mili:spec` with 3-panel expert critique. Phased ship: Phase A (plumbing, 1 week) → Phase B (collaboration, 1 week).
 
-- [ ] **P8-1: Multi-vault config** — per-vault QMD indexes, config.json
-- [ ] **P8-2: Per-vault keys** — keys scoped to vault_id
-- [ ] **P8-3: Read-only vaults** — config flag, 403 on writes
-- [ ] **P8-4: Cross-vault search** — merged RRF, tagged results
-- [ ] **P8-5: Graph isolation** — per-vault backlinks, opt-in cross-vault traversal
+**Scope boundary:**
+- IN: multi-vault routing on one server, per-vault keys, vault switcher UI, admin provisioning CLI, invite existing/new users, per-vault observability substrate
+- OUT of v1: federation across Grove deployments, self-serve vault creation, cross-vault search, cross-vault wikilinks, storage quotas, billing policy, member-removal UX, vault deletion
+
+#### Locked design decisions
+
+| # | Decision | Rationale |
+|---|---|---|
+| 1 | **Topology:** multi-vault on one server | Matches onboarding goal. Keeps ops at one deployment. |
+| 2 | **Process model:** one `grove-server` + `grove-discovery` per vault; `grove-proxy` routes by `vault_id` | Single-process refactor touches ~40 files; per-process is 3–4× cheaper to ship. Hits a ceiling at ~25 vaults / 6GB RSS (see §Revisit triggers). |
+| 3 | **MCP connectors:** one OAuth endpoint URL per vault (`api.grove.md/v/<slug>/mcp`) | Zero hallucination risk, per-vault token-leak blast radius, Claude.ai native support. Multi-connector friction is low because vault joins are infrequent. |
+| 4 | **URL shape:** `/@<handle>/<vault-slug>/...` for all grove-www content AND chrome routes; `api.grove.md/v/<slug>/...` for REST | No session-stored "current vault" — kills stale-primary-vault bugs. Shareable URLs stay unambiguous. |
+| 5 | **Handle scope:** globally unique (GitHub model) | Simplest schema. One `@jm` across all vaults. |
+| 6 | **Membership:** new `vault_members(user_id, vault_id, role)` table; drop `users.role` (separate release) | Per-vault roles — owner of vault A, viewer of vault B. Matches GitHub orgs. |
+| 7 | **Provisioning:** admin-only `grove vault create` CLI for v1 | Lowest-stakes launch. Self-serve is v2. |
+| 8 | **Spawn mode:** immediate (CLI regenerates `ecosystem.config.cjs`, `sudo pm2 reload`, health-checks) | Clear errors at creation. No cold-start latency on first request. |
+| 9 | **Cross-vault search:** deferred — switcher is the UX | Power users open separate Claude conversations if needed. |
+| 10 | **Switcher UX:** header dropdown in grove-www; `Cmd+Shift+V` shortcut; rendered always but disabled at n=1 | Conditional rendering that appears mid-session is jarring (UX panel). Cmd+Shift+K collides with Slack/Linear. |
+| 11 | **Landing:** most-recently-used vault on login, persisted in `vault_members.last_active_at` | Sticky per Notion/Slack. Deep-links override via URL. |
+| 12 | **Invite flow:** existing users get new `vault_members` row + new vault-scoped key; no re-auth | Matches "add vault to dashboard" UX. Email includes deep-link to vault + "Add to Claude.ai" button. |
+| 13 | **Key migration:** backfill existing keys to `personal` vault | Zero user-visible change on migration day. Claude.ai connectors keep working via legacy route fallback. |
+| 14 | **Legacy routes:** `api.grove.md/mcp` and `/v1/*` (no slug) → fall through to personal for 90 days, then 410 Gone with migration hint | Soft grace. Hard cutoff forces migration. No permanent silent fallback. |
+| 15 | **Observability first:** per-vault structured logs + `vault_usage_daily` from day one. Rate limiting + billing layer on top later. | Measurement substrate in place so policy can retrofit without backfill. |
+
+#### Security invariants
+
+1. **Backend processes independently authenticate every request** against their pinned `vault_id`. Proxy routing is defense-in-depth, not the sole control — closes SSRF/bypass holes.
+2. **Vault slug mismatch returns 403, not 404.** We don't leak which vault slugs exist.
+3. **Per-vault encryption keys** (P12) unchanged. No cross-vault key reuse.
+4. **Audit log entries carry `vault_id`** so per-vault audit is possible.
+5. **API keys are bound to vault at mint time**. Rotation creates a new key; old one is revoked. No rebinding.
+
+#### Phase 8A — Plumbing (1 week)
+
+Everything required to serve a second vault. No collaboration UX yet.
+
+##### P8-A1: Schema migration (`src/db.ts`, `src/migrations/`)
+
+Add multi-vault schema with up + down migrations. Transactional; entire migration in one `BEGIN ... COMMIT`.
+
+**Up:**
+- `vaults`: add columns `slug TEXT UNIQUE NOT NULL`, `git_path TEXT NOT NULL`, `server_port INTEGER UNIQUE NOT NULL`, `discovery_port INTEGER UNIQUE NOT NULL`. Backfill existing row with `slug='personal', git_path='/root/life', server_port=8190, discovery_port=8091`.
+- `discovery_queue`, `discovery_results`, `graph_health`, `graph_health_flags`: add `vault_id INTEGER NOT NULL REFERENCES vaults(id)` with default 1. Backfill, then drop default in a follow-up pass.
+- `api_keys`, `trails`: already have `vault_id` — `UPDATE ... SET vault_id=1 WHERE vault_id IS NULL`, add `NOT NULL` constraint.
+- `vault_members`: new table (see P8-B1 schema).
+- **New** `vault_usage_daily(vault_id, date, requests, writes, embed_tokens, search_queries, bytes_stored, PRIMARY KEY (vault_id, date))` for observability.
+
+**Files:** `src/db.ts`, `src/migrations/YYYY-MM-DD-multi-vault.up.sql`, `src/migrations/YYYY-MM-DD-multi-vault.down.sql`
+**Tests:** `test/db-migration.test.ts` — runs migration on pre-populated fixture DB; asserts all rows preserved + schema changed + FK integrity passes. Runs down-migration after and asserts schema reverts + data preserved. Idempotent.
+**Acceptance:**
+- All new columns exist with correct types/constraints
+- `SELECT COUNT(*) FROM vaults WHERE slug IS NULL` returns 0 post-backfill
+- `PRAGMA foreign_key_check` passes
+- Running migration twice is a no-op (schema version check)
+- Down-migration restores pre-migration schema + data
+
+##### P8-A2: Vault router in grove-proxy (`src/proxy.ts`, `src/vault-router.ts`)
+
+New routing middleware.
+
+**Behavior:**
+1. On startup: `SELECT id, slug, server_port FROM vaults` → in-memory map (slug → port, id → slug).
+2. On SIGHUP: reload map from DB.
+3. For each authenticated request:
+   - Hash bearer token → look up `api_keys.hashed_token` → get `vault_id`
+   - Extract URL slug (`/v/<slug>/...`) if present
+   - **If URL slug ≠ token's `vault_id.slug`: 403** (don't leak existence)
+   - If URL has no slug (legacy `/v1/*`, `/mcp`): use token's vault_id, log deprecation, include `Sunset: <date>` header
+   - Forward to `http://127.0.0.1:<server_port>/<path>` with `X-Grove-Vault-Id: <id>` added
+
+**Failure contract:**
+- Backend unreachable (ECONNREFUSED) → 503 + `Retry-After: 5`
+- Backend slow (>10s) → 504
+- Auth key not found → 401
+- Vault slug mismatch → 403
+- No silent fallbacks. Max 1 retry at 500ms on transient failures.
+
+**Files:** `src/vault-router.ts` (new), `src/proxy.ts` (wire middleware)
+**Tests:** `test/vault-router.test.ts` — slug match, slug mismatch returns 403, legacy no-slug falls through to token's vault with sunset header, backend unreachable returns 503 + Retry-After, retry at 500ms then fail, reload on SIGHUP picks up new vault row
+**Acceptance:**
+- Slug mismatch returns 403 (not 404)
+- Legacy `/v1/*` and `/mcp` fall through to personal vault with `Sunset` header
+- Backend down returns 503 with `Retry-After: 5`
+- No retry storms under load (1 retry max)
+
+##### P8-A3: Backend self-authentication (`src/server.ts`)
+
+Per security panel: `grove-server` must independently validate every token. Proxy routing is defense-in-depth, not the sole control.
+
+**Behavior:**
+1. On startup: read `GROVE_VAULT_ID` env var (set by PM2 from generated `ecosystem.config.cjs`).
+2. On each request with an `Authorization` header: hash token → look up `api_keys.vault_id` → compare to `GROVE_VAULT_ID`. Mismatch → 403.
+3. Applies to ALL endpoints (MCP + REST). No exceptions.
+
+Closes SSRF/localhost-bypass holes: even if the proxy is bypassed, the backend refuses cross-vault tokens.
+
+**Files:** `src/server.ts` (add middleware), `src/auth.ts` (extract validation helper if needed)
+**Tests:** `test/backend-auth.test.ts` — localhost curl with token from another vault returns 403; token from correct vault passes; no-auth returns 401 (existing); write endpoints enforce the same check
+**Acceptance:**
+- Backend rejects cross-vault tokens with 403 even when request bypasses the proxy
+- All MCP tool invocations and REST endpoints enforce the check uniformly
+
+##### P8-A4: Vault provisioning CLI (`src/cli.ts`, `src/vault-provision.ts`)
+
+`grove vault create <slug> --owner <email> [--git-path <path>]`:
+
+1. Validate slug matches `/^[a-z][a-z0-9-]{1,29}$/`
+2. Refuse reserved slugs: `admin`, `api`, `mcp`, `v`, `v1`, `oauth`, `health`, `metrics`, `login`, `dashboard`, `profile`
+3. `SELECT 1 FROM vaults WHERE slug = ?` — refuse if exists
+4. Allocate unused `server_port` starting at 8191, `discovery_port` starting at 8091. Race-safe via `INSERT ... ON CONFLICT FAIL`
+5. Create `/root/vaults/<slug>/` with `git init` + write default `.grove/config.yaml`
+6. Create `/root/qmd/<slug>/` with empty QMD index (call `qmd init` subprocess)
+7. `INSERT INTO vaults`; find-or-create `users` row by email; `INSERT INTO vault_members` (owner role); mint API key with `vault_id=<new-id>`
+8. **Regenerate `ecosystem.config.cjs` from `SELECT * FROM vaults`** (don't append — Caleb's point)
+9. `sudo pm2 reload ecosystem.config.cjs`
+10. Poll `http://127.0.0.1:<server_port>/health` until 200 (timeout 60s)
+11. Print: slug, ports, git_path, owner's API key (once), connector URL, sample invite email body
+
+**Files:** `src/vault-provision.ts` (new), `src/ecosystem-gen.ts` (new), `src/cli.ts` (new `vault create` subcommand), `docs/cli.md` (document)
+**Tests:** `test/vault-provision.test.ts` — slug validation, reserved-word rejection, duplicate-slug refusal, port allocation race-safe, ecosystem.config.cjs regenerated deterministically; `test/ecosystem-gen.test.ts` — output matches snapshot for known `vaults` table state
+**Acceptance:**
+- Creating a vault takes <60s and returns a working connector URL
+- Invalid slugs rejected with clear error
+- Ports never collide across concurrent invocations
+- `ecosystem.config.cjs` is fully regenerated, not appended — diffs stay small
+
+##### P8-A5: Graceful shutdown + write queue drain (`src/server.ts`, `src/write-queue.ts`)
+
+Per panels: `pm2 reload` currently cuts in-flight writes.
+
+**Behavior:**
+1. SIGTERM handler: stop accepting new requests, drain the write queue (await all in-flight), fsync git state (`git status` completes cleanly), exit 0.
+2. SIGUSR2 (PM2 graceful reload): same behavior.
+3. In-flight MCP session: close gracefully with connection-closing message.
+
+**Files:** `src/server.ts` (signal handlers), `src/write-queue.ts` (drain method)
+**Tests:** `test/graceful-shutdown.test.ts` — SIGTERM mid-write drains queue; SIGUSR2 same; no data loss observed via post-shutdown git log
+**Acceptance:**
+- `pm2 reload` drains write queue cleanly; no orphaned writes
+- In-flight MCP clients reconnect and re-auth gracefully
+- Git repo is in a clean state post-shutdown (`git status` exits 0)
+
+##### P8-A6: Per-vault observability (`src/logger.ts`, `src/proxy.ts`, `src/vault-usage.ts`, embed server)
+
+Measurement substrate for future rate limiting + billing.
+
+**Structured log fields (every request):**
+- `vault_id`, `vault_slug`, `user_id`, `api_key_id`
+- `route`, `method`, `status`, `duration_ms`
+- For tool calls: `tool_name`, `tool_args_size`, `tool_result_size`
+- For embed calls: `embed_tokens_in`, `embed_latency_ms`, `embed_upstream_status`
+
+**Daily usage counter:** grove-proxy bumps per-request counters in-memory; flushes to `vault_usage_daily` via upsert every 60s. Batched to avoid hot write path.
+
+**Embed server header propagation:** grove-server passes `X-Grove-Vault-Id` upstream to the embed server so shared-embed logs include vault context. Lets us see "top N chatty vaults over last hour" before we need to act on it.
+
+**Files:** `src/logger.ts` (extend log schema), `src/proxy.ts` (counter hooks), `src/vault-usage.ts` (new — in-memory bump + flush), `src/embed-node.ts` (propagate header), `docs/api.md` (new observability spec)
+**Tests:** `test/vault-usage.test.ts` — counter increments on request, flushes every 60s, upsert correctly accumulates, zero rows when inactive; integration — request produces log line with vault_id + vault_slug; embed call carries X-Grove-Vault-Id
+**Acceptance:**
+- Every log line includes `vault_id` + `vault_slug`
+- `vault_usage_daily` has rows for both vaults after activity in each
+- Embed server logs show vault_id in `X-Grove-Vault-Id` header
+- Flush overhead <1ms per minute per vault (measured)
+
+##### P8-A7: End-to-end isolation test (manual script + CI)
+
+Test script that provisions a second vault and verifies isolation.
+
+**Steps:**
+1. Run migration
+2. `curl https://api.grove.md/v/personal/health` → 200
+3. `grove vault create test --owner test@example.com`
+4. Verify new `grove-server-test` + `grove-discovery-test` in pm2
+5. `curl https://api.grove.md/v/test/health` → 200
+6. Auth as owner of `test`, write a note, search for it
+7. Auth as owner of `personal`, search for the test vault's note — expect 404 (isolation verified)
+8. `kill -TERM <grove-server-test-pid>` → verify clean shutdown in logs
+9. Verify `vault_usage_daily` has rows for both `personal` and `test` after step 6
+10. Verify structured logs include `vault_id` + `vault_slug` on every line
+
+**Files:** `test/smoke/08-multi-vault.smoke.sh` (new), `docs/operations.md` (document how to run)
+**Acceptance:** all 10 steps pass end-to-end in CI or manual run
+
+#### Phase 8B — Collaboration (1 week, after 8A stabilizes)
+
+##### P8-B1: vault_members table + migration (`src/db.ts`, `src/migrations/`)
+
+Create the table (declared in 8A but populated here):
+```sql
+CREATE TABLE vault_members (
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  vault_id INTEGER NOT NULL REFERENCES vaults(id),
+  role TEXT NOT NULL CHECK(role IN ('owner', 'member', 'viewer')),
+  joined_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_active_at TEXT,
+  PRIMARY KEY (user_id, vault_id)
+);
+CREATE INDEX idx_vault_members_user ON vault_members(user_id);
+CREATE INDEX idx_vault_members_vault ON vault_members(vault_id);
+```
+
+Backfill: insert one row per existing user with their old `users.role` for the `personal` vault. Drop `users.role` in a **separate release** after 8B ships.
+
+**Files:** `src/db.ts`, `src/migrations/YYYY-MM-DD-vault-members.up.sql`, `src/migrations/YYYY-MM-DD-vault-members.down.sql`
+**Tests:** `test/vault-members.test.ts` — backfill covers all users with correct role; insert/update/delete patterns; constraints enforced
+**Acceptance:**
+- Every existing user has a `vault_members` row for `personal` with their pre-migration role
+- Role CHECK constraint rejects unknown values
+- Rollback restores `users.role` from backfill
+
+##### P8-B2: Invite flow for multi-vault (`src/invite.ts`, `src/cli.ts`, `src/email.ts`)
+
+`grove invite <email> --vault <slug> [--role viewer|member]`:
+
+- Require `--vault` parameter (was implicit personal before)
+- If user exists by email: find-or-create `vault_members` row; mint new vault-scoped key; send email
+- If user doesn't exist: create `users` row + `vault_members` row + magic link
+- Email template (both existing and new users):
+  - Primary CTA: "Open `<vault-name>` in Grove" → `https://grove.md/@<owner>/<vault-slug>/`
+  - Secondary CTA: "Add to Claude.ai" → deep-link prefilled with `https://api.grove.md/v/<slug>/mcp`
+
+**Files:** `src/invite.ts` (extend), `src/cli.ts` (add `--vault`), `src/email.ts` (new template), `docs/cli.md`
+**Tests:** `test/invite.test.ts` — invite new user creates all three rows; invite existing user only adds vault_members + key; email body includes both CTAs with correct URLs
+**Acceptance:**
+- Inviting an existing user takes 1 API call; they see the new vault in switcher without re-auth
+- Inviting a new user creates account + membership + key atomically
+- Email deep-link into Claude.ai is a real working URL (tested against Claude.ai's connector-add flow)
+
+##### P8-B3: grove-www route restructure (`src/app/...`)
+
+Move every authenticated grove-www route under `/@<handle>/<vault-slug>/`:
+
+- `/dashboard` → `/@<handle>/<vault>/dashboard`
+- `/profile` → `/@<handle>/<vault>/profile`
+- `/images` → `/@<handle>/<vault>/images`
+- Existing `/@<handle>/<vault>/<path>` content routes unchanged
+
+Bare `/dashboard`, `/profile`, etc. → 301 redirect to user's most-recently-used vault. First-time users land on their earliest-joined vault.
+
+`last_active_at` updates: on every authenticated request, `UPDATE vault_members SET last_active_at = now() WHERE user_id = ? AND vault_id = ?` (throttled to once per minute via in-memory debounce).
+
+**Files:** `grove-www/src/app/@[atHandle]/[vaultSlug]/dashboard/page.tsx` (new — moved), `grove-www/src/app/@[atHandle]/[vaultSlug]/profile/page.tsx` (moved), etc.; `grove-www/src/app/dashboard/page.tsx` (redirect shim); `grove-www/src/app/api/me/route.ts` (return `vaults: [...]`); `grove-www/test/route-structure.spec.ts`
+**Tests:** `grove-www/test/route-structure.spec.ts` — signed-in redirect to most-recently-used; first-timer to earliest-joined; deep-link to specific vault overrides stickiness; bare-route redirects preserve query string
+**Acceptance:**
+- Every dashboard/profile/images page has vault in the URL
+- Redirects from legacy bare routes preserve query params
+- `last_active_at` updates on navigation but not more than once per minute
+
+##### P8-B4: Vault switcher component (`grove-www/src/components/vault-switcher.tsx`)
+
+Header dropdown in `grove-www/src/components/header.tsx`:
+
+- Label: `@<handle> / <vault-slug>` (monospace)
+- Click reveals dropdown listing all vaults the user has access to (from `GET /api/me` which now returns `vaults: [{slug, name, role}]`)
+- Selecting a vault navigates to `/@<handle>/<slug>/dashboard` (or current page equivalent)
+- Keyboard shortcut: `Cmd+Shift+V` (avoid Slack/Linear collision on Cmd+Shift+K)
+- Rendered **always** when user has vault access, disabled at n=1
+- ARIA: `role="combobox"`, `aria-expanded`, `aria-label="Switch vault"`. Current vault announced in `aria-live="polite"` region on change.
+
+**Files:** `grove-www/src/components/vault-switcher.tsx` (new), `grove-www/src/components/header.tsx` (integrate), `grove-www/test/vault-switcher.spec.ts`
+**Tests:** Playwright — switcher renders always, disabled at n=1, enabled at n≥2, keyboard shortcut opens, selection navigates correctly, ARIA attributes present, aria-live announces vault change, assistive tech compatible (JAWS/NVDA simulated via role queries)
+**Acceptance:**
+- Switching vaults takes <500ms
+- Scroll position preserved across switch
+- Screen readers announce the new vault context
+
+##### P8-B5: Connected-vaults settings page (`grove-www/src/app/...`)
+
+`/@<handle>/<vault>/settings/vaults`:
+
+- Lists all vaults the user has access to (from `GET /api/me`)
+- Shows role, join date, last-active date per vault
+- For owners: "Manage members" link (v2 scope — placeholder in v1)
+- For all vaults: "Add to Claude.ai" button (idempotent connector-add deep-link)
+
+**Files:** `grove-www/src/app/@[atHandle]/[vaultSlug]/settings/vaults/page.tsx` (new), `grove-www/src/components/connected-vaults-list.tsx` (new), `grove-www/test/connected-vaults.spec.ts`
+**Tests:** renders all user's vaults with correct roles; "Add to Claude.ai" deep-link has correct URL; owner sees member-management placeholder
+**Acceptance:**
+- Every vault the user belongs to appears in the list
+- Role badge reflects the user's role in that vault (owner/member/viewer)
+- "Add to Claude.ai" button produces a working deep-link
+
+#### Migration plan (Phase 8A cutover)
+
+##### Day 0: pre-migration
+- Backup `~/.grove/grove.db`, `/root/life/.git`, QMD index
+- Snapshot EBS volume
+- Deploy schema-migration code to canary; verify no existing traffic breaks
+
+##### Day 1: schema migration
+- Take 30-second write-freeze (queue drains, pauses). Reads continue.
+- Run migration in single transaction (see P8-A1)
+- Resume writes
+- Verify: every row has non-null vault_id; every user has a vault_members row
+
+##### Day 2–5: router + Phase A end-to-end
+- Deploy grove-proxy with router code
+- Legacy `/mcp` and `/v1/*` requests fall through to personal (sunset header set)
+- Verify existing Claude.ai connector still works
+- Run `grove vault create test --owner test@example.com`; verify isolation (P8-A7)
+
+##### Day 6: cutover announcement
+- Email existing Claude.ai connector users: "Your Grove URL is now `api.grove.md/v/personal/mcp`. Legacy URL works until <date+90d>."
+- Update Claude.ai connector setup docs
+
+##### Day 6+30: monitor legacy traffic
+- Log every hit to legacy routes with the key that hit them. Should drop to zero as users migrate.
+
+##### Day 6+90: legacy sunset
+- Remove legacy fallback. `/mcp` and `/v1/*` without slug return 410 Gone with migration hint.
+
+##### Rollback
+- Stop grove-proxy
+- Run `src/migrations/YYYY-MM-DD-multi-vault.down.sql`
+- Restart grove-proxy with pre-migration binary
+- Restore from EBS snapshot if down.sql fails
+- Rollback window: 24h. After that, data drift (new `vault_members` rows, `last_active_at` updates) requires manual recovery.
+
+#### Revisit triggers (when to deprecate process-per-vault)
+
+Re-evaluate single-process-with-`vault_id`-keyed-Map refactor when any of:
+- Total vault count exceeds 25 on a single machine
+- Total RSS exceeds 6GB at idle
+- File handle usage exceeds 50% of ulimit
+- Spawning a new vault takes >60s (pm2 reload cascade)
+- Cold-start latency complaints from real users
+
+#### Phase 8 Execution Strategy
+
+**Batch p8a-1 (2 parallel agents, after Batch 0):**
+- Agent A: P8-A1 — schema migration + `vault_members` + `vault_usage_daily` (touches `src/db.ts`, migrations)
+- Agent B: P8-A5 — graceful shutdown (independent of A, touches `src/server.ts`, `src/write-queue.ts`)
+
+**Batch p8a-2 (3 parallel agents, after p8a-1):**
+- Agent C: P8-A2 — vault router in grove-proxy (depends on schema)
+- Agent D: P8-A3 — backend self-auth in grove-server (depends on schema)
+- Agent E: P8-A6 — per-vault observability (touches logger + proxy + embed client)
+
+**Batch p8a-3 (solo, after p8a-2):**
+- Agent F: P8-A4 — `grove vault create` CLI (depends on all of A2/A3/A5/A6 shipping)
+
+**Batch p8a-4 (solo, after p8a-3):**
+- Agent G: P8-A7 — end-to-end isolation test script
+
+**— Phase 8A exit: deploy to prod under legacy fallback. Verify 2nd vault works before proceeding. —**
+
+**Batch p8b-1 (2 parallel agents):**
+- Agent H: P8-B1 — vault_members table + backfill
+- Agent I: P8-B2 — invite flow extensions (depends on H but works on different files)
+
+**Batch p8b-2 (2 parallel agents, after p8b-1):**
+- Agent J: P8-B3 — grove-www route restructure
+- Agent K: P8-B4 — vault switcher component
+
+**Batch p8b-3 (solo, after p8b-2):**
+- Agent L: P8-B5 — connected-vaults settings page
+
+#### Phase 8 Success Criteria
+
+**Phase 8A is done when:**
+- A second vault on the same server responds to HTTP + MCP with zero cross-vault data leakage
+- Creating a vault takes <60s and returns a working connector URL + owner key
+- Existing Claude.ai connector continues working unchanged (legacy fallback)
+- `pm2 reload` drains in-flight writes cleanly; no data loss observed
+- Backend rejects requests whose token vault_id doesn't match pinned vault (verified with localhost bypass)
+- Every log line includes `vault_id` + `vault_slug`; `vault_usage_daily` populates per vault
+
+**Phase 8B is done when:**
+- Inviting a new user delivers them into their vault in 1 click from the email
+- Inviting an existing Grove user adds vault to switcher without re-auth
+- Switching vaults via dropdown takes <500ms, preserves scroll position
+- Same user can be owner of one vault and viewer of another with correct role-scoped UX
+
+**Ship is complete when:**
+- John onboards at least 2 other people, each to at least one vault
+- Legacy `/mcp` and `/v1/*` routes are sunset (Day+90)
+- No support incidents from first 2 onboarded users in their first week
+- Per-vault metrics visible on `/dashboard/admin/metrics` (or CLI equivalent)
+
+#### What's explicitly NOT in Phase 8
+
+- **Single-process vault-id-keyed Map** — rejected for v1. 40-file refactor; benefit emerges at 30+ vaults; we're not there. Revisit at triggers above.
+- **Subdomain-per-vault** — wildcard TLS + DNS automation is infra tax for no user benefit at this scale.
+- **Cross-vault search fan-out** — switcher is the UX. Power users open separate Claude conversations.
+- **vault-as-tool-parameter** on MCP tools — hallucination risk outweighs connector-list convenience.
+- **Federation across Grove deployments** — not a goal. Users connect to separate deployments via separate Claude.ai connectors.
+- **Rate limiting and billing** as policies — observability substrate is in P8-A6; policy layers on top when real signal emerges.
+- **Self-serve vault creation, vault deletion, member removal UX** — deferred to v2 once admin-provisioning proves out.
 
 ---
 
@@ -3509,9 +3892,9 @@ Short note: mobile baseline is 375px; `npm run test:mobile` is the regression gu
 
 **Prerequisites:** Phase 9 (P9-7 share-a-note backend, P9-1 adminAuth), Phase 16 (multi-resident URLs — share URLs already use `/@<handle>/s/<id>` shape), Phase 18 (mobile regression test — P19 UI passes `npm run test:mobile`).
 
-**Context:** Share-a-note backend (`POST /v1/admin/share`) + CLI (`grove share <path>`) exist. grove-www has no Share button — to share from web, the owner must switch to a terminal. `listShareLinks` / `deleteShareLink` are DB helpers only; no HTTP endpoints. Full design rationale, research, and expert-panel review in `SPEC.md` at repo root (commit `2b92471`).
+**Context:** Share-a-note backend (`POST /v1/admin/share`) + CLI (`grove share <path>`) exist. grove-www has no Share button — to share from web, the owner must switch to a terminal. `listShareLinks` / `deleteShareLink` are DB helpers only; no HTTP endpoints.
 
-**Scope decisions (see SPEC.md for full rationale):**
+**Scope decisions:**
 - Owner-only (button hidden for non-owners, not disabled — backend is already owner-only via `adminAuth`)
 - Presets only for v1 (TTL: 24h/7d/30d · Max views: 10/100/Unlimited). No Custom inputs.
 - Single dashboard list with muted expired rows (no Active/Expired tabs — premature IA at expected <20 shares/year)
@@ -3519,7 +3902,7 @@ Short note: mobile baseline is 375px; `npm run test:mobile` is the regression gu
 - 410 Gone (vs 404) on expired/revoked public URLs with branded page
 - Out of scope: Web Share API native sheet, bulk revoke, share-view notifications, `last_accessed_at` beyond the column itself (no UI for "last viewed" in v1 — just the column for future use)
 
-#### P19-1: Schema migration + share.ts extensions (`src/db.ts`, `src/share.ts`)
+#### P19-1: Schema migration + share.ts extensions (`src/db.ts`, `src/share.ts`) ✅ COMPLETE 2026-04-21 (abf963c)
 
 SQLite can't ALTER a column to nullable in place — table rebuild required. Migration is idempotent (schema check before rebuild).
 
@@ -3552,7 +3935,7 @@ SQLite can't ALTER a column to nullable in place — table rebuild required. Mig
 - Foreign-key integrity preserved (`PRAGMA foreign_key_check` passes)
 - Migration guarded by schema-version check — running twice is a no-op
 
-#### P19-2: Backend endpoints + rate limits + 410 (`src/proxy.ts`, `src/rate-limit.ts`, `docs/api.md`)
+#### P19-2: Backend endpoints + rate limits + 410 (`src/proxy.ts`, `src/rate-limit.ts`, `docs/api.md`) ✅ COMPLETE 2026-04-21 (b2a0564)
 
 **New endpoints:**
 - `GET /v1/admin/share?note_path=<path>&include_expired=<bool>&cursor=<id>&limit=<n>` — list with optional filters. Response shape:
@@ -3585,7 +3968,7 @@ SQLite can't ALTER a column to nullable in place — table rebuild required. Mig
 - `docs/api.md` documents new routes + response shapes
 - Non-owner hitting admin endpoints gets 403 (`adminAuth` unchanged)
 
-#### P19-3: grove-www proxy routes + CSRF (grove-www repo)
+#### P19-3: grove-www proxy routes + CSRF (grove-www repo) ✅ COMPLETE 2026-04-21 (multi-commit)
 
 Thin pass-throughs from grove-www to grove. Same pattern as existing `/api/admin/*` routes.
 
@@ -3602,7 +3985,7 @@ Thin pass-throughs from grove-www to grove. Same pattern as existing `/api/admin
 - Non-mutating GET works cross-origin (read-only, no CSRF concern)
 - Session cookie `SameSite=Strict` verified
 
-#### P19-4: Share button + modal on note-view (grove-www repo)
+#### P19-4: Share button + modal on note-view (grove-www repo) ✅ COMPLETE 2026-04-21 (multi-commit)
 
 **Files:**
 - `grove-www/src/components/note-view.tsx` — render owner-only Share button in header flex row (role passed as prop)
@@ -3643,7 +4026,7 @@ Thin pass-throughs from grove-www to grove. Same pattern as existing `/api/admin
 - `next/dynamic({ ssr: false })` — modal code not in initial page JS
 - All accessibility criteria pass axe scan
 
-#### P19-5: Dashboard shares page (grove-www repo)
+#### P19-5: Dashboard shares page (grove-www repo) ✅ COMPLETE 2026-04-21 (multi-commit)
 
 **Files:**
 - `grove-www/src/app/dashboard/shares/page.tsx` (new, server) — fetch + render
@@ -3670,7 +4053,7 @@ Thin pass-throughs from grove-www to grove. Same pattern as existing `/api/admin
 - Revoke moves row to muted state immediately; persists after refresh
 - Mobile passes 375px regression test
 
-#### P19-6: Expired-link recipient page + tests (grove-www repo)
+#### P19-6: Expired-link recipient page + tests (grove-www repo) ✅ COMPLETE 2026-04-21 (multi-commit)
 
 **File:** `grove-www/src/app/(resident)/[atHandle]/s/[id]/page.tsx` (existing — update)
 
@@ -3960,8 +4343,18 @@ Decisions made during planning. Reference these when implementing — don't re-l
 - P4-10 (graph explorer), P4-11 (lifecycle dashboard) — deferred, spec when dashboard proves useful
 
 **~~Phase 6~~** — LLM judge: REMOVED FROM SCOPE
-**Phase 8** — Multi-vault: deferred until Phase 10 (vault-agnostic) lands
 **~~Phase 9c~~** — Annotations: REMOVED FROM SCOPE
+
+**Phase 8 — Multi-Vault Onboarding** ⏳ (spec'd 2026-04-21, next to ship):
+- Phase 8A (plumbing, 1 week): schema + router + backend-auth + CLI + shutdown + observability + e2e
+  - p8a-1: schema + graceful shutdown (2 agents parallel)
+  - p8a-2: router + backend-auth + observability (3 agents parallel)
+  - p8a-3: `grove vault create` CLI (solo)
+  - p8a-4: e2e isolation test (solo)
+- Phase 8B (collaboration, 1 week): members + invite + frontend + switcher
+  - p8b-1: vault_members + invite flow (2 agents parallel)
+  - p8b-2: route restructure + switcher component (2 agents parallel)
+  - p8b-3: connected-vaults settings page (solo)
 
 **Phase 10** ✅ — Vault-agnostic structure: config, auto-detect, notes-validate, stats, CLI (2026-04-20) + discovery/server/rest/cli decoupling (2026-04-21)
 **Phase 11** ✅ — Note lifecycle: DELETE (soft+hard), PATCH move with wikilink update, MCP write_note actions, CLI (2026-04-20)
@@ -3970,11 +4363,7 @@ Decisions made during planning. Reference these when implementing — don't re-l
 **Phase 14** ✅ — Image system: R2 storage, upload endpoint, search integration with thumbnails, Pinterest grid view (2026-04-20)
 **Phase 15** ✅ — Profile & settings UX: /v1/me profile + sessions, visual trail scope editor with preview, non-owner dashboard (2026-04-20)
 
-**Phase 16 — Multi-Resident URL Structure** ⏳ (after Phase 15 stable):
-1. p16-1: handle model + validation + /v1/residents/:handle (Agent A, solo)
-2. p16-2: scoped routes (grove-www) ‖ URL builders (grove) (Agents B + C parallel)
-3. p16-3: legacy redirects ‖ handle editor (Agents D + E parallel)
-4. p16-4: e2e integration test (Agent F, solo)
+**Phase 16 — Multi-Resident URL Structure** ✅ (shipped 2026-04-21): handle model, `/v1/residents/:handle`, scoped `/@<handle>/*` routes, URL builders, legacy redirects, handle editor, e2e test.
 
 **Phase 17 — Post-Login Redirect** ✅ (shipped 2026-04-21):
 - p17: callback + marketing root + /login short-circuit + e2e test (single agent)
@@ -3982,10 +4371,4 @@ Decisions made during planning. Reference these when implementing — don't re-l
 **Phase 18 — Mobile-Optimized Pages** ✅ (shipped 2026-04-21):
 - p18: viewport meta + hot-spot fixes + Playwright regression test + audit (single agent)
 
-**Phase 19 — Note Share UI** ✅ (shipped 2026-04-21, commits abf963c b2a0564 + grove-www 97c3a8a f11da33 804bb40):
-1. p19-1 ✅: schema migration + share.ts extensions
-2. p19-2 ✅: backend endpoints + rate limits + 410 + docs
-3. p19-3 ✅: proxy routes + CSRF, expired recipient page, share button + modal (2 parallel agents)
-4. p19-4 ✅: dashboard shares page
-
-Spec: `SPEC.md` at repo root (commit 2b92471). Tests: grove 899 passing, grove-www vitest 60 passing, Playwright mobile+modal+dashboard 25 passing.
+**Phase 19 — Note Share UI** ✅ (shipped 2026-04-21, commits abf963c b2a0564 + grove-www 97c3a8a f11da33 804bb40): schema migration, list/revoke endpoints, 410 recipient page, CSRF-guarded proxy routes, Share button + modal, dashboard shares page. Tests: grove 899 passing, grove-www vitest 60 passing, Playwright mobile+modal+dashboard 25 passing.
