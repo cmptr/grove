@@ -46,10 +46,22 @@ function escapeRe(s: string): string {
   return s.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
 }
 
-let planOnBaseCache: string | null = null;
-function planOnBase(): string {
-  if (planOnBaseCache === null) planOnBaseCache = sh(`git show ${base}:PLAN.md`);
-  return planOnBaseCache;
+let planSourcesCache: string | null = null;
+function planSources(): string {
+  // Check both PLAN.md (active work) AND docs/phases-shipped.md (archive).
+  // Completed tasks live in the archive once their phase ships; a post-ship
+  // fix shouldn't trip the drift check just because the completion marker
+  // moved files.
+  if (planSourcesCache === null) {
+    let src = sh(`git show ${base}:PLAN.md`);
+    try {
+      src += "\n" + sh(`git show ${base}:docs/phases-shipped.md`);
+    } catch {
+      // Archive may not exist yet on older base branches.
+    }
+    planSourcesCache = src;
+  }
+  return planSourcesCache;
 }
 
 function alreadyComplete(id: string): boolean {
@@ -58,7 +70,7 @@ function alreadyComplete(id: string): boolean {
   const heading = new RegExp(`^####\\s+${e}:.*✅\\s*COMPLETE`, "mi");
   // Legacy checkbox format:  - [x] **PX-Y: ...
   const checkbox = new RegExp(`^\\s*-\\s*\\[x\\]\\s*\\*\\*${e}[:\\s]`, "mi");
-  const src = planOnBase();
+  const src = planSources();
   return heading.test(src) || checkbox.test(src);
 }
 
