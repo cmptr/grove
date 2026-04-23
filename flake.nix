@@ -41,12 +41,28 @@
           nativeBuildInputs = nativeBuildDeps ++ [ pkgs.makeWrapper ];
 
           # Force native compile of better-sqlite3 against nixpkgs libs;
-          # the upstream prebuilt binaries target a different glibc.
+          # the upstream prebuilt binaries target a different V8 ABI and
+          # throw ERR_DLOPEN_FAILED (undefined V8 symbols) at runtime.
           npmFlags = [ "--ignore-scripts=false" ];
+          npmRebuildFlags = [ "--build-from-source" ];
           env.npm_config_build_from_source = "true";
+          env.npm_config_nodedir = "${nodejs}";
 
           # No "build" script in package.json — runtime uses tsx directly.
           dontNpmBuild = true;
+
+          # Explicit node-gyp rebuild against the runtime nodejs headers,
+          # belt-and-suspenders over npmRebuildFlags.
+          preInstall = ''
+            pushd node_modules/better-sqlite3
+            rm -rf build prebuilds
+            ${nodejs}/bin/node ${pkgs.node-gyp}/lib/node_modules/node-gyp/bin/node-gyp.js \
+              rebuild \
+              --release \
+              --nodedir=${nodejs} \
+              --python=${pkgs.python3}/bin/python3
+            popd
+          '';
 
           # tsx lives in devDependencies and is required at runtime (wrappers
           # launch node with --import tsx). Default prune strips devDeps, which
