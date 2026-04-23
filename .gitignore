@@ -8,3 +8,6 @@ dist/
 .claude/settings.local.json
 .agents/
 failures/
+.direnv/
+result
+result-*
