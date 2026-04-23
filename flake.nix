@@ -48,6 +48,11 @@
           # No "build" script in package.json — runtime uses tsx directly.
           dontNpmBuild = true;
 
+          # tsx lives in devDependencies and is required at runtime (wrappers
+          # launch node with --import tsx). Default prune strips devDeps, which
+          # breaks the wrappers with ERR_MODULE_NOT_FOUND for 'tsx'.
+          dontNpmPrune = true;
+
           installPhase = ''
             runHook preInstall
 
@@ -57,27 +62,27 @@
 
             # Wrap each entrypoint so they launch with a controlled PATH.
             makeWrapper ${nodejs}/bin/node $out/bin/grove-server \
-              --add-flags "--import tsx $out/lib/grove/src/server.ts" \
+              --add-flags "--import file://$out/lib/grove/node_modules/tsx/dist/loader.mjs $out/lib/grove/src/server.ts" \
               --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps} \
               --set NODE_PATH $out/lib/grove/node_modules
 
             makeWrapper ${nodejs}/bin/node $out/bin/grove-proxy \
-              --add-flags "--import tsx $out/lib/grove/src/proxy.ts" \
+              --add-flags "--import file://$out/lib/grove/node_modules/tsx/dist/loader.mjs $out/lib/grove/src/proxy.ts" \
               --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps} \
               --set NODE_PATH $out/lib/grove/node_modules
 
             makeWrapper ${nodejs}/bin/node $out/bin/grove-discovery \
-              --add-flags "--import tsx $out/lib/grove/src/discovery-worker.ts" \
+              --add-flags "--import file://$out/lib/grove/node_modules/tsx/dist/loader.mjs $out/lib/grove/src/discovery-worker.ts" \
               --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps} \
               --set NODE_PATH $out/lib/grove/node_modules
 
             makeWrapper ${nodejs}/bin/node $out/bin/grove-keys \
-              --add-flags "--import tsx $out/lib/grove/src/keys.ts" \
+              --add-flags "--import file://$out/lib/grove/node_modules/tsx/dist/loader.mjs $out/lib/grove/src/keys.ts" \
               --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps} \
               --set NODE_PATH $out/lib/grove/node_modules
 
             makeWrapper ${nodejs}/bin/node $out/bin/grove \
-              --add-flags "--import tsx $out/lib/grove/src/cli.ts" \
+              --add-flags "--import file://$out/lib/grove/node_modules/tsx/dist/loader.mjs $out/lib/grove/src/cli.ts" \
               --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps} \
               --set NODE_PATH $out/lib/grove/node_modules
 
