@@ -22,14 +22,22 @@ in
     };
 
     vault = lib.mkOption {
-      type = lib.types.path;
-      description = "Path to the Obsidian vault (GROVE_VAULT).";
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = ''
+        Path to the Obsidian vault (GROVE_VAULT). If null, the value must be
+        provided via environmentFile instead.
+      '';
       example = "/home/atb/life";
     };
 
     adminEmail = lib.mkOption {
-      type = lib.types.str;
-      description = "Admin email (GROVE_ADMIN_EMAIL).";
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = ''
+        Admin email (GROVE_ADMIN_EMAIL). If null, the value must be provided
+        via environmentFile instead.
+      '';
     };
 
     port = lib.mkOption {
@@ -82,13 +90,13 @@ in
 
   config = lib.mkIf cfg.enable (
     let
-      baseEnv = {
-        GROVE_VAULT = toString cfg.vault;
+      baseEnv = lib.filterAttrs (_: v: v != null) ({
+        GROVE_VAULT = if cfg.vault != null then toString cfg.vault else null;
         GROVE_ADMIN_EMAIL = cfg.adminEmail;
         GROVE_PORT = toString cfg.port;
         GROVE_SERVER_PORT = toString cfg.serverPort;
         QMD_PORT = toString cfg.qmdPort;
-      } // cfg.extraEnvironment;
+      } // cfg.extraEnvironment);
 
       pathPkgs = [ cfg.package pkgs.git ] ++ lib.optional (cfg.qmdPackage != null) cfg.qmdPackage;
 
